@@ -1,0 +1,14 @@
+# Kerdoos runtime config EXAMPLE. Copy to kerdoos.yaml (gitignored) and fill.
+# The SMTP relay is an external deployment detail: host/credentials are read
+# from the environment, NEVER committed. The digest CLI dry-run does not send
+# mail and needs none of this.
+smtp:
+  host_env: KERDOOS_SMTP_HOST      # name of the env var holding the relay host
+  port: 587
+  from: "kerdoos@example.invalid"
+  user_env: KERDOOS_SMTP_USER      # env var name for the SMTP user
+  password_env: KERDOOS_SMTP_PASSWORD   # env var name for the SMTP password
+
+digest:
+  to: "you@example.invalid"
+  subject_prefix: "[Kerdoos] "

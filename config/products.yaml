@@ -1,0 +1,7 @@
+# Watched products. Each source pairs a site with a concrete product URL.
+# source_id is derived (product_id:site), never authored here.
+products:
+  - id: aw3225qf
+    sources:
+      - site: kabum
+        url: https://www.kabum.com.br/produto/534732/monitor-gamer-alienware-32-4k-qd-oled-aw3225qf

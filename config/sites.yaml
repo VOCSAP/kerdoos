@@ -1,0 +1,11 @@
+# Site registry -- fetcher tier + parser locator per site.
+# Parser specs are pure locators; value interpretation lives in the adapter.
+sites:
+  kabum:
+    fetcher: http
+    parser:
+      kind: statejson
+      # Kabum is a Next.js app; prices live in __NEXT_DATA__ as REAIS floats.
+      pix: props.pageProps.product.prices.priceWithDiscount   # PIX / a-vista
+      card: props.pageProps.product.prices.price              # card / base
+      availability: props.pageProps.product.available         # bool -> In/OutOfStock

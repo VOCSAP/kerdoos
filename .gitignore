@@ -1,0 +1,29 @@
+# Secrets / runtime config -- only the .example is committed
+config/kerdoos.yaml
+.env
+*.env
+
+# Local state stores
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Phase-implementation docs / dev-local config -- not part of the public slice
+CLAUDE.md
+DESIGN.md
+RECON.md
+
+# Spike scratch tooling (kept in a separate spike repo/conversation)
+recon.py
+render_probe.py
+sb_probe.py
+spike/
