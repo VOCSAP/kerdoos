@@ -27,3 +27,6 @@ recon.py
 render_probe.py
 sb_probe.py
 spike/
+
+# Agent tooling local state (peers, memory, hooks) -- operator decision, not versioned
+.claude/
