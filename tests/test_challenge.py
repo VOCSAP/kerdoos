@@ -20,6 +20,9 @@ _HEALTHY_FIXTURES = (
     "amazon_b0cvqgsrz9.html",
     "mercadolivre_mlb35045987.html",
     "terabyte_40561.html",
+    # Pichau: Cloudflare-fronted but its only residual is the PASSIVE
+    # challenge-platform script (already excluded); no active marker survives.
+    "pichau_cv700b.html",
 )
 
 

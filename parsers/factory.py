@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from .adapters.amazon import AmazonParser
 from .adapters.mercadolivre import MercadoLivreParser
+from .adapters.pichau import PichauParser
 from .adapters.statejson import StateJsonParser
 from .adapters.terabyte import TerabyteParser
 from .ports import Parser, ParserSpec
 
 KIND_WHITELIST: frozenset[str] = frozenset(
     {"jsonld", "statejson", "css", "regex", "amazon", "mercadolivre",
-     "terabyte"})
+     "terabyte", "pichau"})
 
 
 class UnknownParserKindError(ValueError):
@@ -35,6 +36,8 @@ def build_parser(spec: ParserSpec) -> Parser:
         return MercadoLivreParser(spec)
     if spec.kind == "terabyte":
         return TerabyteParser(spec)
+    if spec.kind == "pichau":
+        return PichauParser(spec)
     raise NotImplementedError(
         f"parser kind {spec.kind!r} is whitelisted but not wired at the MVP"
     )

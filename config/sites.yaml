@@ -34,3 +34,10 @@ sites:
       # Terabyte server-renders both prices; a dedicated adapter reads #valVista
       # (pix) and #valParc (card), skipping duplicated empty/placeholder ids.
       kind: terabyte
+  pichau:
+    fetcher: tls               # SSR flight in the doc; curl_cffi tier (CF passive)
+    parser:
+      # Pichau server-renders the pichau_prices RSC flight; a dedicated adapter
+      # reads .avista (pix) and .final_price (card), ignoring the JSON-LD (whose
+      # price is the card price) and base_price (reference).
+      kind: pichau
