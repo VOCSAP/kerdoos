@@ -16,3 +16,15 @@ sites:
       # Amazon's two-tier accordion is parsed by a dedicated adapter; the DOM
       # anchors are fixed in the adapter, so no locators are authored here.
       kind: amazon
+  mercadolivre:
+    fetcher: browser           # SPA; price injected by client-side JS (Chromium)
+    # Render-critical CDN: ML is a full client-side render whose price and
+    # availability are injected by the http2.mlstatic.com JS bundle. Allow it as
+    # a browser SUB-RESOURCE only (never a navigation target) so the page can
+    # hydrate; without it the micro-landing shell never becomes the product page.
+    subresource_domains:
+      - http2.mlstatic.com
+    parser:
+      # MercadoLivre's rendered DOM is parsed by a dedicated adapter (single
+      # price from <meta itemprop="price"> under id="price"); no locators here.
+      kind: mercadolivre

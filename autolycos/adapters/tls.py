@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from urllib.parse import urljoin
 
+from ..challenge import looks_challenged
 from ..errors import FetchError
 from ..ports import FetchResult
 from ..safety import ValidatedTarget, validate_target
@@ -34,11 +35,6 @@ MAX_REDIRECTS = 5
 TIMEOUT = 30
 _CHUNK = 64 * 1024
 _IMPERSONATE = "chrome"
-
-_CHALLENGE_MARKERS = (
-    "captcha", "challenge-platform", "cf-chl", "just a moment",
-    "attention required", "px-captcha", "datadome", "_incapsula_",
-)
 
 # Only a language hint; the UA and fingerprint headers come from impersonation
 # and must not be overridden (that would defeat the whole point of this tier).
@@ -58,15 +54,6 @@ def _resolve_entry(target: ValidatedTarget) -> str:
     """
     addr = f"[{target.ip}]" if ":" in target.ip else target.ip
     return f"{target.host}:{target.port}:{addr}"
-
-
-def _looks_challenged(status: int, text: str) -> bool:
-    if status in (403, 429, 503):
-        return True
-    low = text.lower()
-    if any(m in low for m in _CHALLENGE_MARKERS):
-        return True
-    return len(text) < 1500
 
 
 def _load_curl():  # type: ignore[no-untyped-def]
@@ -136,6 +123,6 @@ class TlsFetcher:
                 html=text,
                 status=status,
                 method=self.method_name,
-                challenged=_looks_challenged(status, text),
+                challenged=looks_challenged(status, text),
             )
         raise FetchError(f"too many redirects (> {MAX_REDIRECTS})")

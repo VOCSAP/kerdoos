@@ -24,6 +24,7 @@ from urllib.parse import urljoin
 import requests
 from requests.adapters import HTTPAdapter
 
+from ..challenge import looks_challenged
 from ..errors import FetchError
 from ..ports import FetchResult
 from ..safety import validate_target
@@ -32,11 +33,6 @@ MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 MAX_REDIRECTS = 5
 TIMEOUT = 25
 _CHUNK = 64 * 1024
-
-_CHALLENGE_MARKERS = (
-    "captcha", "challenge-platform", "cf-chl", "just a moment",
-    "attention required", "px-captcha", "datadome", "_incapsula_",
-)
 
 _HEADERS = {
     "User-Agent": (
@@ -88,15 +84,6 @@ class _PinnedHTTPAdapter(HTTPAdapter):
             return super().send(request, **kwargs)
 
 
-def _looks_challenged(status: int, text: str) -> bool:
-    if status in (403, 429, 503):
-        return True
-    low = text.lower()
-    if any(m in low for m in _CHALLENGE_MARKERS):
-        return True
-    return len(text) < 1500
-
-
 def _read_capped(resp: requests.Response) -> str:
     total = 0
     chunks: list[bytes] = []
@@ -145,6 +132,6 @@ class HttpFetcher:
                 html=text,
                 status=resp.status_code,
                 method=self.method_name,
-                challenged=_looks_challenged(resp.status_code, text),
+                challenged=looks_challenged(resp.status_code, text),
             )
         raise FetchError(f"too many redirects (> {MAX_REDIRECTS})")

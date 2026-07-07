@@ -7,6 +7,8 @@ the interface layer (CLI), keeping the core a library.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from autolycos.errors import FetchError
@@ -15,6 +17,7 @@ from parsers.ports import Parser
 from persistence.ports import ScrapeRecord, StateStore
 
 from .domain import Availability, ParseError, ScrapeStatus
+from .retry import fetch_with_retry
 from .verdict import compute_verdict
 
 
@@ -29,18 +32,22 @@ def scrape_one(
     url: str,
     *,
     now: str | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> ScrapeRecord:
     """Run one source end-to-end and build its ScrapeRecord (no persistence).
 
-    Fail-closed: any unexpected exception (from the fetcher, the parser, or a
-    future adapter) degrades to an INDETERMINATE record instead of propagating
-    -- a bad source never crashes the run (invariant #3).
+    The fetch goes through the same-tier retry/backoff loop (invariant #5),
+    driven by the abstract FetchResult.challenged signal; `sleep` is injectable
+    so callers/tests can neutralise the backoff. Fail-closed: any unexpected
+    exception (from the fetcher, the parser, or a future adapter) degrades to an
+    INDETERMINATE record instead of propagating -- a bad source never crashes
+    the run (invariant #3).
     """
     ts = now or _utcnow_iso()
 
     try:
         try:
-            result = fetcher.fetch(url)
+            result = fetch_with_retry(fetcher, url, sleep=sleep)
         except FetchError as exc:
             return _indeterminate(source_id, ts, None, f"fetch: {exc}")
 
@@ -95,8 +102,9 @@ def scrape_and_record(
     url: str,
     *,
     now: str | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> ScrapeRecord:
     """scrape_one + persist the record via the StateStore port."""
-    record = scrape_one(fetcher, parser, source_id, url, now=now)
+    record = scrape_one(fetcher, parser, source_id, url, now=now, sleep=sleep)
     store.record(record)
     return record

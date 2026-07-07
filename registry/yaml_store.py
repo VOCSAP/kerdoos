@@ -60,6 +60,23 @@ def _require(mapping: Any, key: str, ctx: str) -> Any:
     return mapping[key]
 
 
+def _parse_subresource_domains(body: Any, name: str) -> tuple[str, ...]:
+    """Optional render-critical sub-resource CDN allowlist for a site.
+
+    A list of host strings (e.g. ['http2.mlstatic.com']); absent -> empty. This
+    is NOT the navigation allowlist (autolycos.safety.ALLOWED_DOMAINS): these
+    hosts are only ever loaded as browser sub-resources, never navigated to, so
+    they are intentionally not validated against the navigation allowlist.
+    """
+    raw = body.get("subresource_domains") if isinstance(body, dict) else None
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(d, str) for d in raw):
+        raise ConfigError(
+            f"site {name!r}: subresource_domains must be a list of strings")
+    return tuple(d for d in raw if d)
+
+
 def _load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
@@ -96,6 +113,7 @@ class YamlConfigStore:
             sites[name] = SiteConfig(
                 name=name, fetcher=str(fetcher), parser=spec,
                 tier2_label=str(tier2_label) if tier2_label is not None else None,
+                subresource_domains=_parse_subresource_domains(body, name),
             )
         return sites
 

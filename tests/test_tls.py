@@ -16,6 +16,7 @@ from unittest import mock
 
 from autolycos import safety
 from autolycos.adapters import tls
+from autolycos.challenge import looks_challenged
 from autolycos.errors import SSRFError
 from autolycos.safety import ValidatedTarget
 
@@ -55,19 +56,21 @@ class ResolveEntryTest(unittest.TestCase):
 
 
 class LooksChallengedTest(unittest.TestCase):
+    # The challenge heuristic is hoisted to autolycos.challenge (shared by every
+    # tier so the retry loop keys on a consistent signal).
     def test_block_status_codes(self) -> None:
         for status in (403, 429, 503):
-            self.assertTrue(tls._looks_challenged(status, "x" * 5000))
+            self.assertTrue(looks_challenged(status, "x" * 5000))
 
     def test_challenge_markers(self) -> None:
-        self.assertTrue(tls._looks_challenged(200, "<html>Just a moment...</html>"))
-        self.assertTrue(tls._looks_challenged(200, "px-captcha " + "x" * 5000))
+        self.assertTrue(looks_challenged(200, "<html>Just a moment...</html>"))
+        self.assertTrue(looks_challenged(200, "px-captcha " + "x" * 5000))
 
     def test_short_body_is_suspicious(self) -> None:
-        self.assertTrue(tls._looks_challenged(200, "tiny"))
+        self.assertTrue(looks_challenged(200, "tiny"))
 
     def test_healthy_page_not_challenged(self) -> None:
-        self.assertFalse(tls._looks_challenged(200, "<html>" + "x" * 5000))
+        self.assertFalse(looks_challenged(200, "<html>" + "x" * 5000))
 
 
 class TlsFetcherContractTest(unittest.TestCase):

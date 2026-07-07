@@ -51,7 +51,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             # fetcher/parser tier, store error, ...) must never abort the run
             # nor suppress the aggregated digest.
             try:
-                fetcher = router.select(site.fetcher)
+                fetcher = router.select(site.fetcher, site.subresource_domains)
                 parser = build_parser(site.parser)
                 record = scrape_and_record(
                     fetcher, parser, store, source.source_id, source.url,

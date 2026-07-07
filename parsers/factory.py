@@ -8,11 +8,12 @@ code path.
 from __future__ import annotations
 
 from .adapters.amazon import AmazonParser
+from .adapters.mercadolivre import MercadoLivreParser
 from .adapters.statejson import StateJsonParser
 from .ports import Parser, ParserSpec
 
 KIND_WHITELIST: frozenset[str] = frozenset(
-    {"jsonld", "statejson", "css", "regex", "amazon"})
+    {"jsonld", "statejson", "css", "regex", "amazon", "mercadolivre"})
 
 
 class UnknownParserKindError(ValueError):
@@ -28,6 +29,8 @@ def build_parser(spec: ParserSpec) -> Parser:
         return StateJsonParser(spec)
     if spec.kind == "amazon":
         return AmazonParser(spec)
+    if spec.kind == "mercadolivre":
+        return MercadoLivreParser(spec)
     raise NotImplementedError(
         f"parser kind {spec.kind!r} is whitelisted but not wired at the MVP"
     )

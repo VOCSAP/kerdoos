@@ -105,12 +105,16 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(rec.status, ScrapeStatus.INDETERMINATE)
         self.assertIn("parse:", rec.error)
 
-    def test_challenge_short_circuits_to_indeterminate(self) -> None:
+    def test_persistent_challenge_degrades_to_indeterminate(self) -> None:
+        # A persistently challenged fetch is RETRIED (same-tier, invariant #5)
+        # and, once retries are exhausted, degrades to INDETERMINATE. The
+        # backoff sleep is neutralised so the test never blocks.
         challenged = FetchResult(html="", status=429, method="http", challenged=True)
         rec = scrape_one(
             _FakeFetcher(result=challenged),
             _FakeParser(extract=_extract()),
             "s", "https://www.kabum.com.br/x",
+            sleep=lambda _: None,
         )
         self.assertEqual(rec.status, ScrapeStatus.INDETERMINATE)
         self.assertIn("challenged", rec.error)

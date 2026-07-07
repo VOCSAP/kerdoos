@@ -76,6 +76,10 @@ class ImportContractTest(unittest.TestCase):
             # registry loader; it must stay tool-free (stdlib + .errors only)
             # so a future tool import in the SSRF guard breaks this test.
             ROOT / "autolycos" / "safety.py",
+            # challenge.py is the shared challenge heuristic imported by every
+            # fetcher adapter; it must stay tool-free (pure stdlib) so the
+            # cross-tier `challenged` signal never drags a tool in.
+            ROOT / "autolycos" / "challenge.py",
             ROOT / "parsers" / "ports.py",
             ROOT / "persistence" / "ports.py",
         ]
