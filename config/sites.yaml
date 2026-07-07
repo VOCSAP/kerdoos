@@ -9,3 +9,10 @@ sites:
       pix: props.pageProps.product.prices.priceWithDiscount   # PIX / a-vista
       card: props.pageProps.product.prices.price              # card / base
       availability: props.pageProps.product.available         # bool -> In/OutOfStock
+  amazon:
+    fetcher: tls               # fingerprint-impersonating tier (Akamai gate)
+    tier2_label: Prime         # label for the membership-gated price tier
+    parser:
+      # Amazon's two-tier accordion is parsed by a dedicated adapter; the DOM
+      # anchors are fixed in the adapter, so no locators are authored here.
+      kind: amazon

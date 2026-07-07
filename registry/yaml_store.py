@@ -92,7 +92,11 @@ class YamlConfigStore:
                 card=parser_raw.get("card"),
                 availability=parser_raw.get("availability"),
             )
-            sites[name] = SiteConfig(name=name, fetcher=str(fetcher), parser=spec)
+            tier2_label = body.get("tier2_label")
+            sites[name] = SiteConfig(
+                name=name, fetcher=str(fetcher), parser=spec,
+                tier2_label=str(tier2_label) if tier2_label is not None else None,
+            )
         return sites
 
     def _load_products(

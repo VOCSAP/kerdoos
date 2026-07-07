@@ -20,16 +20,15 @@ Interpretation rules (kept in the adapter, not in ParserSpec / YAML):
 from __future__ import annotations
 
 import json
-import math
 from html.parser import HTMLParser
 from typing import Any
 
 from core.domain import Availability, Extract, ParseError
 
+from ..normalize import to_cents as _to_cents
 from ..pathtraverse import PathResolutionError, resolve_path
 from ..ports import ParserSpec
 
-MAX_PRICE_CENTS = 100_000_000   # R$1,000,000 upper sanity bound
 _DEFAULT_CURRENCY = "BRL"
 
 
@@ -62,26 +61,6 @@ def _extract_next_data(html: str) -> str | None:
     parser.feed(html)
     parser.close()
     return parser.data
-
-
-def _to_cents(value: Any) -> int | None:
-    """Reais (int/float) -> integer cents, or None if invalid/absent-like."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if not math.isfinite(value):   # reject Infinity / -Infinity / NaN
-        return None
-    if value <= 0:
-        return None
-    try:
-        cents = round(value * 100)
-    except OverflowError:
-        # A finite but enormous float (e.g. 1e308) overflows value*100 to inf,
-        # and round(inf) raises. Sanity contract: invalid price -> None locally,
-        # never escalate to INDETERMINATE via the orchestrator net.
-        return None
-    if cents <= 0 or cents > MAX_PRICE_CENTS:
-        return None
-    return cents
 
 
 def _map_availability(value: Any) -> Availability:

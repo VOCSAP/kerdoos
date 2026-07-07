@@ -5,8 +5,9 @@ and the router returns the matching adapter instance. No protector detection at
 the MVP -- that is the post-MVP dynamic router (detect.py), added without
 touching this contract.
 
-Only the `http` tier is wired in the Kabum vertical slice; other tiers
-(tls/browser/uc) raise until their adapters land.
+The `http` and `tls` tiers are wired; other tiers (browser/uc) raise until
+their adapters land. The `tls` factory imports curl_cffi lazily, so the optional
+dependency is only pulled in when a site actually selects that tier.
 """
 
 from __future__ import annotations
@@ -14,9 +15,18 @@ from __future__ import annotations
 from .adapters.http import HttpFetcher
 from .ports import Fetcher
 
+
+def _make_tls() -> Fetcher:
+    # Deferred import: curl_cffi is optional and only needed for the tls tier.
+    from .adapters.tls import TlsFetcher
+
+    return TlsFetcher()
+
+
 # Lazy factories so importing the router does not construct every tool.
 _FACTORIES: dict[str, callable] = {
     "http": HttpFetcher,
+    "tls": _make_tls,
 }
 
 

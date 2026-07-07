@@ -5,3 +5,7 @@ products:
     sources:
       - site: kabum
         url: https://www.kabum.com.br/produto/534732/monitor-gamer-alienware-32-4k-qd-oled-aw3225qf
+  - id: amazon-b0cvqgsrz9
+    sources:
+      - site: amazon
+        url: https://www.amazon.com.br/dp/B0CVQGSRZ9

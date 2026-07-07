@@ -25,22 +25,32 @@ CREATE TABLE IF NOT EXISTS scrapes (
     availability   TEXT    NOT NULL,
     method         TEXT,
     error          TEXT,
-    raw_ref        TEXT
+    raw_ref        TEXT,
+    price_pix_member_cents  INTEGER,
+    price_card_member_cents INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_scrapes_source_ts
     ON scrapes (source_id, ts DESC);
 """
 
+# Additive, idempotent migration: existing 2-price databases (user_version < 2)
+# gain the two membership-tier columns via ALTER ADD COLUMN. No table recreation,
+# so Kabum history is preserved and old rows read back with member prices NULL.
+_SCHEMA_VERSION = 2
+_MEMBER_COLUMNS = ("price_pix_member_cents", "price_card_member_cents")
+
 _INSERT = """
 INSERT INTO scrapes
     (source_id, ts, status, price_pix_cents, price_card_cents,
-     currency, availability, method, error, raw_ref)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     currency, availability, method, error, raw_ref,
+     price_pix_member_cents, price_card_member_cents)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _SELECT_HISTORY = """
 SELECT source_id, ts, status, price_pix_cents, price_card_cents,
-       currency, availability, method, error, raw_ref
+       currency, availability, method, error, raw_ref,
+       price_pix_member_cents, price_card_member_cents
 FROM scrapes
 WHERE source_id = ?
 ORDER BY ts DESC, id DESC
@@ -56,7 +66,26 @@ class SqliteStateStore:
         self._conn = sqlite3.connect(self._path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive, idempotent upgrade of a pre-existing 2-price database.
+
+        Column names are module constants (never user input), so the ALTER DDL
+        carries no injectable value (no CWE-89). Missing member columns are added
+        without recreating the table, preserving all existing history; old rows
+        then read back with member prices NULL.
+        """
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(scrapes)").fetchall()
+        }
+        for column in _MEMBER_COLUMNS:
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE scrapes ADD COLUMN {column} INTEGER")
+        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     def record(self, scrape: ScrapeRecord) -> None:
         self._conn.execute(
@@ -72,6 +101,8 @@ class SqliteStateStore:
                 scrape.method,
                 scrape.error,
                 scrape.raw_ref,
+                scrape.price_pix_member_cents,
+                scrape.price_card_member_cents,
             ),
         )
         self._conn.commit()
@@ -95,5 +126,7 @@ def _row_to_record(row: sqlite3.Row) -> ScrapeRecord:
         availability=Availability(row["availability"]),
         method=row["method"],
         error=row["error"],
+        price_pix_member_cents=row["price_pix_member_cents"],
+        price_card_member_cents=row["price_card_member_cents"],
         raw_ref=row["raw_ref"],
     )

@@ -68,6 +68,8 @@ def scrape_one(
             price_card_cents=extract.price_card_cents,
             currency=extract.currency, availability=extract.availability,
             method=result.method, error=None,
+            price_pix_member_cents=extract.price_pix_member_cents,
+            price_card_member_cents=extract.price_card_member_cents,
         )
     except Exception as exc:  # noqa: BLE001 -- generic fail-closed net
         return _indeterminate(

@@ -79,5 +79,53 @@ class DigestSanitizationTest(unittest.TestCase):
         self.assertIn("...", record_line)
 
 
+def _member_rec(source_id="p:amazon:1", pix=718010, card=755800,
+                member_pix=702905, member_card=739900):
+    return ScrapeRecord(
+        source_id=source_id, ts="2026-07-06T00:00:00+00:00",
+        status=ScrapeStatus.OK, price_pix_cents=pix, price_card_cents=card,
+        currency="BRL", availability=Availability.IN_STOCK, method="tls",
+        error=None, price_pix_member_cents=member_pix,
+        price_card_member_cents=member_card,
+    )
+
+
+class DigestMemberTierTest(unittest.TestCase):
+    def test_renders_four_prices_with_label(self) -> None:
+        body = render_digest(
+            [_member_rec()], "2026-07-06T00:00:00+00:00",
+            {"p:amazon:1": "Prime"},
+        )
+        # Regular tier + labelled member tier, all four prices present.
+        self.assertIn("pix=R$ 7.180,10", body)
+        self.assertIn("card=R$ 7.558,00", body)
+        self.assertIn("Prime:", body)
+        self.assertIn("pix=R$ 7.029,05", body)
+        self.assertIn("card=R$ 7.399,00", body)
+
+    def test_falls_back_to_member_when_no_label(self) -> None:
+        # Member prices present but the source has no tier2 label -> "member:".
+        body = render_digest([_member_rec()], "2026-07-06T00:00:00+00:00")
+        self.assertIn("member:", body)
+        self.assertNotIn("Prime:", body)
+
+    def test_member_segment_omitted_when_member_null(self) -> None:
+        body = render_digest(
+            [_member_rec(member_pix=None, member_card=None)],
+            "2026-07-06T00:00:00+00:00", {"p:amazon:1": "Prime"},
+        )
+        # No member price -> no second-tier segment at all.
+        self.assertNotIn("Prime:", body)
+        self.assertNotIn("member:", body)
+
+    def test_partial_member_still_renders_segment(self) -> None:
+        # Only member card present (pix member NULL) -> segment shown, pix "-".
+        body = render_digest(
+            [_member_rec(member_pix=None)], "2026-07-06T00:00:00+00:00",
+            {"p:amazon:1": "Prime"},
+        )
+        self.assertIn("Prime: pix=- card=R$ 7.399,00", body)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,8 +39,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     generated_at = _now_iso()
 
     records = []
+    # source_id -> second-tier label (e.g. "Prime"); resolved HERE, where both
+    # the Registry and the records are in hand, and passed to the digest as data
+    # so digest/ never imports the registry.
+    tier2_labels: dict[str, str] = {}
     try:
         for _product, source, site in registry.iter_sources():
+            if site.tier2_label:
+                tier2_labels[source.source_id] = site.tier2_label
             # Per-source guard (invariant #8): a failing source (unknown
             # fetcher/parser tier, store error, ...) must never abort the run
             # nor suppress the aggregated digest.
@@ -63,7 +69,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     finally:
         store.close()
 
-    print(render_digest(records, generated_at))
+    print(render_digest(records, generated_at, tier2_labels))
     return 0
 
 

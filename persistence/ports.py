@@ -30,6 +30,10 @@ class ScrapeRecord:
     availability: Availability
     method: str | None
     error: str | None
+    # Membership-gated tier (same 'member' axis as Extract); None when the site
+    # exposes no gated price. Nullable columns, additive migration (user_version 2).
+    price_pix_member_cents: int | None = None
+    price_card_member_cents: int | None = None
     raw_ref: str | None = None
 
 

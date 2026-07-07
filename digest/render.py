@@ -7,6 +7,8 @@ vertical slice; the CLI prints this to stdout in dry-run).
 
 from __future__ import annotations
 
+from typing import Mapping
+
 from core.domain import ScrapeStatus
 from persistence.ports import ScrapeRecord
 
@@ -37,16 +39,38 @@ def _sanitize_error(error: str) -> str:
     return flat
 
 
-def _price_field(record: ScrapeRecord) -> str:
+def _price_field(record: ScrapeRecord, label: str | None = None) -> str:
     pix = format_cents(record.price_pix_cents)
     card = format_cents(record.price_card_cents)
     if record.price_pix_cents is None and record.price_card_cents is None:
-        return "no price"
-    return f"pix={pix} card={card}"
+        regular = "no price"
+    else:
+        regular = f"pix={pix} card={card}"
+    # Second (membership-gated) tier: append a segment only when the site
+    # exposed at least one member price. The label is presentation data supplied
+    # by the caller (e.g. "Prime"); absent -> fall back to the neutral "member".
+    if (record.price_pix_member_cents is None
+            and record.price_card_member_cents is None):
+        return regular
+    member_pix = format_cents(record.price_pix_member_cents)
+    member_card = format_cents(record.price_card_member_cents)
+    return (f"{regular}  {label or 'member'}: "
+            f"pix={member_pix} card={member_card}")
 
 
-def render_digest(records: list[ScrapeRecord], generated_at: str) -> str:
-    """Build the aggregated digest body from the run's scrape records."""
+def render_digest(
+    records: list[ScrapeRecord],
+    generated_at: str,
+    tier2_labels: Mapping[str, str] | None = None,
+) -> str:
+    """Build the aggregated digest body from the run's scrape records.
+
+    tier2_labels maps a record's source_id to the label for its second price
+    tier (e.g. "Prime"). It is DATA passed by the caller (the CLI, which holds
+    both the Registry and the records); the digest never imports the registry,
+    keeping the core->registry boundary clean.
+    """
+    labels = tier2_labels or {}
     counts = {status: 0 for status in ScrapeStatus}
     lines: list[str] = []
     lines.append("Kerdoos daily digest")
@@ -56,7 +80,7 @@ def render_digest(records: list[ScrapeRecord], generated_at: str) -> str:
 
     for record in records:
         counts[record.status] = counts.get(record.status, 0) + 1
-        detail = _price_field(record)
+        detail = _price_field(record, labels.get(record.source_id))
         avail = record.availability.value
         line = (f"[{record.status.value:>13}] {record.source_id}  "
                 f"{detail}  availability={avail}")

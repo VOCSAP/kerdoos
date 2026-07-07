@@ -43,7 +43,12 @@ class ParseError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Extract:
-    """Result of parsing a page. Two nullable prices (PIX/a-vista and card).
+    """Result of parsing a page. Up to four nullable prices.
+
+    Two tiers on the same 'member' axis (public vs membership-gated pricing):
+      * price_pix_cents / price_card_cents  -- regular public tier.
+      * price_pix_member_cents / price_card_member_cents -- membership-gated
+        tier (default None; only sites exposing a gated price populate them).
 
     Prices are integer cents (BRL). A price that is absent must be None, never
     0 (NULL != 0). currency is ISO 4217 (e.g. "BRL").
@@ -53,7 +58,12 @@ class Extract:
     price_card_cents: int | None
     currency: str
     availability: Availability = Availability.UNKNOWN
+    price_pix_member_cents: int | None = None
+    price_card_member_cents: int | None = None
 
     def has_price(self) -> bool:
-        """True if at least one price slot is populated."""
-        return self.price_pix_cents is not None or self.price_card_cents is not None
+        """True if at least one price slot (any tier) is populated."""
+        return (self.price_pix_cents is not None
+                or self.price_card_cents is not None
+                or self.price_pix_member_cents is not None
+                or self.price_card_member_cents is not None)

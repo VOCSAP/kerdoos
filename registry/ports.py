@@ -20,6 +20,11 @@ class SiteConfig:
     name: str
     fetcher: str          # fetcher tier name resolved by the static router
     parser: ParserSpec
+    # Optional label for a site's second (membership-gated) price tier, e.g.
+    # "Prime" for Amazon. Presentation-only data: the CLI resolves it to a
+    # source_id -> label map and passes it to the digest, so digest/ never has
+    # to import the registry (keeps the core->registry boundary clean).
+    tier2_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
