@@ -7,3 +7,12 @@
 # Surgical single-finding ignore by exact fingerprint -- NOT a path allowlist
 # (tests/fixtures/ stays scanned so a real token cannot slip in later).
 tests/fixtures/kabum_aw3225qf.html:generic-api-key:97
+
+# Reviewed false positive (Terabyte SSR fixture, 2026-07-07).
+# The flagged 32-char token is the PUBLIC Cloudflare Web Analytics beacon token
+# in a data-cf-beacon attribute (RUM telemetry that Cloudflare injects into the
+# page HTML; visible to anyone viewing source). It is NOT a credential. The
+# literal token is intentionally not quoted here so staging this ignore file does
+# not itself re-trigger the scanner. Surgical single-finding ignore by exact
+# fingerprint -- tests/fixtures/ stays scanned.
+tests/fixtures/terabyte_40561.html:generic-api-key:3825

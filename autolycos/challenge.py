@@ -11,14 +11,24 @@ known challenge/interstitial marker, or is implausibly short for a real page.
 
 from __future__ import annotations
 
-# Substrings (lowercased) that betray an anti-bot / interstitial response.
-# The last three are MercadoLivre's JS "account verification" micro-landing
-# (a client-side gate that redirects to /gz/account-verification and renders a
-# noscript "enable JavaScript" shell): specific enough not to false-positive on
-# a real product page.
+# Substrings (lowercased) specific to an ACTIVE anti-bot interstitial. Each must
+# be absent from healthy pages: bare "captcha" and "challenge-platform" are
+# deliberately NOT here -- they match Google reCAPTCHA v3 (grecaptcha-badge,
+# recaptcha/api.js) and Cloudflare's PASSIVE telemetry script
+# (/cdn-cgi/challenge-platform/.../scripts/) that legitimate pages embed, which
+# would falsely flag them and drive a healthy fetch to INDETERMINATE.
+#   * Cloudflare active challenge : "just a moment" (title), "cf-chl-" (challenge
+#     element class), "_cf_chl_opt" (challenge JS options), "attention required".
+#   * Vendor challenges           : "px-captcha" (PerimeterX), "datadome",
+#     "_incapsula_" (Imperva), "sec-cpt" (Akamai).
+#   * Amazon Robot Check          : "validatecaptcha" (the /errors/validateCaptcha
+#     form action of the anti-bot wall Amazon serves at HTTP 200; specific enough
+#     not to hit a healthy /dp page, and restores retry on that soft block).
+#   * MercadoLivre JS gate        : "account-verification" redirect + the
+#     "micro-landing" shell that renders before hydration.
 CHALLENGE_MARKERS: tuple[str, ...] = (
-    "captcha", "challenge-platform", "cf-chl", "just a moment",
-    "attention required", "px-captcha", "datadome", "_incapsula_",
+    "just a moment", "cf-chl-", "_cf_chl_opt", "attention required",
+    "px-captcha", "datadome", "_incapsula_", "sec-cpt", "validatecaptcha",
     "account-verification", "micro-landing-container", "micro-landing-title",
 )
 

@@ -28,3 +28,9 @@ sites:
       # MercadoLivre's rendered DOM is parsed by a dedicated adapter (single
       # price from <meta itemprop="price"> under id="price"); no locators here.
       kind: mercadolivre
+  terabyte:
+    fetcher: tls               # SSR prices; curl_cffi tier (Cloudflare passive)
+    parser:
+      # Terabyte server-renders both prices; a dedicated adapter reads #valVista
+      # (pix) and #valParc (card), skipping duplicated empty/placeholder ids.
+      kind: terabyte
