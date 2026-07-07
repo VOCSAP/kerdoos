@@ -16,3 +16,14 @@ tests/fixtures/kabum_aw3225qf.html:generic-api-key:97
 # not itself re-trigger the scanner. Surgical single-finding ignore by exact
 # fingerprint -- tests/fixtures/ stays scanned.
 tests/fixtures/terabyte_40561.html:generic-api-key:3825
+
+# Reviewed false positives (Magalu resolved UC fixture, 2026-07-07).
+# Three PUBLIC client-side RUM/analytics tokens embedded in the page HTML
+# (visible to anyone viewing source), NOT credentials: a Datadog RUM clientToken,
+# an Akamai mPulse Boomerang API key, and a RUM (spdt) config key. Literal tokens
+# are intentionally not quoted here so staging this ignore file does not itself
+# re-trigger the scanner. Surgical per-finding ignores by exact fingerprint;
+# tests/fixtures/ stays scanned.
+tests/fixtures/magalu_uc.html:generic-api-key:83
+tests/fixtures/magalu_uc.html:generic-api-key:110
+tests/fixtures/magalu_uc.html:generic-api-key:162

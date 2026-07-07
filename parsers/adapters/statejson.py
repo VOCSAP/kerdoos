@@ -20,47 +20,16 @@ Interpretation rules (kept in the adapter, not in ParserSpec / YAML):
 from __future__ import annotations
 
 import json
-from html.parser import HTMLParser
 from typing import Any
 
 from core.domain import Availability, Extract, ParseError
 
+from ..nextdata import extract_next_data as _extract_next_data
 from ..normalize import to_cents as _to_cents
 from ..pathtraverse import PathResolutionError, resolve_path
 from ..ports import ParserSpec
 
 _DEFAULT_CURRENCY = "BRL"
-
-
-class _NextDataExtractor(HTMLParser):
-    """Capture the text content of <script id="__NEXT_DATA__">."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._capture = False
-        self._buf: list[str] = []
-        self.data: str | None = None
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "script" and dict(attrs).get("id") == "__NEXT_DATA__":
-            self._capture = True
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "script" and self._capture:
-            self._capture = False
-            if self.data is None:
-                self.data = "".join(self._buf)
-
-    def handle_data(self, data: str) -> None:
-        if self._capture:
-            self._buf.append(data)
-
-
-def _extract_next_data(html: str) -> str | None:
-    parser = _NextDataExtractor()
-    parser.feed(html)
-    parser.close()
-    return parser.data
 
 
 def _map_availability(value: Any) -> Availability:

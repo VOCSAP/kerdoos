@@ -23,6 +23,8 @@ _HEALTHY_FIXTURES = (
     # Pichau: Cloudflare-fronted but its only residual is the PASSIVE
     # challenge-platform script (already excluded); no active marker survives.
     "pichau_cv700b.html",
+    # Magalu RESOLVED (post-Akamai UC render): no challenge DOM, must be healthy.
+    "magalu_uc.html",
 )
 
 
@@ -71,6 +73,14 @@ class RealInterstitialStillChallengedTest(unittest.TestCase):
     def test_akamai_sec_cpt(self) -> None:
         self.assertTrue(looks_challenged(
             200, '<div id="sec-cpt-challenge"></div>' + "x" * 5000))
+
+    def test_real_akamai_bot_manager_page_is_challenged(self) -> None:
+        # The real Akamai challenge (Magalu, served at HTTP 200) must be flagged
+        # via its DOM markers (scf-akamai / sec-if-cpt-container), else the core
+        # retry loop never fires on a Magalu block.
+        akamai = (_FIXTURES / "magalu_cffi.html").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertTrue(looks_challenged(200, akamai))
 
     def test_amazon_robot_check_validatecaptcha(self) -> None:
         # Amazon's Robot Check anti-bot wall (served at HTTP 200) posts to

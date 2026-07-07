@@ -41,3 +41,13 @@ sites:
       # reads .avista (pix) and .final_price (card), ignoring the JSON-LD (whose
       # price is the card price) and base_price (reference).
       kind: pichau
+  magalu:
+    fetcher: uc                # Akamai Bot Manager; only SeleniumBase UC passes
+    # Render-critical CDN allowed to resolve (Option A host-resolver EXCLUDE);
+    # mlcdn.com.br serves Magalu's JS/asset bundles (wx./a-static. subdomains).
+    subresource_domains:
+      - mlcdn.com.br
+    parser:
+      # Magalu renders __NEXT_DATA__ props.pageProps.data.item.offers[0]; a
+      # dedicated adapter reads bestPrice.totalAmount (pix) and price (card).
+      kind: magalu

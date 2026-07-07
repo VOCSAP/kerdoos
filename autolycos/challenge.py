@@ -20,7 +20,11 @@ from __future__ import annotations
 #   * Cloudflare active challenge : "just a moment" (title), "cf-chl-" (challenge
 #     element class), "_cf_chl_opt" (challenge JS options), "attention required".
 #   * Vendor challenges           : "px-captcha" (PerimeterX), "datadome",
-#     "_incapsula_" (Imperva), "sec-cpt" (Akamai).
+#     "_incapsula_" (Imperva).
+#   * Akamai Bot Manager          : "scf-akamai" and "sec-if-cpt" are the real
+#     challenge DOM (Magalu: sec-if-cpt-container / scf-akamai-logo /
+#     behavioral-content), served at HTTP 200. "sec-cpt" is kept as a generic
+#     Akamai hint but does NOT match Magalu's DOM (pending security-auditor call).
 #   * Amazon Robot Check          : "validatecaptcha" (the /errors/validateCaptcha
 #     form action of the anti-bot wall Amazon serves at HTTP 200; specific enough
 #     not to hit a healthy /dp page, and restores retry on that soft block).
@@ -28,7 +32,8 @@ from __future__ import annotations
 #     "micro-landing" shell that renders before hydration.
 CHALLENGE_MARKERS: tuple[str, ...] = (
     "just a moment", "cf-chl-", "_cf_chl_opt", "attention required",
-    "px-captcha", "datadome", "_incapsula_", "sec-cpt", "validatecaptcha",
+    "px-captcha", "datadome", "_incapsula_", "sec-cpt", "scf-akamai",
+    "sec-if-cpt", "validatecaptcha",
     "account-verification", "micro-landing-container", "micro-landing-title",
 )
 
