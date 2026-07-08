@@ -3,6 +3,7 @@
 sites:
   kabum:
     fetcher: http
+    domain: kabum.com.br
     parser:
       kind: statejson
       # Kabum is a Next.js app; prices live in __NEXT_DATA__ as REAIS floats.
@@ -11,6 +12,7 @@ sites:
       availability: props.pageProps.product.available         # bool -> In/OutOfStock
   amazon:
     fetcher: tls               # fingerprint-impersonating tier (Akamai gate)
+    domain: amazon.com.br
     tier2_label: Prime         # label for the membership-gated price tier
     parser:
       # Amazon's two-tier accordion is parsed by a dedicated adapter; the DOM
@@ -18,6 +20,7 @@ sites:
       kind: amazon
   mercadolivre:
     fetcher: browser           # SPA; price injected by client-side JS (Chromium)
+    domain: mercadolivre.com.br
     # Render-critical CDN: ML is a full client-side render whose price and
     # availability are injected by the http2.mlstatic.com JS bundle. Allow it as
     # a browser SUB-RESOURCE only (never a navigation target) so the page can
@@ -30,12 +33,14 @@ sites:
       kind: mercadolivre
   terabyte:
     fetcher: tls               # SSR prices; curl_cffi tier (Cloudflare passive)
+    domain: terabyteshop.com.br
     parser:
       # Terabyte server-renders both prices; a dedicated adapter reads #valVista
       # (pix) and #valParc (card), skipping duplicated empty/placeholder ids.
       kind: terabyte
   pichau:
     fetcher: tls               # SSR flight in the doc; curl_cffi tier (CF passive)
+    domain: pichau.com.br
     parser:
       # Pichau server-renders the pichau_prices RSC flight; a dedicated adapter
       # reads .avista (pix) and .final_price (card), ignoring the JSON-LD (whose
@@ -43,6 +48,7 @@ sites:
       kind: pichau
   magalu:
     fetcher: uc                # Akamai Bot Manager; only SeleniumBase UC passes
+    domain: magazineluiza.com.br
     # Render-critical CDN allowed to resolve (Option A host-resolver EXCLUDE);
     # mlcdn.com.br serves Magalu's JS/asset bundles (wx./a-static. subdomains).
     subresource_domains:

@@ -70,8 +70,10 @@ class MigrationTest(unittest.TestCase):
                 cols = _columns(path)
                 self.assertIn("price_pix_member_cents", cols)
                 self.assertIn("price_card_member_cents", cols)
-                # Legacy history survives, member prices read back as NULL.
-                history = store.history("legacy:kabum:1")
+                self.assertIn("owner_id", cols)
+                # Legacy history survives, backfilled to the bootstrap owner,
+                # member prices read back as NULL.
+                history = store.history("bootstrap", "legacy:kabum:1")
                 self.assertEqual(len(history), 1)
                 self.assertEqual(history[0].price_pix_cents, 100000)
                 self.assertIsNone(history[0].price_pix_member_cents)
@@ -85,7 +87,7 @@ class MigrationTest(unittest.TestCase):
             _seed_old_db(path)
             store = SqliteStateStore(path)
             try:
-                store.record(ScrapeRecord(
+                store.record("owner1", ScrapeRecord(
                     source_id="amazon:1", ts="2026-07-06T00:00:00+00:00",
                     status=ScrapeStatus.OK, price_pix_cents=718010,
                     price_card_cents=755800, currency="BRL",
@@ -93,7 +95,7 @@ class MigrationTest(unittest.TestCase):
                     price_pix_member_cents=702905,
                     price_card_member_cents=739900,
                 ))
-                row = store.history("amazon:1")[0]
+                row = store.history("owner1", "amazon:1")[0]
                 self.assertEqual(row.price_pix_member_cents, 702905)
                 self.assertEqual(row.price_card_member_cents, 739900)
             finally:

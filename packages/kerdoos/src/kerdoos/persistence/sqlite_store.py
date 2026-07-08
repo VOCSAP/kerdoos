@@ -1,7 +1,13 @@
-"""SQLite StateStore adapter (MVP).
+"""SQLite StateStore adapter (ADR 0001 S4 -- multi-tenant).
 
 All SQL is parameterized (spec #2, CWE-89): no value is ever interpolated into a
 statement string. Enum values are stored by `.value` and rebuilt on read.
+
+Tenancy (Phase 1): every row carries owner_id and every read/write filters it
+INLINE, never as an optional/trailing clause. record()/history()/latest_all()
+all require owner; record() fail-closed raises ValueError on a falsy owner
+(defense in depth -- see the migration note below on why this substitutes for
+a physical NOT NULL on legacy databases).
 """
 
 from __future__ import annotations
@@ -13,9 +19,14 @@ from kerdoos.core.domain import Availability, ScrapeStatus
 
 from .ports import ScrapeRecord
 
+# Fresh databases get owner_id NOT NULL directly (real constraint enforcement).
+# Legacy databases (pre owner_id) cannot get a retroactive NOT NULL via ALTER
+# TABLE ADD COLUMN without a compile-time-constant default, so they are
+# migrated additively (nullable ALTER + backfill) -- see _migrate_owner_id.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scrapes (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id       TEXT    NOT NULL,
     source_id      TEXT    NOT NULL,
     ts             TEXT    NOT NULL,
     status         TEXT    NOT NULL,
@@ -32,19 +43,23 @@ CREATE TABLE IF NOT EXISTS scrapes (
 CREATE INDEX IF NOT EXISTS idx_scrapes_source_ts
     ON scrapes (source_id, ts DESC);
 """
+# idx_scrapes_owner_source_ts is created in _migrate(), NOT here: on a legacy
+# (pre owner_id) database, this executescript() runs BEFORE the additive ALTER
+# TABLE ADD COLUMN owner_id, so an index on that column here would fail with
+# "no such column: owner_id" (CREATE TABLE IF NOT EXISTS is a no-op against an
+# existing table -- it does not retroactively add the column).
 
-# Additive, idempotent migration: existing 2-price databases (user_version < 2)
-# gain the two membership-tier columns via ALTER ADD COLUMN. No table recreation,
-# so Kabum history is preserved and old rows read back with member prices NULL.
-_SCHEMA_VERSION = 2
+# Additive, idempotent migrations, applied in order to whatever schema version
+# an existing database is at. No table recreation, so history is preserved.
+_SCHEMA_VERSION = 3
 _MEMBER_COLUMNS = ("price_pix_member_cents", "price_card_member_cents")
 
 _INSERT = """
 INSERT INTO scrapes
-    (source_id, ts, status, price_pix_cents, price_card_cents,
+    (owner_id, source_id, ts, status, price_pix_cents, price_card_cents,
      currency, availability, method, error, raw_ref,
      price_pix_member_cents, price_card_member_cents)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _SELECT_HISTORY = """
@@ -52,17 +67,43 @@ SELECT source_id, ts, status, price_pix_cents, price_card_cents,
        currency, availability, method, error, raw_ref,
        price_pix_member_cents, price_card_member_cents
 FROM scrapes
-WHERE source_id = ?
+WHERE owner_id = ? AND source_id = ?
 ORDER BY ts DESC, id DESC
 LIMIT ?
 """
 
+# Most recent row per source_id for a given owner, via a partitioned window --
+# a single query, no N+1 (one SELECT per source would not scale with catalogue
+# size).
+_SELECT_LATEST_ALL = """
+SELECT source_id, ts, status, price_pix_cents, price_card_cents,
+       currency, availability, method, error, raw_ref,
+       price_pix_member_cents, price_card_member_cents
+FROM (
+    SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY source_id ORDER BY ts DESC, id DESC
+    ) AS rn
+    FROM scrapes
+    WHERE owner_id = ?
+)
+WHERE rn = 1
+ORDER BY source_id
+"""
+
 
 class SqliteStateStore:
-    """StateStore backed by a local SQLite file (or :memory: for tests)."""
+    """StateStore backed by a local SQLite file (or :memory: for tests).
 
-    def __init__(self, db_path: str | Path = "kerdoos.db") -> None:
+    bootstrap_owner_id: backfill target for legacy (pre owner_id) rows found
+    in an existing database on open. Irrelevant for fresh databases.
+    """
+
+    def __init__(
+        self, db_path: str | Path = "kerdoos.db", *,
+        bootstrap_owner_id: str = "bootstrap",
+    ) -> None:
         self._path = str(db_path)
+        self._bootstrap_owner_id = bootstrap_owner_id
         self._conn = sqlite3.connect(self._path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
@@ -70,12 +111,10 @@ class SqliteStateStore:
         self._conn.commit()
 
     def _migrate(self) -> None:
-        """Additive, idempotent upgrade of a pre-existing 2-price database.
+        """Additive, idempotent upgrade of a pre-existing database.
 
-        Column names are module constants (never user input), so the ALTER DDL
-        carries no injectable value (no CWE-89). Missing member columns are added
-        without recreating the table, preserving all existing history; old rows
-        then read back with member prices NULL.
+        Column/index names are module constants (never user input), so the
+        ALTER/CREATE INDEX DDL carries no injectable value (no CWE-89).
         """
         existing = {
             row["name"]
@@ -85,12 +124,31 @@ class SqliteStateStore:
             if column not in existing:
                 self._conn.execute(
                     f"ALTER TABLE scrapes ADD COLUMN {column} INTEGER")
+        if "owner_id" not in existing:
+            # Legacy DB: nullable ALTER (SQLite can't retroactively add a
+            # NOT NULL column to a non-empty table without a constant
+            # default), then backfill every existing row to the bootstrap
+            # owner so pre-Phase-1 history is preserved and stays queryable.
+            self._conn.execute("ALTER TABLE scrapes ADD COLUMN owner_id TEXT")
+            self._conn.execute(
+                "UPDATE scrapes SET owner_id = ? WHERE owner_id IS NULL",
+                (self._bootstrap_owner_id,),
+            )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scrapes_owner_source_ts "
+            "ON scrapes (owner_id, source_id, ts DESC)"
+        )
         self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
-    def record(self, scrape: ScrapeRecord) -> None:
+    def record(self, owner: str, scrape: ScrapeRecord) -> None:
+        if not owner:
+            # Fail-closed: legacy DBs can't get a physical NOT NULL via
+            # ALTER, so the write path is the enforcement point instead.
+            raise ValueError("owner must not be empty")
         self._conn.execute(
             _INSERT,
             (
+                owner,
                 scrape.source_id,
                 scrape.ts,
                 scrape.status.value,
@@ -107,8 +165,15 @@ class SqliteStateStore:
         )
         self._conn.commit()
 
-    def history(self, source_id: str, limit: int = 50) -> list[ScrapeRecord]:
-        rows = self._conn.execute(_SELECT_HISTORY, (source_id, limit)).fetchall()
+    def history(
+        self, owner: str, source_id: str, limit: int = 50
+    ) -> list[ScrapeRecord]:
+        rows = self._conn.execute(
+            _SELECT_HISTORY, (owner, source_id, limit)).fetchall()
+        return [_row_to_record(row) for row in rows]
+
+    def latest_all(self, owner: str) -> list[ScrapeRecord]:
+        rows = self._conn.execute(_SELECT_LATEST_ALL, (owner,)).fetchall()
         return [_row_to_record(row) for row in rows]
 
     def close(self) -> None:

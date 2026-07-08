@@ -98,13 +98,19 @@ def scrape_and_record(
     fetcher: Fetcher,
     parser: Parser,
     store: StateStore,
+    owner: str,
     source_id: str,
     url: str,
     *,
     now: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> ScrapeRecord:
-    """scrape_one + persist the record via the StateStore port."""
+    """scrape_one + persist the record via the StateStore port.
+
+    owner is threaded through to store.record so history stays tenant-scoped
+    (ADR 0001 S4); it never appears in the ScrapeRecord itself (that DTO is
+    shared with the digest, which must not know about tenancy).
+    """
     record = scrape_one(fetcher, parser, source_id, url, now=now, sleep=sleep)
-    store.record(record)
+    store.record(owner, record)
     return record

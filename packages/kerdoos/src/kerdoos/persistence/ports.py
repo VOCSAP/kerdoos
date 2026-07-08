@@ -39,10 +39,22 @@ class ScrapeRecord:
 
 @runtime_checkable
 class StateStore(Protocol):
-    """Persist and read back scrape history."""
+    """Persist and read back scrape history, tenant-scoped (ADR 0001 S4).
 
-    def record(self, scrape: ScrapeRecord) -> None:
+    owner is REQUIRED on every method and filters every SQL statement inline
+    -- never a trailing/optional filter -- so a tenant can never read or
+    accidentally write another tenant's history, even by guessing a
+    source_id.
+    """
+
+    def record(self, owner: str, scrape: ScrapeRecord) -> None:
         ...
 
-    def history(self, source_id: str, limit: int = 50) -> list[ScrapeRecord]:
+    def history(
+        self, owner: str, source_id: str, limit: int = 50
+    ) -> list[ScrapeRecord]:
+        ...
+
+    def latest_all(self, owner: str) -> list[ScrapeRecord]:
+        """Most recent record per source_id, scoped to owner (no N+1)."""
         ...

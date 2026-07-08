@@ -10,6 +10,7 @@ No tool imports in this module (Protocol + dataclass only). Concrete tools
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -34,4 +35,20 @@ class Fetcher(Protocol):
     """Resolve access to a URL and return its HTML."""
 
     def fetch(self, url: str) -> FetchResult:
+        ...
+
+
+@runtime_checkable
+class Router(Protocol):
+    """Resolve a fetcher tier name to a concrete Fetcher.
+
+    Mirrors StaticRouter.select's signature exactly, so core/app/services.py
+    can type-hint against this Protocol without importing the concrete
+    router module (test_import_contract.py forbids core/ from importing any
+    `router`-suffixed module).
+    """
+
+    def select(
+        self, fetcher_name: str, subresource_domains: Iterable[str] = ()
+    ) -> Fetcher:
         ...

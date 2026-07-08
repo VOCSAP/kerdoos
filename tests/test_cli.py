@@ -3,6 +3,10 @@
 Invariants #3 (three-valued state) + #8 (single aggregated digest). The failing
 source is simulated at the scrape level (monkeypatched), so the test is hermetic
 (no network): router.select / build_parser run for real but never touch the net.
+
+Phase 1: `run` reads from config.db, not YAML directly (invariant #9 -- the
+CLI is a thin AppService wrapper), so this test first goes through
+`config import` to seed a fresh config.db, mirroring real CLI usage.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ _SITES = """\
 sites:
   kabum:
     fetcher: http
+    domain: kabum.com.br
     parser:
       kind: statejson
       pix: props.pageProps.product.prices.priceWithDiscount
@@ -40,7 +45,7 @@ products:
 """
 
 
-def _fake_scrape(fetcher, parser, store, source_id, url, *, now=None):
+def _fake_scrape(fetcher, parser, store, owner, source_id, url, *, now=None):
     if "/1/" in url:
         raise RuntimeError("simulated adapter blowup")
     return ScrapeRecord(
@@ -54,15 +59,32 @@ class CliResilienceTest(unittest.TestCase):
     def test_one_failing_source_does_not_kill_run_or_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            (d / "sites.yaml").write_text(_SITES, encoding="utf-8")
-            (d / "products.yaml").write_text(_PRODUCTS, encoding="utf-8")
-            args = cli.build_parser_cli().parse_args(
-                ["run", "--config-dir", str(d), "--db", ":memory:"])
+            config_dir = d / "config"
+            config_dir.mkdir()
+            (config_dir / "sites.yaml").write_text(_SITES, encoding="utf-8")
+            (config_dir / "products.yaml").write_text(_PRODUCTS, encoding="utf-8")
+            config_db = d / "config.db"
+            state_db = d / "state.db"
+
+            import_args = cli.build_parser_cli().parse_args([
+                "config", "import",
+                "--config-dir", str(config_dir),
+                "--config-db", str(config_db),
+                "--db", str(state_db),
+                "--owner", "owner1",
+            ])
+            self.assertEqual(cli.cmd_config_import(import_args), 0)
+
+            run_args = cli.build_parser_cli().parse_args([
+                "run", "--owner", "owner1",
+                "--config-db", str(config_db), "--db", str(state_db)])
 
             buf = io.StringIO()
-            with mock.patch.object(cli, "scrape_and_record", _fake_scrape):
+            with mock.patch(
+                "kerdoos.core.app.services.scrape_and_record", _fake_scrape
+            ):
                 with contextlib.redirect_stdout(buf):
-                    rc = cli.cmd_run(args)
+                    rc = cli.cmd_run(run_args)
 
         self.assertEqual(rc, 0)
         out = buf.getvalue()
