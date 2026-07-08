@@ -31,3 +31,6 @@ spike/
 # Agent tooling local state (peers, memory, hooks) -- operator decision, not versioned
 .claude/
 .kleos-space
+findings.md
+progress.md
+task_plan.md
