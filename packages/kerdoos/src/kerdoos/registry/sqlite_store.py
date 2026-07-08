@@ -117,27 +117,34 @@ class SqliteConfigStore:
         return {row["name"]: _row_to_site(row) for row in rows}
 
     def _load_products(self, owner: str) -> tuple[Product, ...]:
+        # Single grouped query instead of one sources SELECT per product
+        # (N+1): all of an owner's sources are fetched at once and grouped
+        # in memory by product_key, preserving deterministic ordering.
         product_rows = self._conn.execute(
             "SELECT product_key, name FROM products WHERE owner_id = ? "
             "ORDER BY product_key",
             (owner,),
         ).fetchall()
-        products: list[Product] = []
-        for prow in product_rows:
-            source_rows = self._conn.execute(
-                "SELECT source_id, product_key, site, url FROM sources "
-                "WHERE owner_id = ? AND product_key = ? ORDER BY source_id",
-                (owner, prow["product_key"]),
-            ).fetchall()
-            sources = tuple(
+        source_rows = self._conn.execute(
+            "SELECT source_id, product_key, site, url FROM sources "
+            "WHERE owner_id = ? ORDER BY product_key, source_id",
+            (owner,),
+        ).fetchall()
+        sources_by_product: dict[str, list[ProductSource]] = {}
+        for srow in source_rows:
+            sources_by_product.setdefault(srow["product_key"], []).append(
                 ProductSource(
                     source_id=srow["source_id"], product_id=srow["product_key"],
                     site=srow["site"], url=srow["url"],
                 )
-                for srow in source_rows
             )
-            products.append(Product(
-                id=prow["product_key"], name=prow["name"], sources=sources))
+        products = [
+            Product(
+                id=prow["product_key"], name=prow["name"],
+                sources=tuple(sources_by_product.get(prow["product_key"], ())),
+            )
+            for prow in product_rows
+        ]
         return tuple(products)
 
     # -- MutableConfigStore (write, interfaces only) --------------------

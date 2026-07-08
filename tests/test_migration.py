@@ -58,6 +58,14 @@ def _columns(path: Path) -> set[str]:
     return {row[1] for row in rows}
 
 
+def _user_version(path: Path) -> int:
+    conn = sqlite3.connect(str(path))
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
 class MigrationTest(unittest.TestCase):
     def test_member_columns_added_to_legacy_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,6 +79,7 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("price_pix_member_cents", cols)
                 self.assertIn("price_card_member_cents", cols)
                 self.assertIn("owner_id", cols)
+                self.assertEqual(_user_version(path), 3)
                 # Legacy history survives, backfilled to the bootstrap owner,
                 # member prices read back as NULL.
                 history = store.history("bootstrap", "legacy:kabum:1")

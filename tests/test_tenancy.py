@@ -21,6 +21,7 @@ from kerdoos.parsers.ports import ParserSpec
 from kerdoos.persistence.sqlite_store import SqliteStateStore
 from kerdoos.registry.ports import SiteConfig, make_source_id, validate_product_key
 from kerdoos.registry.sqlite_store import SqliteConfigStore
+from kerdoos.registry.url_validation import UrlValidationError
 
 _DOMAIN_POLICY = DomainPolicy(frozenset({"kabum.com.br"}))
 
@@ -85,6 +86,47 @@ class ConfigTenancyTest(_TenancyTestBase):
         with self.assertRaises(KeyError):
             self.service.add_source(
                 "owner1", "aw3225qf", "not-a-site",
+                "https://www.kabum.com.br/produto/1/a")
+
+    def test_add_source_rejects_off_allowlist_url(self) -> None:
+        self.service.add_product("owner1", ProductSpec("aw3225qf"))
+        with self.assertRaises(UrlValidationError):
+            self.service.add_source(
+                "owner1", "aw3225qf", "kabum", "https://evil.com/x")
+
+    def test_add_source_rejects_new_domain_even_for_freshly_admin_added_site(
+        self,
+    ) -> None:
+        # Phase 1's DomainPolicy is a static allowlist resolved once at app
+        # wiring time (FD1, deferred to Phase 2) -- it is NOT re-derived from
+        # the config catalogue. So even an admin-added site whose domain was
+        # never in that static allowlist must still be rejected at
+        # add_source, proving the policy doesn't silently trust the
+        # catalogue.
+        principal = Principal(owner_id="root", role="admin")
+        new_site = SiteConfig(
+            name="freshsite", fetcher="http", domain="fresh-domain.com.br",
+            parser=ParserSpec(kind="statejson", pix="a", card="b", availability="c"),
+        )
+        self.service.add_site(principal, new_site)
+        self.service.add_product("owner1", ProductSpec("aw3225qf"))
+        with self.assertRaises(UrlValidationError):
+            self.service.add_source(
+                "owner1", "aw3225qf", "freshsite",
+                "https://www.fresh-domain.com.br/produto/1/a")
+
+
+class FalsyOwnerRejectionTest(_TenancyTestBase):
+    """Mirrors StateStore.record's existing fail-close on a falsy owner."""
+
+    def test_add_product_rejects_empty_owner(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service.add_product("", ProductSpec("aw3225qf"))
+
+    def test_add_source_rejects_empty_owner(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service.add_source(
+                "", "aw3225qf", "kabum",
                 "https://www.kabum.com.br/produto/1/a")
 
 

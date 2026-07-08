@@ -43,7 +43,13 @@ def _utcnow_iso() -> str:
 @dataclass(frozen=True, slots=True)
 class Principal:
     """The resolved caller identity. owner_id NEVER comes from a request
-    body/nested spec -- only from an already-authenticated/trusted source."""
+    body/nested spec -- only from an already-authenticated/trusted source.
+
+    role is likewise SERVER-RESOLVED: it is looked up (e.g. via
+    ConfigStore.get_owner_role) from the trusted identity, never accepted as
+    a client-supplied field on a request body. Phase 1 has no real auth yet
+    (CLI callers construct Principal directly), so this is enforced by
+    convention here; Phase 3 wires it to real session/bearer resolution."""
 
     owner_id: str
     role: str = "user"
@@ -115,6 +121,10 @@ class AppService:
         return spec
 
     def add_product(self, owner: str, spec: ProductSpec) -> Product:
+        if not owner:
+            # Fail-closed, mirrors StateStore.record's guard: a falsy owner
+            # must never reach the store, tenant or not.
+            raise ValueError("owner must not be empty")
         validate_product_key(spec.product_key)
         product = Product(id=spec.product_key, name=spec.name)
         self._config.add_product(owner, product)
@@ -123,6 +133,8 @@ class AppService:
     def add_source(
         self, owner: str, product_key: str, site: str, url: str
     ) -> ProductSource:
+        if not owner:
+            raise ValueError("owner must not be empty")
         validate_product_key(product_key)
         registry = self._config.load(owner)
         if site not in registry.sites:
