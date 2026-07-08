@@ -13,17 +13,15 @@ import unittest
 from pathlib import Path
 
 from autolycos.router import StaticRouter
-from autolycos.safety import DomainPolicy
 
 from kerdoos.core.app.services import AppService, Principal, ProductSpec
 from kerdoos.parsers.factory import build_parser
 from kerdoos.parsers.ports import ParserSpec
 from kerdoos.persistence.sqlite_store import SqliteStateStore
+from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.ports import SiteConfig, make_source_id, validate_product_key
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 from kerdoos.registry.url_validation import UrlValidationError
-
-_DOMAIN_POLICY = DomainPolicy(frozenset({"kabum.com.br"}))
 
 _SITE = SiteConfig(
     name="kabum", fetcher="http", domain="kabum.com.br",
@@ -37,9 +35,12 @@ class _TenancyTestBase(unittest.TestCase):
         d = Path(self._tmp.name)
         self.config = SqliteConfigStore(d / "config.db")
         self.state = SqliteStateStore(d / "state.db")
-        router = StaticRouter(_DOMAIN_POLICY)
+        # Phase 2a FD1: catalogue-derived, not the static DomainPolicy --
+        # this exercises the SAME live-wiring the CLI composition root uses.
+        domain_policy = CatalogueDomainPolicy(self.config)
+        router = StaticRouter(domain_policy)
         self.service = AppService(
-            self.config, self.state, router, _DOMAIN_POLICY, build_parser)
+            self.config, self.state, router, domain_policy, build_parser)
         self.config.add_site(_SITE)
 
     def tearDown(self) -> None:
@@ -94,15 +95,16 @@ class ConfigTenancyTest(_TenancyTestBase):
             self.service.add_source(
                 "owner1", "aw3225qf", "kabum", "https://evil.com/x")
 
-    def test_add_source_rejects_new_domain_even_for_freshly_admin_added_site(
+    def test_add_source_accepts_new_domain_from_freshly_admin_added_site(
         self,
     ) -> None:
-        # Phase 1's DomainPolicy is a static allowlist resolved once at app
-        # wiring time (FD1, deferred to Phase 2) -- it is NOT re-derived from
-        # the config catalogue. So even an admin-added site whose domain was
-        # never in that static allowlist must still be rejected at
-        # add_source, proving the policy doesn't silently trust the
-        # catalogue.
+        # Phase 2a FD1: DomainPolicy is derived LIVE from the catalogue
+        # (CatalogueDomainPolicy queries ConfigStore.site_domains() on every
+        # call), superseding Phase 1's static-allowlist limitation this test
+        # used to prove (see git history for the original assertion). An
+        # admin-added site's domain must become fetchable in the SAME
+        # process, without re-wiring the app -- proving the catalogue is the
+        # live source of truth, not a snapshot.
         principal = Principal(owner_id="root", role="admin")
         new_site = SiteConfig(
             name="freshsite", fetcher="http", domain="fresh-domain.com.br",
@@ -110,10 +112,18 @@ class ConfigTenancyTest(_TenancyTestBase):
         )
         self.service.add_site(principal, new_site)
         self.service.add_product("owner1", ProductSpec("aw3225qf"))
+        source = self.service.add_source(
+            "owner1", "aw3225qf", "freshsite",
+            "https://www.fresh-domain.com.br/produto/1/a")
+        self.assertTrue(source.source_id.startswith("owner1:aw3225qf:freshsite:"))
+
+    def test_add_source_still_rejects_domain_outside_catalogue(self) -> None:
+        # ip_is_safe / the catalogue itself remain the guard: a domain that
+        # was NEVER registered as a site (even post-FD1) is still rejected.
+        self.service.add_product("owner1", ProductSpec("aw3225qf"))
         with self.assertRaises(UrlValidationError):
             self.service.add_source(
-                "owner1", "aw3225qf", "freshsite",
-                "https://www.fresh-domain.com.br/produto/1/a")
+                "owner1", "aw3225qf", "kabum", "https://never-cataloged.com/x")
 
 
 class FalsyOwnerRejectionTest(_TenancyTestBase):

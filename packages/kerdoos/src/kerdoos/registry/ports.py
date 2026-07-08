@@ -114,6 +114,17 @@ class ConfigStore(Protocol):
     def load(self, owner: OwnerId) -> Registry:
         ...
 
+    def site_domains(self) -> frozenset[str]:
+        """Every domain declared by a catalogued site (global, no owner).
+
+        Backs kerdoos.registry.domain_policy.CatalogueDomainPolicy: a
+        lightweight read that does not require loading owner-scoped
+        products, queried live on every domain_allowed() call so a
+        freshly admin-added site becomes fetchable immediately (Phase 2a
+        FD1, ADR 0001 S9).
+        """
+        ...
+
 
 @runtime_checkable
 class MutableConfigStore(ConfigStore, Protocol):

@@ -1,11 +1,12 @@
 """BrowserFetcher: pure helpers + fail-closed SSRF guard + wiring via a fake.
 
 Playwright is absent from the base interpreter. What can be exercised WITHOUT it:
-the --host-resolver-rules builder, the challenge heuristic, and the guarantee
-that the SSRF guard rejects a hostile target BEFORE Playwright is imported. The
-navigation wiring (launch args, route guard, goto, FetchResult) is driven with a
-FAKE sync_playwright injected in place of the real one, so the adapter logic is
-covered without a real browser (real E2E is a blocking-before-prod fast-follow).
+the challenge heuristic and the guarantee that the SSRF guard rejects a hostile
+target BEFORE Playwright is imported. The navigation wiring (egress-proxy launch
+config, route guard, goto, FetchResult) is driven with a FAKE sync_playwright
+injected in place of the real one, so the adapter logic is covered without a real
+browser (real E2E is a blocking-before-prod fast-follow). The egress-proxy's own
+CONNECT/pin behavior is covered in test_ssrf.py.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from autolycos import safety
 from autolycos.adapters import browser
 from autolycos.challenge import looks_challenged
 from autolycos.errors import SSRFError
-from autolycos.safety import DomainPolicy, ValidatedTarget
+from autolycos.safety import DomainPolicy
 
 _POLICY = DomainPolicy(frozenset({
     "kabum.com.br", "amazon.com.br", "mercadolivre.com.br",
@@ -29,24 +30,6 @@ _POLICY = DomainPolicy(frozenset({
 def _addrinfo(ip: str, port: int = 443):
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
     return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))]
-
-
-class HostResolverRulesTest(unittest.TestCase):
-    def test_ipv4_map_rule(self) -> None:
-        target = ValidatedTarget(
-            url="https://mercadolivre.com.br/p/X", scheme="https",
-            host="mercadolivre.com.br", port=443, ip="104.18.0.1")
-        self.assertEqual(browser._host_resolver_rules(target),
-                         "MAP mercadolivre.com.br 104.18.0.1")
-
-    def test_ipv6_address_is_bracketed(self) -> None:
-        # Chromium's host-resolver-rules mis-parses a bare IPv6 literal; it must
-        # be bracketed or the pin is silently dropped (rebind window re-opens).
-        target = ValidatedTarget(
-            url="https://mercadolivre.com.br/p/X", scheme="https",
-            host="mercadolivre.com.br", port=443, ip="2606:4700::6812:1")
-        self.assertEqual(browser._host_resolver_rules(target),
-                         "MAP mercadolivre.com.br [2606:4700::6812:1]")
 
 
 class LooksChallengedTest(unittest.TestCase):
@@ -179,13 +162,15 @@ class BrowserFetcherWiringTest(unittest.TestCase):
                     "https://mercadolivre.com.br/p/MLB1")
         return result, chromium, page
 
-    def test_pins_validated_ip_and_builds_result(self) -> None:
+    def test_routes_through_egress_proxy_and_builds_result(self) -> None:
         page = _FakePage("<html>" + "x" * 5000, 200)
         result, chromium, page = self._run(page)
-        # Chromium launched with the host-resolver-rules pin on the validated IP.
-        self.assertEqual(
-            chromium.launch_kwargs["args"],
-            ["--host-resolver-rules=MAP mercadolivre.com.br 104.18.0.1"])
+        # Chromium launched behind the loopback egress-proxy (no host-resolver
+        # pin flag; the proxy does the pinning at the network layer).
+        proxy_server = chromium.launch_kwargs["proxy"]["server"]
+        self.assertTrue(proxy_server.startswith("http://127.0.0.1:"))
+        # No egress-weakening launch flags survive the scrub.
+        self.assertEqual(chromium.launch_kwargs["args"], [])
         # Navigation waited for the render to settle.
         self.assertEqual(page.goto_args[1], "networkidle")
         # Result carries the rendered HTML and the browser method.

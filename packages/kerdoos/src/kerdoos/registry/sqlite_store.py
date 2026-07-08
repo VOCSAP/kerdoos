@@ -116,6 +116,12 @@ class SqliteConfigStore:
         rows = self._conn.execute("SELECT * FROM sites ORDER BY name").fetchall()
         return {row["name"]: _row_to_site(row) for row in rows}
 
+    def site_domains(self) -> frozenset[str]:
+        rows = self._conn.execute(
+            "SELECT domain FROM sites WHERE domain != ''"
+        ).fetchall()
+        return frozenset(row["domain"] for row in rows)
+
     def _load_products(self, owner: str) -> tuple[Product, ...]:
         # Single grouped query instead of one sources SELECT per product
         # (N+1): all of an owner's sources are fetched at once and grouped

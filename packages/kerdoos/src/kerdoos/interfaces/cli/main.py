@@ -24,7 +24,7 @@ from autolycos.router import StaticRouter
 from kerdoos.core.app.services import AppService, Principal, ProductSpec
 from kerdoos.digest.render import render_digest
 from kerdoos.parsers.factory import build_parser
-from kerdoos.registry.domain_policy import DEFAULT_DOMAIN_POLICY
+from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.ports import SiteConfig
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 from kerdoos.registry.yaml_store import parse_products_yaml, parse_sites_yaml
@@ -36,9 +36,10 @@ def _build_app_service(
 ) -> tuple[AppService, SqliteConfigStore, SqliteStateStore]:
     config_store = SqliteConfigStore(config_db)
     state_store = SqliteStateStore(db)
-    router = StaticRouter(DEFAULT_DOMAIN_POLICY)
+    domain_policy = CatalogueDomainPolicy(config_store)
+    router = StaticRouter(domain_policy)
     service = AppService(
-        config_store, state_store, router, DEFAULT_DOMAIN_POLICY, build_parser)
+        config_store, state_store, router, domain_policy, build_parser)
     return service, config_store, state_store
 
 

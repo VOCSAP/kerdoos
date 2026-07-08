@@ -19,6 +19,19 @@ Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
     own resolver is thus constrained to the allowlist, closing the fan-out.
   * the rendered HTML is size-capped (anti-OOM, CWE-400).
 
+Sequencing decision (Phase 2a, 2026-07-08): unlike the browser tier -- which
+Phase 2a moved onto the loopback egress-proxy CONNECT (autolycos.egress_proxy)
+-- the uc tier DELIBERATELY KEEPS its --host-resolver-rules pin here. ADR 0001
+S9 says the egress-proxy applies to "browser AND uc", so this is an ASSUMED,
+architect-acknowledged deviation: we do NOT replace a working Akamai bypass
+(gate D passed for Magalu) with a CONNECT proxy we cannot yet validate against
+real Akamai. Routing uc Chrome through the proxy is probably safe (a network
+CONNECT proxy is not application-level page.route interception, and tunnelling
+ciphertext preserves Chrome's own TLS fingerprint), but "probably" is not
+enough to touch a functioning anti-bot path -- a silent regression would be
+invisible to green unit tests (recon-B discipline). Wiring uc onto the
+egress-proxy is deferred to Phase 7, E2E-gated against live Akamai (Magalu).
+
 Fallback C (documented, NOT coded): if the composite host-resolver rule proves
 too brittle in E2E (Akamai edge cases, CDP quirks), fall back to a MAP-only pin
 of the navigation host and rely on the LXC network egress allowlist (the 6 site

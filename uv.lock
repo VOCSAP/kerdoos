@@ -71,7 +71,7 @@ uc = [
 requires-dist = [
     { name = "curl-cffi", marker = "extra == 'tls'", specifier = ">=0.7" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40" },
-    { name = "requests", specifier = ">=2.31" },
+    { name = "requests", specifier = ">=2.34" },
     { name = "seleniumbase", marker = "extra == 'uc'", specifier = ">=4.24" },
 ]
 provides-extras = ["browser", "tls", "uc"]

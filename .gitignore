@@ -28,6 +28,15 @@ render_probe.py
 sb_probe.py
 spike/
 
+# Vendored reference implementation (crawl4ai, cloned for the egress-proxy
+# audit) -- consulted, never part of our deliverable/build.
+crawl4ai/
+
+# Design docs with deployment/infra detail (LXC, private IPs, topology) -- same
+# class as DESIGN.md/RECON.md above; kept local, not versioned (assume the repo
+# may become public).
+docs/
+
 # Agent tooling local state (peers, memory, hooks) -- operator decision, not versioned
 .claude/
 .kleos-space

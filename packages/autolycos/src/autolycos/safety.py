@@ -35,6 +35,20 @@ class ValidatedTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class PinnedAddress:
+    """A resolved-and-validated host:port with the exact IP to dial.
+
+    Returned by resolve_and_pin (the egress-proxy CONNECT path): the caller
+    MUST dial `.ip`, never re-resolve `.host`, so the DNS-rebind TOCTOU window
+    stays closed at the network layer (ADR 0001 S9, invariant #2).
+    """
+
+    host: str
+    port: int
+    ip: str
+
+
+@dataclass(frozen=True, slots=True)
 class DomainPolicy:
     """Caller-injected navigation-domain allowlist.
 
@@ -72,11 +86,17 @@ def ip_is_safe(addr: str) -> bool:
     return ip.is_global
 
 
-def validate_target(url: str, domain_policy: DomainPolicy) -> ValidatedTarget:
-    """Validate scheme + domain + resolved IPs. Resolve once and pin an IP.
+def check_scheme_and_domain(url: str, domain_policy: DomainPolicy) -> tuple[str, str]:
+    """Validate scheme + host allowlist only (no DNS, no IP check).
 
-    Raises SSRFError when the target is refused (scheme/domain/IP), FetchError
-    when DNS resolution itself fails.
+    Shared choke-point predicate (FD2): the ONE place that decides whether a
+    url's scheme/host are structurally acceptable. Used by both
+    validate_target (fetch-time gate, below) and
+    kerdoos.registry.url_validation.validate_source_url (config-mutation
+    gate) so the two independent SSRF gates can never drift apart on this
+    check (ADR 0001 SSRF requirement #4: one predicate, no allowlist drift).
+
+    Returns (scheme, host) on success. Raises SSRFError on any rejection.
     """
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
@@ -87,7 +107,17 @@ def validate_target(url: str, domain_policy: DomainPolicy) -> ValidatedTarget:
         raise SSRFError("missing host")
     if not domain_policy.domain_allowed(host):
         raise SSRFError(f"domain not in allowlist: {host!r}")
-    port = parts.port or _DEFAULT_PORT[scheme]
+    return scheme, host
+
+
+def _resolve_and_check(host: str, port: int) -> str:
+    """Resolve `host` ONCE and return the first IP to pin. Fail-closed.
+
+    Shared resolution+pin primitive: resolves exactly once, rejects the host
+    outright if ANY resolved address is unsafe (a host that mixes public and
+    private answers is refused), and returns the first address to dial.
+    Raises SSRFError on an unsafe/empty answer, FetchError on DNS failure.
+    """
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
@@ -95,10 +125,36 @@ def validate_target(url: str, domain_policy: DomainPolicy) -> ValidatedTarget:
     addrs = [info[4][0] for info in infos]
     if not addrs:
         raise SSRFError(f"no addresses resolved for {host!r}")
-    # Fail-closed: reject if ANY resolved address is unsafe (a host that mixes
-    # public and private answers is refused outright).
     for addr in addrs:
         if not ip_is_safe(addr):
             raise SSRFError(f"resolved address blocked for {host!r}: {addr}")
-    return ValidatedTarget(url=url, scheme=scheme, host=host,
-                           port=port, ip=addrs[0])
+    return addrs[0]
+
+
+def validate_target(url: str, domain_policy: DomainPolicy) -> ValidatedTarget:
+    """Validate scheme + domain + resolved IPs. Resolve once and pin an IP.
+
+    Raises SSRFError when the target is refused (scheme/domain/IP), FetchError
+    when DNS resolution itself fails.
+    """
+    scheme, host = check_scheme_and_domain(url, domain_policy)
+    parts = urlsplit(url)
+    port = parts.port or _DEFAULT_PORT[scheme]
+    ip = _resolve_and_check(host, port)
+    return ValidatedTarget(url=url, scheme=scheme, host=host, port=port, ip=ip)
+
+
+def resolve_and_pin(host: str, port: int) -> PinnedAddress:
+    """Resolve `host` once and pin a safe IP for the egress-proxy CONNECT path.
+
+    Unlike validate_target this takes an already-parsed host:port (a proxy
+    CONNECT gives "host:port", not a URL) and does NOT apply the domain
+    allowlist: the proxy's job is the network-layer SSRF guard (ip_is_safe +
+    pin + loopback-only + port restriction), while the navigation-domain
+    allowlist stays with the browser layer (page.route / host-resolver
+    EXCLUDE), which must also permit render-critical CDN sub-resources the
+    DomainPolicy does not list. Raises SSRFError / FetchError like
+    validate_target.
+    """
+    ip = _resolve_and_check(host, port)
+    return PinnedAddress(host=host, port=port, ip=ip)

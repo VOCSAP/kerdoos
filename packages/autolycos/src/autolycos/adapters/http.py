@@ -3,26 +3,34 @@
 Security posture (spec HIGH-2 / M1, anti-SSRF, CWE-918):
   * the anti-SSRF guard lives in autolycos.safety (single choke point, shared by
     every future fetcher tier).
-  * IP pinning: safety.validate_target resolves the hostname ONCE and returns
-    the validated IP; the connection is pinned to that exact IP via a custom
-    HTTPAdapter, so the tool never re-resolves. This closes the TOCTOU window
-    (DNS-rebind) between our validation lookup and requests' own resolution. The
-    URL keeps the hostname, so TLS SNI, certificate verification and the Host
-    header all stay bound to the hostname.
+  * IP pinning (ADR 0001 S9.1, Option A): safety.validate_target resolves the
+    hostname ONCE and returns the validated IP; _PinnedHTTPAdapter pins the
+    urllib3 connection pool to that exact IP at the CONNECTION level (via
+    HTTPAdapter.build_connection_pool_key_attributes, requests' own documented
+    extension point for this use case), so the tool never re-resolves. This
+    closes the TOCTOU window (DNS-rebind) between our validation lookup and
+    requests' own resolution. `server_hostname`/`assert_hostname` are pinned
+    to the hostname (not the IP), so TLS SNI, certificate verification and the
+    Host header all stay bound to the hostname -- only the TCP destination is
+    the validated IP.
+    This replaces a prior design (global `socket.getaddrinfo` monkeypatch
+    under a shared lock) that serialized every http-tier fetch process-wide
+    (head-of-line blocking). Each `_PinnedHTTPAdapter` instance owns its own
+    private `urllib3.PoolManager` (via HTTPAdapter.__init__ -> init_poolmanager)
+    and is used for exactly one request, so there is no shared mutable state
+    and no lock: concurrent fetches to different targets never serialize on
+    each other.
   * redirects are NOT auto-followed; each hop is re-validated and re-pinned.
   * the response body is size-capped while streaming (anti-OOM, CWE-400).
 """
 
 from __future__ import annotations
 
-import contextlib
-import socket
-import threading
-from typing import Iterator
 from urllib.parse import urljoin
 
 import requests
 from requests.adapters import HTTPAdapter
+from requests.models import PreparedRequest
 
 from ..challenge import looks_challenged
 from ..errors import FetchError
@@ -43,45 +51,35 @@ _HEADERS = {
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
 }
 
-# Serialize the scoped resolver swap (defensive; the MVP is single-threaded).
-_dns_lock = threading.Lock()
-
-
-@contextlib.contextmanager
-def _pinned_getaddrinfo(hostname: str, ip: str) -> Iterator[None]:
-    """Within this context, resolving `hostname` yields ONLY the pinned `ip`.
-
-    The pinned answer is synthesized directly (no re-resolution), so a rebinding
-    resolver cannot substitute a different address. Other hosts resolve normally.
-    """
-    original = socket.getaddrinfo
-    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
-
-    def patched(host, port, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if host == hostname:
-            return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
-                     (ip, port))]
-        return original(host, port, *args, **kwargs)
-
-    with _dns_lock:
-        socket.getaddrinfo = patched  # type: ignore[assignment]
-        try:
-            yield
-        finally:
-            socket.getaddrinfo = original  # type: ignore[assignment]
-
 
 class _PinnedHTTPAdapter(HTTPAdapter):
-    """HTTPAdapter that pins DNS for one hostname to a validated IP during send."""
+    """HTTPAdapter that pins the connection pool for one hostname to a
+    validated IP, at the urllib3 connection-pool-key level (no DNS
+    monkeypatch, no shared lock -- see module docstring).
+
+    A fresh instance (with its own private urllib3.PoolManager) is created
+    PER REQUEST by HttpFetcher.fetch, so this is trivially concurrency-safe:
+    nothing is shared or mutated between requests, even to the same host.
+    """
 
     def __init__(self, hostname: str, ip: str, **kwargs) -> None:
         self._hostname = hostname
         self._ip = ip
         super().__init__(**kwargs)
 
-    def send(self, request, **kwargs):  # type: ignore[no-untyped-def]
-        with _pinned_getaddrinfo(self._hostname, self._ip):
-            return super().send(request, **kwargs)
+    def build_connection_pool_key_attributes(
+        self, request: PreparedRequest, verify, cert=None,
+    ):  # type: ignore[no-untyped-def]
+        host_params, pool_kwargs = super().build_connection_pool_key_attributes(
+            request, verify, cert,
+        )
+        # Pin the pool (and therefore the TCP connection) to the validated IP...
+        host_params["host"] = self._ip
+        # ...while keeping TLS SNI + certificate hostname verification bound
+        # to the real hostname, exactly as if we had connected to it directly.
+        pool_kwargs["server_hostname"] = self._hostname
+        pool_kwargs["assert_hostname"] = self._hostname
+        return host_params, pool_kwargs
 
 
 def _read_capped(resp: requests.Response) -> str:
@@ -99,24 +97,49 @@ def _read_capped(resp: requests.Response) -> str:
 
 
 class HttpFetcher:
-    """Fetcher port implementation backed by `requests` (no TLS impersonation)."""
+    """Fetcher port implementation backed by `requests` (no TLS impersonation).
+
+    Concurrency (ADR 0001 S9.1): fetch() builds a fresh requests.Session (and
+    therefore a fresh, private urllib3.PoolManager) PER HOP, unless a session
+    was explicitly injected via the constructor (test-only override -- a
+    shared session is not thread-safe by design and is never used in
+    production). This is the "session PAR REQUÊTE" requirement: nothing on
+    self is mutated by fetch(), so concurrent fetch() calls -- even to the
+    same host -- never race on a shared adapter map or connection pool.
+    """
 
     method_name = "http"
 
     def __init__(self, domain_policy: DomainPolicy,
                  session: requests.Session | None = None) -> None:
+        # Fail FAST (at construction, not silently at request time) if the
+        # requests version is too old to carry the IP pin: _PinnedHTTPAdapter
+        # overrides build_connection_pool_key_attributes, added in requests
+        # 2.32.0. On an older requests the parent never calls the override and
+        # the SSRF IP pin would silently vanish (CWE-918). pyproject pins
+        # requests>=2.34; this guard catches any environment/dependency skew.
+        if not hasattr(HTTPAdapter, "build_connection_pool_key_attributes"):
+            raise RuntimeError(
+                "requests is too old for the SSRF IP pin: "
+                "HTTPAdapter.build_connection_pool_key_attributes (requests "
+                ">=2.32.0) is missing. Install requests>=2.34 (see "
+                "autolycos/pyproject.toml)."
+            )
         self._domain_policy = domain_policy
-        self._session = session or requests.Session()
+        # Test-only override; production callers leave this None so fetch()
+        # builds an unshared session per hop (see class docstring).
+        self._session_override = session
 
     def fetch(self, url: str) -> FetchResult:
         current = url
         for _ in range(MAX_REDIRECTS + 1):
             # resolves once, pins target.ip
             target = validate_target(current, self._domain_policy)
+            session = self._session_override or requests.Session()
             adapter = _PinnedHTTPAdapter(target.host, target.ip)
-            self._session.mount(f"{target.scheme}://{target.host}", adapter)
+            session.mount(f"{target.scheme}://{target.host}", adapter)
 
-            resp = self._session.get(
+            resp = session.get(
                 current, headers=_HEADERS, timeout=TIMEOUT,
                 allow_redirects=False, stream=True,
             )

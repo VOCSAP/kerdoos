@@ -1,14 +1,18 @@
 """HIGH-2 / M1: shared anti-SSRF guard + IP pinning (CWE-918).
 
 The guard now lives in autolycos.safety (single choke point). These tests target
-it there, plus the DNS-rebind pinning wired in autolycos.adapters.http.
+it there, plus the connection-level IP pin wired in autolycos.adapters.http
+(ADR 0001 S9.1 Option A).
 """
 
 from __future__ import annotations
 
+import importlib.util
 import socket
 import unittest
 from unittest import mock
+
+import requests
 
 from autolycos import safety
 from autolycos.adapters import http
@@ -54,6 +58,59 @@ class IpGuardTest(unittest.TestCase):
     def test_ipv4_mapped_global_allowed(self) -> None:
         # A mapped GLOBAL address must still be judged safe (no over-blocking).
         self.assertTrue(safety.ip_is_safe("::ffff:104.18.0.1"))
+
+
+class IpGuardNonRoutableMatrixTest(unittest.TestCase):
+    """Phase 2a item 1 (ADR 0001 S9): a biting matrix over EVERY non-routable
+    range ip_is_safe must reject, including the gaps explicitly called out at
+    the P0 gate (CGNAT native+mapped, 0.0.0.0/8 mapped, ULA, v6 link-local).
+
+    Empirically confirmed (2026-07-08, probe script) that the CURRENT
+    ip_is_safe already rejects all cases below -- no implementation gap was
+    found; this class exists to lock the coverage in as a regression guard
+    (Kleos #11082).
+    """
+
+    def test_loopback_blocked(self) -> None:
+        self.assertFalse(safety.ip_is_safe("127.0.0.1"))
+        self.assertFalse(safety.ip_is_safe("::1"))
+
+    def test_link_local_v4_blocked_including_metadata(self) -> None:
+        self.assertFalse(safety.ip_is_safe("169.254.1.1"))
+        self.assertFalse(safety.ip_is_safe("169.254.169.254"))  # cloud metadata
+
+    def test_link_local_v6_blocked(self) -> None:
+        # fe80::/10
+        self.assertFalse(safety.ip_is_safe("fe80::1"))
+
+    def test_unique_local_v6_blocked(self) -> None:
+        # fc00::/7 (ULA)
+        self.assertFalse(safety.ip_is_safe("fc00::1"))
+        self.assertFalse(safety.ip_is_safe("fd12:3456:789a::1"))
+
+    def test_zero_network_v4_blocked_native_and_mapped(self) -> None:
+        # 0.0.0.0/8
+        self.assertFalse(safety.ip_is_safe("0.0.0.0"))
+        self.assertFalse(safety.ip_is_safe("0.1.2.3"))
+        self.assertFalse(safety.ip_is_safe("::ffff:0.0.0.0"))
+
+    def test_cgnat_blocked_native_and_mapped(self) -> None:
+        # 100.64.0.0/10 (Carrier-Grade NAT, RFC 6598)
+        self.assertFalse(safety.ip_is_safe("100.64.0.1"))
+        self.assertFalse(safety.ip_is_safe("100.127.255.254"))  # range edge
+        self.assertFalse(safety.ip_is_safe("::ffff:100.64.0.1"))
+
+    def test_multicast_blocked(self) -> None:
+        self.assertFalse(safety.ip_is_safe("224.0.0.1"))
+        self.assertFalse(safety.ip_is_safe("ff02::1"))
+
+    def test_broadcast_blocked(self) -> None:
+        self.assertFalse(safety.ip_is_safe("255.255.255.255"))
+
+    def test_public_controls_still_allowed(self) -> None:
+        # Sanity: the matrix above must not accidentally over-block globals.
+        self.assertTrue(safety.ip_is_safe("8.8.8.8"))
+        self.assertTrue(safety.ip_is_safe("2001:4860:4860::8888"))
 
 
 def _addrinfo(ip: str, port: int = 443):
@@ -104,9 +161,19 @@ class ValidateTargetTest(unittest.TestCase):
 
 
 class PinIpTest(unittest.TestCase):
-    """The connection must use the validated IP, never a later re-resolution."""
+    """The connection must use the validated IP, never a later re-resolution.
 
-    def test_validated_ip_survives_rebind(self) -> None:
+    Phase 2a item 3 (ADR 0001 S9.1, Option A): the previous global
+    socket.getaddrinfo monkeypatch (_pinned_getaddrinfo, serialized under a
+    process-wide lock) is replaced by a connection-level urllib3 pin
+    (_PinnedHTTPAdapter.build_connection_pool_key_attributes). The new
+    mechanism structurally never calls getaddrinfo for the pinned host on the
+    request path at all -- the validated IP is placed directly into the
+    urllib3 connection-pool key, so there is nothing for a DNS rebind to
+    intercept.
+    """
+
+    def test_pool_key_pinned_to_validated_ip(self) -> None:
         # 1st resolution (validation) -> global IP, pinned.
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("104.18.0.1")):
@@ -114,31 +181,347 @@ class PinIpTest(unittest.TestCase):
                 "https://kabum.com.br/produto/1", _POLICY)
         self.assertEqual(target.ip, "104.18.0.1")
 
-        # Simulate a rebind: the underlying resolver now returns a PRIVATE IP.
-        # Inside the pin context the host must still resolve to the pinned
-        # global IP -- the rebind answer is never consulted.
+        adapter = http._PinnedHTTPAdapter(target.host, target.ip)
+        req = requests.models.PreparedRequest()
+        req.prepare(method="GET", url="https://kabum.com.br/produto/1",
+                    headers={"Host": target.host})
+
+        # A rebind at this point (a later getaddrinfo call returning a
+        # PRIVATE ip) must have NO effect: the pool key is built directly
+        # from target.ip, no resolver is consulted on this path.
         with mock.patch.object(socket, "getaddrinfo",
                                return_value=_addrinfo("10.9.9.9")) as rebind:
-            with http._pinned_getaddrinfo(target.host, target.ip):
-                resolved = socket.getaddrinfo(target.host, target.port)
-            ips = {info[4][0] for info in resolved}
-        self.assertEqual(ips, {"104.18.0.1"})   # pinned, not the rebind 10.9.9.9
-        rebind.assert_not_called()              # synthetic answer, no re-resolve
+            host_params, pool_kwargs = adapter.build_connection_pool_key_attributes(
+                req, verify=True)
+        rebind.assert_not_called()
+        self.assertEqual(host_params["host"], "104.18.0.1")   # pinned, not rebind
+        self.assertEqual(pool_kwargs["server_hostname"], "kabum.com.br")
+        self.assertEqual(pool_kwargs["assert_hostname"], "kabum.com.br")
 
-    def test_pin_leaves_other_hosts_untouched(self) -> None:
-        sentinel = _addrinfo("203.0.113.7", port=443)
-        with mock.patch.object(socket, "getaddrinfo",
-                               return_value=sentinel) as other:
-            with http._pinned_getaddrinfo("kabum.com.br", "104.18.0.1"):
-                out = socket.getaddrinfo("amazon.com.br", 443)
-        self.assertEqual(out, sentinel)
-        other.assert_called_once()
+    def test_each_adapter_owns_a_private_pool_manager(self) -> None:
+        # No shared/mutable state between adapter instances -- concurrency
+        # safety comes from this, not from a lock (see http.py docstring).
+        a = http._PinnedHTTPAdapter("kabum.com.br", "104.18.0.1")
+        b = http._PinnedHTTPAdapter("amazon.com.br", "104.18.0.2")
+        self.assertIsNot(a.poolmanager, b.poolmanager)
 
-    def test_getaddrinfo_restored_after_context(self) -> None:
-        original = socket.getaddrinfo
-        with http._pinned_getaddrinfo("kabum.com.br", "104.18.0.1"):
-            self.assertIsNot(socket.getaddrinfo, original)
-        self.assertIs(socket.getaddrinfo, original)
+    def test_pin_api_present_on_installed_requests(self) -> None:
+        # The pin depends on this override point (requests >=2.32.0). Its
+        # presence is the premise of the whole http-tier SSRF pin.
+        self.assertTrue(hasattr(
+            http.HTTPAdapter, "build_connection_pool_key_attributes"))
+
+    def test_constructor_fails_fast_when_pin_api_absent(self) -> None:
+        # Gate C1: if the installed requests is too old (override point gone),
+        # constructing the fetcher must FAIL LOUDLY instead of silently losing
+        # the IP pin at request time. Simulate the skew by swapping HTTPAdapter
+        # for a class lacking the method.
+        class _OldHTTPAdapter:
+            pass
+
+        with mock.patch.object(http, "HTTPAdapter", _OldHTTPAdapter):
+            with self.assertRaises(RuntimeError):
+                http.HttpFetcher(_POLICY)
+
+
+class HttpConcurrencyTest(unittest.TestCase):
+    """Phase 2a item 3 acceptance: concurrent http-tier fetches must not
+    serialize on each other (no global lock / shared session or adapter).
+    HttpFetcher is synchronous-only in this codebase (no asyncio fetch path
+    exists to also exercise, per ADR 0001 S9.1's "threadpool ET async"
+    wording -- only the threadpool half applies here), so this validates the
+    concurrency property via a ThreadPoolExecutor and by patching
+    requests.Session.get at the CLASS level (autospec, so the mock receives
+    `self`): this exercises the real production fetch() path (no session
+    override), proving each call builds its OWN Session/adapter rather than
+    sharing self._session -- the exact design that made the old shared
+    session + global DNS-patch lock necessary.
+    """
+
+    def test_concurrent_fetches_use_independent_sessions_same_host(self) -> None:
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        barrier = threading.Barrier(2, timeout=5)
+        session_ids: list[int] = []
+        ids_lock = threading.Lock()
+
+        def _fake_get(self, url, headers=None, timeout=None,
+                       allow_redirects=None, stream=None):
+            with ids_lock:
+                session_ids.append(id(self))
+            # Rendezvous: both threads must be inside a GET simultaneously --
+            # if fetch() serialized on shared state before reaching here
+            # (as the old global-lock design did), this would deadlock and
+            # the barrier.wait() timeout would fail the test.
+            barrier.wait()
+            resp = mock.MagicMock(status_code=200, is_redirect=False)
+            resp.headers = {"Content-Type": "text/html"}
+            resp.encoding = "utf-8"
+            resp.iter_content.return_value = iter([b"<html></html>"])
+            return resp
+
+        fetcher = http.HttpFetcher(_POLICY)  # production path: no session override
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(requests.Session, "get", _fake_get):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [
+                        pool.submit(fetcher.fetch, "https://kabum.com.br/a"),
+                        pool.submit(fetcher.fetch, "https://kabum.com.br/b"),
+                    ]
+                    for f in futures:
+                        f.result(timeout=5)
+
+        # Both GETs were in flight at once (barrier didn't time out) AND each
+        # used a DIFFERENT Session instance -- fetch() shares no mutable
+        # session/adapter state across concurrent calls, even to the SAME
+        # host (the scenario a shared self._session.mount() would have raced
+        # on).
+        self.assertEqual(len(session_ids), 2)
+        self.assertNotEqual(session_ids[0], session_ids[1])
+
+
+class RedirectRevalidationTest(unittest.TestCase):
+    """Phase 2a item 4 (ADR 0001 S9): a 3xx redirect must be re-validated on
+    the NEW target, http.py and tls.py already loop back to validate_target at
+    the top of each hop (structurally present before Phase 2a) -- these tests
+    lock that behavior in as a regression guard rather than a new fix.
+    """
+
+    def test_http_redirect_to_internal_ip_blocked(self) -> None:
+        # First hop (kabum.com.br) resolves to a safe global IP and returns a
+        # 302 pointing at a DIFFERENT allowlisted host (amazon.com.br) that
+        # resolves to a private IP -- the redirect hop must be rejected before
+        # ever following it, not silently connected to.
+        redirect_resp = mock.MagicMock(status_code=302, is_redirect=True)
+        redirect_resp.headers = {"Location": "https://amazon.com.br/internal"}
+        session = mock.MagicMock()
+        session.get.return_value = redirect_resp
+
+        mapping = {"kabum.com.br": "104.18.0.1", "amazon.com.br": "10.1.2.3"}
+
+        def _resolver(host, port, *args, **kwargs):
+            return _addrinfo(mapping[host], port)
+
+        fetcher = http.HttpFetcher(_POLICY, session=session)
+        with mock.patch.object(safety.socket, "getaddrinfo", side_effect=_resolver):
+            with self.assertRaises(SSRFError):
+                fetcher.fetch("https://kabum.com.br/produto/1")
+        # Only the first (safe) hop's GET was ever issued; the redirect target
+        # was rejected by validate_target before a second request could fire.
+        session.get.assert_called_once()
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("curl_cffi") is not None, "curl_cffi not installed")
+    def test_tls_redirect_to_internal_ip_blocked(self) -> None:
+        from autolycos.adapters import tls
+
+        class _RedirectResp:
+            status_code = 302
+            headers = {"Location": "https://kabum.com.br/internal"}
+
+            def iter_content(self, chunk_size):
+                return iter(())
+
+            def close(self):
+                pass
+
+        def _fake_get(url, **kwargs):
+            return _RedirectResp()
+
+        mapping = {"amazon.com.br": "104.18.0.1", "kabum.com.br": "10.1.2.3"}
+
+        def _resolver(host, port, *args, **kwargs):
+            return _addrinfo(mapping[host], port)
+
+        with mock.patch.object(safety.socket, "getaddrinfo", side_effect=_resolver):
+            with mock.patch("curl_cffi.requests.get", _fake_get):
+                with self.assertRaises(SSRFError):
+                    tls.TlsFetcher(_POLICY).fetch("https://amazon.com.br/dp/X")
+
+
+class _EchoUpstream:
+    """A tiny loopback TCP server that echoes back whatever it receives.
+
+    Stands in for the real remote origin so the egress-proxy's CONNECT tunnel
+    (dial + bidirectional splice) can be exercised end-to-end over real
+    loopback sockets, without any network access.
+    """
+
+    def __init__(self) -> None:
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(("127.0.0.1", 0))
+        self._srv.listen(4)
+        self.host, self.port = self._srv.getsockname()[:2]
+        self._thread = None
+
+    def start(self) -> None:
+        import threading
+
+        def _run() -> None:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            with conn:
+                while True:
+                    try:
+                        data = conn.recv(4096)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    conn.sendall(data)
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+
+
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
+def _host_aware_resolver(target_host: str, target_ip: str):
+    """A getaddrinfo side_effect that maps ONE hostname to a fixed IP and
+    delegates everything else (notably 127.0.0.1 for the test's own client
+    socket to the proxy) to the real resolver -- patching getaddrinfo globally
+    would otherwise misroute the client's connection to the proxy.
+    """
+    def _resolver(host, port, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if host == target_host:
+            return _addrinfo(target_ip, port)
+        return _REAL_GETADDRINFO(host, port, *args, **kwargs)
+    return _resolver
+
+
+class EgressProxyTest(unittest.TestCase):
+    """Phase 2a item 2 (ADR 0001 S9): loopback IP-pinning CONNECT proxy."""
+
+    def test_strip_dangerous_browser_args(self) -> None:
+        from autolycos.egress_proxy import strip_dangerous_browser_args
+        args = [
+            "--headless",
+            "--host-resolver-rules=MAP x 1.2.3.4",
+            "--proxy-server=http://evil:8080",
+            "--ignore-certificate-errors",
+            "--window-size=800,600",
+        ]
+        self.assertEqual(
+            strip_dangerous_browser_args(args),
+            ["--headless", "--window-size=800,600"])
+
+    def test_binds_loopback_only(self) -> None:
+        from autolycos.egress_proxy import PinningProxy
+        with PinningProxy() as proxy:
+            self.assertEqual(proxy.bound_host, "127.0.0.1")
+            self.assertTrue(proxy.url.startswith("http://127.0.0.1:"))
+
+    def test_connect_pins_validated_ip_and_tunnels(self) -> None:
+        from autolycos.egress_proxy import PinningProxy
+
+        upstream = _EchoUpstream()
+        upstream.start()
+        self.addCleanup(upstream.stop)
+
+        dialed: list[tuple[str, int]] = []
+
+        def _dialer(ip: str, port: int) -> socket.socket:
+            dialed.append((ip, port))
+            # Ignore the (restricted 443) port; dial the fake echo server.
+            return socket.create_connection((upstream.host, upstream.port),
+                                            timeout=5)
+
+        proxy = PinningProxy(dialer=_dialer)
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        # A rebind at connect time would resolve to a private IP; the proxy must
+        # dial the IP it PINNED at resolve (104.18.0.1), never re-resolve.
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               side_effect=_host_aware_resolver(
+                                   "kabum.com.br", "104.18.0.1")):
+            client = socket.create_connection(
+                (proxy.bound_host, proxy.bound_port), timeout=5)
+            client.settimeout(5)
+            client.sendall(b"CONNECT kabum.com.br:443 HTTP/1.1\r\n"
+                           b"Host: kabum.com.br:443\r\n\r\n")
+            resp = client.recv(1024)
+            self.assertIn(b"200", resp)
+            client.sendall(b"ping-through-tunnel")
+            echoed = client.recv(1024)
+            client.close()
+
+        self.assertEqual(echoed, b"ping-through-tunnel")
+        self.assertEqual(dialed, [("104.18.0.1", 443)])   # pinned IP, not rebind
+
+    def test_connect_rejects_disallowed_port(self) -> None:
+        from autolycos.egress_proxy import PinningProxy
+
+        dialed: list[tuple[str, int]] = []
+        proxy = PinningProxy(dialer=lambda ip, p: dialed.append((ip, p)))  # type: ignore[arg-type,return-value]
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        client = socket.create_connection(
+            (proxy.bound_host, proxy.bound_port), timeout=5)
+        client.settimeout(5)
+        client.sendall(b"CONNECT kabum.com.br:22 HTTP/1.1\r\n\r\n")
+        resp = client.recv(1024)
+        client.close()
+        self.assertIn(b"403", resp)
+        self.assertEqual(dialed, [])   # never resolved nor dialed
+
+    def test_connect_rejects_internal_resolving_host(self) -> None:
+        from autolycos.egress_proxy import PinningProxy
+
+        dialed: list[tuple[str, int]] = []
+        proxy = PinningProxy(dialer=lambda ip, p: dialed.append((ip, p)))  # type: ignore[arg-type,return-value]
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               side_effect=_host_aware_resolver(
+                                   "kabum.com.br", "10.1.2.3")):
+            client = socket.create_connection(
+                (proxy.bound_host, proxy.bound_port), timeout=5)
+            client.settimeout(5)
+            client.sendall(b"CONNECT kabum.com.br:443 HTTP/1.1\r\n\r\n")
+            resp = client.recv(1024)
+            client.close()
+        self.assertIn(b"403", resp)
+        self.assertEqual(dialed, [])   # blocked before dialing
+
+    def test_non_connect_method_rejected(self) -> None:
+        from autolycos.egress_proxy import PinningProxy
+
+        proxy = PinningProxy()
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        client = socket.create_connection(
+            (proxy.bound_host, proxy.bound_port), timeout=5)
+        client.settimeout(5)
+        client.sendall(b"GET http://kabum.com.br/ HTTP/1.1\r\n\r\n")
+        resp = client.recv(1024)
+        client.close()
+        self.assertIn(b"400", resp)
+
+    def test_non_loopback_client_helper(self) -> None:
+        # The accept loop rejects any non-loopback peer; the bind already blocks
+        # remote clients, this asserts the explicit guard's predicate.
+        from autolycos.egress_proxy import _is_loopback
+        self.assertTrue(_is_loopback("127.0.0.1"))
+        self.assertTrue(_is_loopback("::1"))
+        self.assertFalse(_is_loopback("10.1.2.3"))
+        self.assertFalse(_is_loopback("8.8.8.8"))
+        self.assertFalse(_is_loopback("not-an-ip"))
 
 
 if __name__ == "__main__":

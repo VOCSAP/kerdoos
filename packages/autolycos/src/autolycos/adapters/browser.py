@@ -8,16 +8,22 @@ matches what a real browser produces.
 Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
   * validate_target runs FIRST, before Playwright is even imported and before
     any navigation, so a non-allowlisted / rebinding / private target is refused
-    even when the optional dependency is absent (the guard raises first).
-  * anti-rebind on the PRIMARY target: Chromium is launched with
-    --host-resolver-rules="MAP <host> <validated-ip>", pinning the navigation to
-    the exact IP safety resolved (the browser's own resolver is bypassed for
-    that host), analogous to CURLOPT_RESOLVE in the tls tier. SNI, certificate
-    verification and the Host header stay bound to the hostname.
+    even when the optional dependency is absent (the guard raises first). This
+    enforces the navigation-domain allowlist on the PRIMARY target (the proxy
+    below does not: it is the network-layer IP guard, not the domain guard).
+  * anti-rebind (ADR 0001 S9): Chromium is launched behind a loopback
+    egress-proxy (PinningProxy) via proxy_config; Chromium NEVER resolves the
+    target itself -- it CONNECTs through the proxy, which resolves once, rejects
+    any non-global IP (ip_is_safe) and dials the PINNED IP. This closes the DNS
+    rebind TOCTOU at the network layer for BOTH the primary navigation AND every
+    sub-resource, replacing the fragile --host-resolver-rules launch flag. TLS
+    stays end-to-end (the proxy tunnels ciphertext; SNI/cert/Host verification
+    stay bound to the hostname). Egress-weakening launch flags are scrubbed
+    (strip_dangerous_browser_args).
   * sub-resource fan-out is gated: page.route("**/*") aborts any request whose
     host is not in the domain allowlist (a rendered page pulls many hosts; only
-    the target sites' domains may load). The network egress policy backstops the
-    non-pinned sub-resource hosts.
+    the target sites' domains may load). The proxy's IP pin backstops every host
+    that page.route does permit.
   * the rendered HTML is size-capped (anti-OOM, CWE-400).
 
 Playwright is imported lazily INSIDE fetch(), so this module -- and the whole
@@ -32,9 +38,10 @@ from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 from ..challenge import looks_challenged
+from ..egress_proxy import PinningProxy, strip_dangerous_browser_args
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import DomainPolicy, ValidatedTarget, validate_target
+from ..safety import DomainPolicy, validate_target
 
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 NAV_TIMEOUT_MS = 30_000
@@ -43,19 +50,6 @@ _WAIT_UNTIL = "networkidle"
 
 def _normalize_domains(domains: Iterable[str]) -> frozenset[str]:
     return frozenset(d.lower().rstrip(".") for d in domains if d)
-
-
-def _host_resolver_rules(target: ValidatedTarget) -> str:
-    """Chromium --host-resolver-rules pinning the target host to the validated IP.
-
-    Format is "MAP <host> <address>"; an IPv6 literal must be bracketed
-    ("[2001:db8::1]") or the colons are mis-parsed and the pin is silently
-    dropped -- which would re-open the DNS-rebind window for the primary
-    navigation. Only the primary host is pinned here; sub-resource hosts are
-    governed by the page.route domain allowlist plus the network egress policy.
-    """
-    addr = f"[{target.ip}]" if ":" in target.ip else target.ip
-    return f"MAP {target.host} {addr}"
 
 
 def _load_playwright():  # type: ignore[no-untyped-def]
@@ -98,15 +92,20 @@ class BrowserFetcher:
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using Playwright, so a
         # non-allowlisted or rebinding target is refused even if the optional
-        # dependency is absent (fail-closed, CWE-918).
-        target = validate_target(url, self._domain_policy)
+        # dependency is absent (fail-closed, CWE-918). This also enforces the
+        # navigation-domain allowlist on the primary target before we launch.
+        validate_target(url, self._domain_policy)
         sync_playwright = _load_playwright()
 
-        with sync_playwright() as pw:
+        # Loopback IP-pinning egress-proxy: Chromium routes every connection
+        # (primary + sub-resources) through it and never resolves the target
+        # itself, closing the DNS-rebind TOCTOU at the network layer (ADR S9).
+        with PinningProxy() as proxy, sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
-                # Pin the primary navigation host to the validated IP.
-                args=[f"--host-resolver-rules={_host_resolver_rules(target)}"],
+                proxy={"server": proxy.url},
+                # No caller args; scrub egress-weakening flags defensively.
+                args=strip_dangerous_browser_args([]),
             )
             try:
                 page = browser.new_page()

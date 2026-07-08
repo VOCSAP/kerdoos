@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Anti-bot fetching subsystem: escalating Fetcher tiers (http/tls/browser/uc) behind a stable port, with fail-closed SSRF guards. Domain-agnostic: the caller injects a DomainPolicy."
 requires-python = ">=3.11"
 dependencies = [
-    "requests>=2.31",
+    # Floor is 2.34 (matches the tested 2.34.2), NOT 2.31: the http tier's IP
+    # pin (adapters/http._PinnedHTTPAdapter) overrides
+    # HTTPAdapter.build_connection_pool_key_attributes, an API introduced in
+    # requests 2.32.0. On <2.32 that method does not exist, the parent never
+    # calls the override, and the SSRF IP pin would silently vanish (CWE-918).
+    "requests>=2.34",
 ]
 
 [project.optional-dependencies]
