@@ -13,7 +13,7 @@ tier.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from .adapters.http import HttpFetcher
 from .ports import Fetcher
@@ -56,7 +56,7 @@ def _make_uc(domain_policy: DomainPolicy,
 # Lazy factories so importing the router does not construct every tool. Each
 # accepts the injected DomainPolicy plus the per-site sub-resource domains
 # (the browser and uc tiers use the latter).
-_FACTORIES: dict[str, callable] = {
+_FACTORIES: dict[str, Callable[[DomainPolicy, Iterable[str]], Fetcher]] = {
     "http": _make_http,
     "tls": _make_tls,
     "browser": _make_browser,

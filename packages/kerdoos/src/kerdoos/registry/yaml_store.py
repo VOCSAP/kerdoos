@@ -66,9 +66,9 @@ def _parse_subresource_domains(body: Any, name: str) -> tuple[str, ...]:
     """Optional render-critical sub-resource CDN allowlist for a site.
 
     A list of host strings (e.g. ['http2.mlstatic.com']); absent -> empty. This
-    is NOT the navigation allowlist (autolycos.safety.ALLOWED_DOMAINS): these
-    hosts are only ever loaded as browser sub-resources, never navigated to, so
-    they are intentionally not validated against the navigation allowlist.
+    is NOT the navigation allowlist (kerdoos.registry.domain_policy.ALLOWED_DOMAINS):
+    these hosts are only ever loaded as browser sub-resources, never navigated
+    to, so they are intentionally not validated against the navigation allowlist.
     """
     raw = body.get("subresource_domains") if isinstance(body, dict) else None
     if raw is None:
