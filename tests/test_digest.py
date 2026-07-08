@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from core.domain import Availability, ScrapeStatus
-from digest.render import format_cents, render_digest
-from persistence.ports import ScrapeRecord
+from kerdoos.core.domain import Availability, ScrapeStatus
+from kerdoos.digest.render import format_cents, render_digest
+from kerdoos.persistence.ports import ScrapeRecord
 
 
 def _rec(source_id="p:kabum:aa", status=ScrapeStatus.OK, pix=755800, card=755800,

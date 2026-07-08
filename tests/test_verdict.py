@@ -6,9 +6,9 @@ import unittest
 
 from autolycos.errors import FetchError
 from autolycos.ports import FetchResult
-from core.domain import Availability, Extract, ParseError, ScrapeStatus
-from core.orchestrator import scrape_one
-from core.verdict import compute_verdict
+from kerdoos.core.domain import Availability, Extract, ParseError, ScrapeStatus
+from kerdoos.core.orchestrator import scrape_one
+from kerdoos.core.verdict import compute_verdict
 
 
 def _extract(pix=755800, card=None, availability=Availability.IN_STOCK) -> Extract:

@@ -13,9 +13,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from core.domain import Availability, ParseError
-from parsers.adapters.terabyte import TerabyteParser
-from parsers.ports import ParserSpec
+from kerdoos.core.domain import Availability, ParseError
+from kerdoos.parsers.adapters.terabyte import TerabyteParser
+from kerdoos.parsers.ports import ParserSpec
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "terabyte_40561.html"
 

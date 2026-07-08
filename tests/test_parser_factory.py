@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from parsers.adapters.amazon import AmazonParser
-from parsers.adapters.statejson import StateJsonParser
-from parsers.factory import (KIND_WHITELIST, UnknownParserKindError,
+from kerdoos.parsers.adapters.amazon import AmazonParser
+from kerdoos.parsers.adapters.statejson import StateJsonParser
+from kerdoos.parsers.factory import (KIND_WHITELIST, UnknownParserKindError,
                              build_parser)
-from parsers.ports import ParserSpec
+from kerdoos.parsers.ports import ParserSpec
 
 
 class FactoryTest(unittest.TestCase):

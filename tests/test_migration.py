@@ -13,9 +13,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.domain import Availability, ScrapeStatus
-from persistence.ports import ScrapeRecord
-from persistence.sqlite_store import SqliteStateStore
+from kerdoos.core.domain import Availability, ScrapeStatus
+from kerdoos.persistence.ports import ScrapeRecord
+from kerdoos.persistence.sqlite_store import SqliteStateStore
 
 # The exact pre-member schema (10 columns), as shipped with the Kabum slice.
 _OLD_SCHEMA = """

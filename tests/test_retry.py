@@ -12,9 +12,9 @@ import unittest
 
 from autolycos.errors import FetchError
 from autolycos.ports import FetchResult
-from core import retry
-from core.domain import ScrapeStatus
-from core.orchestrator import scrape_one
+from kerdoos.core import retry
+from kerdoos.core.domain import ScrapeStatus
+from kerdoos.core.orchestrator import scrape_one
 
 
 class _ScriptedFetcher:

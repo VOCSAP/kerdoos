@@ -14,9 +14,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core.domain import Availability, ScrapeStatus
-from interfaces.cli import main as cli
-from persistence.ports import ScrapeRecord
+from kerdoos.core.domain import Availability, ScrapeStatus
+from kerdoos.interfaces.cli import main as cli
+from kerdoos.persistence.ports import ScrapeRecord
 
 _SITES = """\
 sites:

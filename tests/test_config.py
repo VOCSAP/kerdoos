@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from registry.yaml_store import ConfigError, YamlConfigStore
+from kerdoos.registry.yaml_store import ConfigError, YamlConfigStore
 
 _SITES = """\
 sites:

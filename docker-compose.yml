@@ -1,0 +1,23 @@
+# Structural skeleton (Phase 0, ADR 0001 §7): two profiles selecting the
+# Docker build target. No SMTP relay, no ConfigStore volume, no egress-proxy
+# wiring here -- those land with their respective ADR-scoped phases.
+#
+#   docker compose --profile slim up        # http + tls tiers only
+#   docker compose --profile autonomous up  # + browser + uc_selenium tiers
+
+services:
+  kerdoos-slim:
+    profiles: ["slim"]
+    build:
+      context: .
+      target: slim
+    ports:
+      - "8000:8000"
+
+  kerdoos-autonomous:
+    profiles: ["autonomous"]
+    build:
+      context: .
+      target: autonomous
+    ports:
+      - "8000:8000"

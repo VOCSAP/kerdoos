@@ -13,6 +13,8 @@ import pathlib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+AUTOLYCOS_SRC = ROOT / "packages" / "autolycos" / "src" / "autolycos"
+KERDOOS_SRC = ROOT / "packages" / "kerdoos" / "src" / "kerdoos"
 
 TOOLS = {"requests", "curl_cffi", "playwright", "seleniumbase",
          "selenium", "bs4", "httpx", "yaml"}
@@ -35,13 +37,13 @@ def _imports(path: pathlib.Path) -> set[str]:
     return names
 
 
-def _py_files(pkg: str) -> list[pathlib.Path]:
-    return sorted((ROOT / pkg).rglob("*.py"))
+def _py_files(base: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(base.rglob("*.py"))
 
 
 class ImportContractTest(unittest.TestCase):
     def test_core_imports_no_third_party_tool(self) -> None:
-        for f in _py_files("core"):
+        for f in _py_files(KERDOOS_SRC / "core"):
             for name in _imports(f):
                 self.assertNotIn(
                     name.split(".")[0], TOOLS,
@@ -49,7 +51,7 @@ class ImportContractTest(unittest.TestCase):
                 )
 
     def test_core_imports_no_concrete_adapter(self) -> None:
-        for f in _py_files("core"):
+        for f in _py_files(KERDOOS_SRC / "core"):
             for name in _imports(f):
                 offending = (".adapters" in name
                              or name.endswith(CONCRETE_SUFFIXES))
@@ -59,29 +61,31 @@ class ImportContractTest(unittest.TestCase):
                 )
 
     def test_autolycos_never_imports_core(self) -> None:
-        for f in _py_files("autolycos"):
+        for f in _py_files(AUTOLYCOS_SRC):
             for name in _imports(f):
-                self.assertNotEqual(
-                    name.split(".")[0], "core",
-                    f"{f.relative_to(ROOT)} imports core ({name!r})",
+                top = name.split(".")[0]
+                self.assertNotIn(
+                    top, ("core", "kerdoos"),
+                    f"{f.relative_to(ROOT)} imports {top!r} (extractibility "
+                    "invariant: autolycos never imports kerdoos/core)",
                 )
 
     def test_core_port_dependencies_are_tool_free(self) -> None:
         # Modules core is allowed to import must not drag a tool in.
         port_modules = [
-            ROOT / "autolycos" / "ports.py",
-            ROOT / "autolycos" / "errors.py",
-            ROOT / "autolycos" / "__init__.py",
+            AUTOLYCOS_SRC / "ports.py",
+            AUTOLYCOS_SRC / "errors.py",
+            AUTOLYCOS_SRC / "__init__.py",
             # safety.py is the shared anti-SSRF choke point imported by the
             # registry loader; it must stay tool-free (stdlib + .errors only)
             # so a future tool import in the SSRF guard breaks this test.
-            ROOT / "autolycos" / "safety.py",
+            AUTOLYCOS_SRC / "safety.py",
             # challenge.py is the shared challenge heuristic imported by every
             # fetcher adapter; it must stay tool-free (pure stdlib) so the
             # cross-tier `challenged` signal never drags a tool in.
-            ROOT / "autolycos" / "challenge.py",
-            ROOT / "parsers" / "ports.py",
-            ROOT / "persistence" / "ports.py",
+            AUTOLYCOS_SRC / "challenge.py",
+            KERDOOS_SRC / "parsers" / "ports.py",
+            KERDOOS_SRC / "persistence" / "ports.py",
         ]
         for f in port_modules:
             for name in _imports(f):

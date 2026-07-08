@@ -13,9 +13,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from core.domain import Availability, ParseError
-from parsers.adapters.magalu import MagaluParser
-from parsers.ports import ParserSpec
+from kerdoos.core.domain import Availability, ParseError
+from kerdoos.parsers.adapters.magalu import MagaluParser
+from kerdoos.parsers.ports import ParserSpec
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 

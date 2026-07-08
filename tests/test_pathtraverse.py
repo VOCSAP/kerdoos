@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from parsers.pathtraverse import PathResolutionError, resolve_path
+from kerdoos.parsers.pathtraverse import PathResolutionError, resolve_path
 
 
 class PathTraverseTest(unittest.TestCase):

@@ -6,9 +6,9 @@ import json
 import pathlib
 import unittest
 
-from core.domain import Availability, ParseError
-from parsers.adapters.statejson import StateJsonParser, _to_cents
-from parsers.ports import ParserSpec
+from kerdoos.core.domain import Availability, ParseError
+from kerdoos.parsers.adapters.statejson import StateJsonParser, _to_cents
+from kerdoos.parsers.ports import ParserSpec
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "kabum_aw3225qf.html"
 

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from core.domain import Availability, ScrapeStatus
-from persistence.ports import ScrapeRecord
-from persistence.sqlite_store import SqliteStateStore
-from registry.ports import make_source_id
+from kerdoos.core.domain import Availability, ScrapeStatus
+from kerdoos.persistence.ports import ScrapeRecord
+from kerdoos.persistence.sqlite_store import SqliteStateStore
+from kerdoos.registry.ports import make_source_id
 
 
 def _record(source_id: str, ts: str, pix: int | None) -> ScrapeRecord:

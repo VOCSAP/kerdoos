@@ -15,9 +15,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from core.domain import Availability, ParseError
-from parsers.adapters.amazon import AmazonParser
-from parsers.ports import ParserSpec
+from kerdoos.core.domain import Availability, ParseError
+from kerdoos.parsers.adapters.amazon import AmazonParser
+from kerdoos.parsers.ports import ParserSpec
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "amazon_b0cvqgsrz9.html"
 
