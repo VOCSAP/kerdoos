@@ -13,7 +13,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-browser = ["playwright>=1.40"]
+# patchright (drop-in playwright fork) launches an undetected Chromium (deep
+# launch-time patches, Kleos #11050); playwright-stealth layers JS-level
+# evasion on each page. The vanilla playwright dep is intentionally dropped
+# here -- patchright provides the same sync_api surface (Phase 2b).
+browser = ["patchright>=1.49", "playwright-stealth>=2.0"]
 tls = ["curl_cffi>=0.7"]
 uc = ["seleniumbase>=4.24"]
 

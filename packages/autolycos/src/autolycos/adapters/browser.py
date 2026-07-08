@@ -1,9 +1,16 @@
-"""Browser Fetcher adapter (Playwright/Chromium, MVP tier `browser`).
+"""Browser Fetcher adapter (patchright/Chromium, MVP tier `browser`).
 
 Escalation tier for SPA sites whose price is injected by client-side JS
 (MercadoLivre today; the SAME adapter is reused by Terabyte/Pichau, only the DOM
 parser differs). A headless Chromium renders the page so the DOM the parser sees
 matches what a real browser produces.
+
+Undetected launch (Phase 2b): the browser is LAUNCHED by patchright -- a
+drop-in fork of playwright whose deep launch-time patches make Chromium
+undetected at startup (Kleos #11050) -- NOT vanilla playwright. On top of the
+launch patches, playwright-stealth's Stealth().apply_stealth_sync(page) injects
+JS-level evasion into each page before navigation. patchright exposes the same
+sync_api surface as playwright, so the egress-proxy wiring below is unchanged.
 
 Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
   * validate_target runs FIRST, before Playwright is even imported and before
@@ -53,16 +60,28 @@ def _normalize_domains(domains: Iterable[str]) -> frozenset[str]:
 
 
 def _load_playwright():  # type: ignore[no-untyped-def]
-    """Lazy handle on Playwright (optional dependency).
+    """Lazy handle on patchright's sync_playwright (optional dependency).
 
-    Imported on demand so the module -- and the whole test suite -- loads on a
-    base interpreter without Playwright. Called only AFTER the SSRF guard has
-    validated the target, so a hostile URL is refused even when the dependency
-    is missing (the guard raises before we get here).
+    patchright is a drop-in playwright fork (same sync_api), so the symbol name
+    is preserved. Imported on demand so the module -- and the whole test suite
+    -- loads on a base interpreter without patchright. Called only AFTER the
+    SSRF guard has validated the target, so a hostile URL is refused even when
+    the dependency is missing (the guard raises before we get here).
     """
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
 
     return sync_playwright
+
+
+def _load_stealth():  # type: ignore[no-untyped-def]
+    """Lazy handle on playwright-stealth's Stealth class (optional dependency).
+
+    Imported on demand (same rationale as _load_playwright) so the module loads
+    without playwright-stealth installed.
+    """
+    from playwright_stealth import Stealth
+
+    return Stealth
 
 
 class BrowserFetcher:
@@ -96,6 +115,7 @@ class BrowserFetcher:
         # navigation-domain allowlist on the primary target before we launch.
         validate_target(url, self._domain_policy)
         sync_playwright = _load_playwright()
+        stealth = _load_stealth()()
 
         # Loopback IP-pinning egress-proxy: Chromium routes every connection
         # (primary + sub-resources) through it and never resolves the target
@@ -109,6 +129,9 @@ class BrowserFetcher:
             )
             try:
                 page = browser.new_page()
+                # JS-level stealth on top of patchright's launch patches, applied
+                # to the page BEFORE any routing/navigation.
+                stealth.apply_stealth_sync(page)
 
                 def _guard(route) -> None:  # type: ignore[no-untyped-def]
                     # Allow a request iff its host is a navigation domain OR a

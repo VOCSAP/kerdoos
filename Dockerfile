@@ -43,8 +43,11 @@ FROM base AS autonomous
 
 RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc
 
-# Chromium runtime deps for playwright + seleniumbase UC.
-RUN uv run playwright install --with-deps chromium
+# Chromium runtime deps for the browser tier. The browser tier is launched by
+# patchright (undetected fork), so install patchright's Chromium (NOT vanilla
+# playwright's) here; the uc tier's undetected-chromedriver is fetched by
+# seleniumbase at runtime.
+RUN uv run patchright install --with-deps chromium
 
 EXPOSE 8000
 CMD ["uvicorn", "kerdoos.interfaces.web.app:create_app", "--factory", \

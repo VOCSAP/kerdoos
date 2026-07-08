@@ -149,14 +149,27 @@ class _FakeRoute:
         self.action = "abort"
 
 
+class _FakeStealth:
+    """Stand-in for playwright_stealth.Stealth (Phase 2b): records the pages it
+    was applied to so the wiring test can assert JS stealth was applied."""
+
+    applied: list = []
+
+    def apply_stealth_sync(self, page) -> None:  # noqa: ANN001
+        _FakeStealth.applied.append(page)
+
+
 class BrowserFetcherWiringTest(unittest.TestCase):
     def _run(self, page: _FakePage, subresource_domains=()) -> tuple:
         chromium = _FakeChromium(_FakeBrowser(page))
         fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        _FakeStealth.applied = []
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(browser, "_load_playwright",
-                                   return_value=fake_sync_playwright):
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
                 result = browser.BrowserFetcher(
                     _POLICY, subresource_domains).fetch(
                     "https://mercadolivre.com.br/p/MLB1")
@@ -171,6 +184,12 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         self.assertTrue(proxy_server.startswith("http://127.0.0.1:"))
         # No egress-weakening launch flags survive the scrub.
         self.assertEqual(chromium.launch_kwargs["args"], [])
+        # No host-resolver pin re-introduced by the patchright swap.
+        self.assertNotIn("proxy_bypass", chromium.launch_kwargs)
+        for a in chromium.launch_kwargs["args"]:
+            self.assertNotIn("--host-resolver-rules", a)
+        # Phase 2b: JS stealth was applied to the rendered page.
+        self.assertIn(page, _FakeStealth.applied)
         # Navigation waited for the render to settle.
         self.assertEqual(page.goto_args[1], "networkidle")
         # Result carries the rendered HTML and the browser method.
@@ -206,7 +225,9 @@ class SubResourceGateTest(unittest.TestCase):
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(browser, "_load_playwright",
-                                   return_value=fake_sync_playwright):
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
                 browser.BrowserFetcher(_POLICY, subresource_domains).fetch(
                     "https://mercadolivre.com.br/p/MLB1")
         return page
