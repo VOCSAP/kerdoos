@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from core.domain import Availability, ScrapeStatus
+from kerdoos.core.domain import Availability, ScrapeStatus
 
 
 @dataclass(frozen=True, slots=True)

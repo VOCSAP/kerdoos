@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from core.domain import Extract
+from kerdoos.core.domain import Extract
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from core.domain import ScrapeStatus
-from persistence.ports import ScrapeRecord
+from kerdoos.core.domain import ScrapeStatus
+from kerdoos.persistence.ports import ScrapeRecord
 
 
 def format_cents(cents: int | None) -> str:

@@ -14,14 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from autolycos.router import StaticRouter
-from core.domain import Availability, ScrapeStatus
-from core.orchestrator import scrape_and_record
-from digest.render import render_digest
-from parsers.factory import build_parser
-from persistence.ports import ScrapeRecord
-from persistence.sqlite_store import SqliteStateStore
-from registry.domain_policy import DEFAULT_DOMAIN_POLICY
-from registry.yaml_store import YamlConfigStore
+from kerdoos.core.domain import Availability, ScrapeStatus
+from kerdoos.core.orchestrator import scrape_and_record
+from kerdoos.digest.render import render_digest
+from kerdoos.parsers.factory import build_parser
+from kerdoos.persistence.ports import ScrapeRecord
+from kerdoos.persistence.sqlite_store import SqliteStateStore
+from kerdoos.registry.domain_policy import DEFAULT_DOMAIN_POLICY
+from kerdoos.registry.yaml_store import YamlConfigStore
 
 
 def _now_iso() -> str:

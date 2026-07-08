@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 
 from autolycos.errors import FetchError
 from autolycos.ports import Fetcher
-from parsers.ports import Parser
-from persistence.ports import ScrapeRecord, StateStore
+from kerdoos.parsers.ports import Parser
+from kerdoos.persistence.ports import ScrapeRecord, StateStore
 
 from .domain import Availability, ParseError, ScrapeStatus
 from .retry import fetch_with_retry

@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from core.domain import Availability, ScrapeStatus
+from kerdoos.core.domain import Availability, ScrapeStatus
 
 from .ports import ScrapeRecord
 

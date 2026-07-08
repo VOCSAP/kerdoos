@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from autolycos.safety import ALLOWED_SCHEMES, DomainPolicy
-from parsers.ports import ParserSpec
+from kerdoos.parsers.ports import ParserSpec
 
 from .domain_policy import DEFAULT_DOMAIN_POLICY
 from .ports import Product, ProductSource, Registry, SiteConfig, make_source_id

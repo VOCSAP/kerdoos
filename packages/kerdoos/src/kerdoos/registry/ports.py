@@ -12,7 +12,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from parsers.ports import ParserSpec
+from kerdoos.parsers.ports import ParserSpec
 
 
 @dataclass(frozen=True, slots=True)

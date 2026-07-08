@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 
-from core.domain import Availability, Extract, ParseError
+from kerdoos.core.domain import Availability, Extract, ParseError
 
 from ..normalize import to_cents
 from ..ports import ParserSpec

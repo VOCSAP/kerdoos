@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.domain import Availability, Extract, ParseError
+from kerdoos.core.domain import Availability, Extract, ParseError
 
 from ..nextdata import extract_next_data as _extract_next_data
 from ..normalize import to_cents as _to_cents
