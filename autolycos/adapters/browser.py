@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 from ..challenge import looks_challenged
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import ValidatedTarget, domain_allowed, validate_target
+from ..safety import DomainPolicy, ValidatedTarget, validate_target
 
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 NAV_TIMEOUT_MS = 30_000
@@ -77,14 +77,17 @@ class BrowserFetcher:
     `subresource_domains` is a per-site allowlist of RENDER-critical CDN hosts
     (e.g. MercadoLivre's http2.mlstatic.com bundle) that the page.route guard may
     load IN ADDITION to the navigation allowlist. It is deliberately SEPARATE
-    from safety.ALLOWED_DOMAINS: we never NAVIGATE to these hosts (validate_target
-    still governs the primary target + IP pin on the 6 site domains only); they
-    are permitted only as sub-resources so a full client-side render can hydrate.
+    from the injected DomainPolicy: we never NAVIGATE to these hosts
+    (validate_target still governs the primary target + IP pin, gated by the
+    caller's DomainPolicy only); they are permitted only as sub-resources so a
+    full client-side render can hydrate.
     """
 
     method_name = "browser"
 
-    def __init__(self, subresource_domains: Iterable[str] = ()) -> None:
+    def __init__(self, domain_policy: DomainPolicy,
+                 subresource_domains: Iterable[str] = ()) -> None:
+        self._domain_policy = domain_policy
         self._subresource_domains = _normalize_domains(subresource_domains)
 
     def _subresource_allowed(self, host: str) -> bool:
@@ -96,7 +99,7 @@ class BrowserFetcher:
         # SSRF guard runs FIRST, before importing/using Playwright, so a
         # non-allowlisted or rebinding target is refused even if the optional
         # dependency is absent (fail-closed, CWE-918).
-        target = validate_target(url)
+        target = validate_target(url, self._domain_policy)
         sync_playwright = _load_playwright()
 
         with sync_playwright() as pw:
@@ -114,7 +117,7 @@ class BrowserFetcher:
                     # Fail-closed: an empty/unparseable host is aborted. Controls
                     # the browser's SSRF fan-out surface.
                     host = (urlsplit(route.request.url).hostname or "").lower().rstrip(".")
-                    if host and (domain_allowed(host)
+                    if host and (self._domain_policy.domain_allowed(host)
                                  or self._subresource_allowed(host)):
                         route.continue_()
                     else:

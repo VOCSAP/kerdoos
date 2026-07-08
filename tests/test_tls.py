@@ -18,9 +18,13 @@ from autolycos import safety
 from autolycos.adapters import tls
 from autolycos.challenge import looks_challenged
 from autolycos.errors import SSRFError
-from autolycos.safety import ValidatedTarget
+from autolycos.safety import DomainPolicy, ValidatedTarget
 
 _HAS_CURL = importlib.util.find_spec("curl_cffi") is not None
+_POLICY = DomainPolicy(frozenset({
+    "kabum.com.br", "amazon.com.br", "mercadolivre.com.br",
+    "terabyteshop.com.br", "pichau.com.br", "magazineluiza.com.br",
+}))
 
 
 def _addrinfo(ip: str, port: int = 443):
@@ -81,13 +85,13 @@ class TlsFetcherContractTest(unittest.TestCase):
         # A non-allowlisted target must be rejected by the guard first, so this
         # holds even though curl_cffi is not installed (no ImportError leaks).
         with self.assertRaises(SSRFError):
-            tls.TlsFetcher().fetch("https://evil.com/x")
+            tls.TlsFetcher(_POLICY).fetch("https://evil.com/x")
 
     def test_rebind_to_private_ip_refused(self) -> None:
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("10.1.2.3")):
             with self.assertRaises(SSRFError):
-                tls.TlsFetcher().fetch("https://amazon.com.br/dp/X")
+                tls.TlsFetcher(_POLICY).fetch("https://amazon.com.br/dp/X")
 
 
 @unittest.skipUnless(_HAS_CURL, "curl_cffi not installed")
@@ -117,7 +121,8 @@ class TlsFetcherNetworkTest(unittest.TestCase):
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch("curl_cffi.requests.get", _fake_get):
-                result = tls.TlsFetcher().fetch("https://amazon.com.br/dp/X")
+                result = tls.TlsFetcher(_POLICY).fetch(
+                    "https://amazon.com.br/dp/X")
 
         self.assertEqual(result.method, "tls")
         self.assertEqual(captured["curl_options"][CurlOpt.RESOLVE],

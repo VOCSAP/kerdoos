@@ -24,9 +24,10 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from autolycos.safety import ALLOWED_SCHEMES, domain_allowed
+from autolycos.safety import ALLOWED_SCHEMES, DomainPolicy
 from parsers.ports import ParserSpec
 
+from .domain_policy import DEFAULT_DOMAIN_POLICY
 from .ports import Product, ProductSource, Registry, SiteConfig, make_source_id
 
 
@@ -34,13 +35,14 @@ class ConfigError(ValueError):
     """The configuration is structurally invalid."""
 
 
-def _validate_url(url: str, ctx: str) -> None:
+def _validate_url(url: str, ctx: str, domain_policy: DomainPolicy) -> None:
     """Fail-fast at load time: reject a url the fetcher would refuse anyway.
 
-    Enforces the scheme allowlist (http/https) and registrable-domain allowlist
-    here, at config load, rather than deferring to the first fetch -- a typo or a
-    hostile config entry (file://, gopher://, an off-list host) is caught before
-    any network activity. Mirrors autolycos.safety, the single allowlist source.
+    Enforces the scheme allowlist (http/https) and the injected domain policy
+    here, at config load, rather than deferring to the first fetch -- a typo or
+    a hostile config entry (file://, gopher://, an off-list host) is caught
+    before any network activity. Mirrors autolycos.safety.validate_target's
+    checks, the same DomainPolicy contract every Fetcher enforces.
     """
     parts = urlsplit(url)
     if parts.scheme.lower() not in ALLOWED_SCHEMES:
@@ -49,7 +51,7 @@ def _validate_url(url: str, ctx: str) -> None:
     host = parts.hostname
     if not host:
         raise ConfigError(f"{ctx}: url has no host ({url!r})")
-    if not domain_allowed(host):
+    if not domain_policy.domain_allowed(host):
         raise ConfigError(
             f"{ctx}: url host not in allowlist: {host!r} ({url!r})")
 
@@ -85,9 +87,11 @@ def _load_yaml(path: Path) -> Any:
 class YamlConfigStore:
     """ConfigStore reading two YAML files from a config directory."""
 
-    def __init__(self, sites_path: str | Path, products_path: str | Path) -> None:
+    def __init__(self, sites_path: str | Path, products_path: str | Path,
+                 domain_policy: DomainPolicy = DEFAULT_DOMAIN_POLICY) -> None:
         self._sites_path = Path(sites_path)
         self._products_path = Path(products_path)
+        self._domain_policy = domain_policy
 
     def load(self) -> Registry:
         sites = self._load_sites()
@@ -143,7 +147,7 @@ class YamlConfigStore:
                     raise ConfigError(
                         f"product {pid!r} references unknown site {site!r}"
                     )
-                _validate_url(url, f"product {pid!r} source")
+                _validate_url(url, f"product {pid!r} source", self._domain_policy)
                 source_id = make_source_id(pid, site, url)
                 if source_id in seen_ids:
                     raise ConfigError(

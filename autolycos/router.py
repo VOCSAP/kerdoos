@@ -17,39 +17,45 @@ from collections.abc import Iterable
 
 from .adapters.http import HttpFetcher
 from .ports import Fetcher
+from .safety import DomainPolicy
 
 
-def _make_http(subresource_domains: Iterable[str]) -> Fetcher:
-    return HttpFetcher()
+def _make_http(domain_policy: DomainPolicy,
+                subresource_domains: Iterable[str]) -> Fetcher:
+    return HttpFetcher(domain_policy)
 
 
-def _make_tls(subresource_domains: Iterable[str]) -> Fetcher:
+def _make_tls(domain_policy: DomainPolicy,
+              subresource_domains: Iterable[str]) -> Fetcher:
     # Deferred import: curl_cffi is optional and only needed for the tls tier.
     from .adapters.tls import TlsFetcher
 
-    return TlsFetcher()
+    return TlsFetcher(domain_policy)
 
 
-def _make_browser(subresource_domains: Iterable[str]) -> Fetcher:
+def _make_browser(domain_policy: DomainPolicy,
+                   subresource_domains: Iterable[str]) -> Fetcher:
     # Deferred import: Playwright is optional and only needed for the browser
     # tier (SPA sites whose price is injected by client-side JS). The per-site
     # render-CDN sub-resource allowlist flows in here.
     from .adapters.browser import BrowserFetcher
 
-    return BrowserFetcher(subresource_domains)
+    return BrowserFetcher(domain_policy, subresource_domains)
 
 
-def _make_uc(subresource_domains: Iterable[str]) -> Fetcher:
+def _make_uc(domain_policy: DomainPolicy,
+             subresource_domains: Iterable[str]) -> Fetcher:
     # Deferred import: SeleniumBase is optional and only needed for the uc tier
     # (sites behind Akamai Bot Manager; Magalu). The per-site render-CDN
     # sub-resource allowlist feeds the DNS-level host-resolver rule.
     from .adapters.uc import UcFetcher
 
-    return UcFetcher(subresource_domains)
+    return UcFetcher(domain_policy, subresource_domains)
 
 
 # Lazy factories so importing the router does not construct every tool. Each
-# accepts the per-site sub-resource domains; the browser and uc tiers use them.
+# accepts the injected DomainPolicy plus the per-site sub-resource domains
+# (the browser and uc tiers use the latter).
 _FACTORIES: dict[str, callable] = {
     "http": _make_http,
     "tls": _make_tls,
@@ -65,7 +71,8 @@ class UnknownFetcherError(KeyError):
 class StaticRouter:
     """Resolve a fetcher tier name to a Fetcher, caching instances."""
 
-    def __init__(self) -> None:
+    def __init__(self, domain_policy: DomainPolicy) -> None:
+        self._domain_policy = domain_policy
         self._cache: dict[tuple[str, frozenset[str]], Fetcher] = {}
 
     def select(
@@ -80,5 +87,6 @@ class StaticRouter:
         # tier with different render CDNs get distinct instances.
         key = (fetcher_name, frozenset(subresource_domains))
         if key not in self._cache:
-            self._cache[key] = _FACTORIES[fetcher_name](subresource_domains)
+            self._cache[key] = _FACTORIES[fetcher_name](
+                self._domain_policy, subresource_domains)
         return self._cache[key]

@@ -20,6 +20,7 @@ from digest.render import render_digest
 from parsers.factory import build_parser
 from persistence.ports import ScrapeRecord
 from persistence.sqlite_store import SqliteStateStore
+from registry.domain_policy import DEFAULT_DOMAIN_POLICY
 from registry.yaml_store import YamlConfigStore
 
 
@@ -34,7 +35,7 @@ def _load_registry(config_dir: Path):
 
 def cmd_run(args: argparse.Namespace) -> int:
     registry = _load_registry(Path(args.config_dir))
-    router = StaticRouter()
+    router = StaticRouter(DEFAULT_DOMAIN_POLICY)
     store = SqliteStateStore(args.db)
     generated_at = _now_iso()
 

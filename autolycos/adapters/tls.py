@@ -28,7 +28,7 @@ from urllib.parse import urljoin
 from ..challenge import looks_challenged
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import ValidatedTarget, validate_target
+from ..safety import DomainPolicy, ValidatedTarget, validate_target
 
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.7 MiB)
 MAX_REDIRECTS = 5
@@ -89,13 +89,17 @@ class TlsFetcher:
 
     method_name = "tls"
 
+    def __init__(self, domain_policy: DomainPolicy) -> None:
+        self._domain_policy = domain_policy
+
     def fetch(self, url: str) -> FetchResult:
         current = url
         for _ in range(MAX_REDIRECTS + 1):
             # SSRF guard runs FIRST, before importing/using curl_cffi, so a
             # non-allowlisted or rebinding target is refused even if the optional
             # dependency is absent (fail-closed, CWE-918).
-            target = validate_target(current)  # resolves once, pins target.ip
+            # resolves once, pins target.ip
+            target = validate_target(current, self._domain_policy)
             cffi, CurlOpt = _load_curl()
             resp = cffi.get(
                 current,

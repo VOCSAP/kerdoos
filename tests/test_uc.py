@@ -18,8 +18,12 @@ from unittest import mock
 from autolycos import safety
 from autolycos.adapters import uc
 from autolycos.errors import SSRFError
-from autolycos.safety import ValidatedTarget
+from autolycos.safety import DomainPolicy, ValidatedTarget
 
+_POLICY = DomainPolicy(frozenset({
+    "kabum.com.br", "amazon.com.br", "mercadolivre.com.br",
+    "terabyteshop.com.br", "pichau.com.br", "magazineluiza.com.br",
+}))
 _FIXTURES = Path(__file__).parent / "fixtures"
 _MAGALU_URL = ("https://www.magazineluiza.com.br/monitor-gamer-alienware-32-4k-"
                "qd-oled-aw3225qf/p/bab5438g3h/in/mnpc/")
@@ -85,13 +89,13 @@ class UcFetcherContractTest(unittest.TestCase):
     def test_ssrf_refused_before_seleniumbase_import(self) -> None:
         # Refused by the guard first, so it holds even without SeleniumBase.
         with self.assertRaises(SSRFError):
-            uc.UcFetcher().fetch("https://evil.com/x")
+            uc.UcFetcher(_POLICY).fetch("https://evil.com/x")
 
     def test_rebind_to_private_ip_refused(self) -> None:
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("10.1.2.3")):
             with self.assertRaises(SSRFError):
-                uc.UcFetcher().fetch(_MAGALU_URL)
+                uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
 
 
 class _FakeDriver:
@@ -128,7 +132,8 @@ class UcFetcherWiringTest(unittest.TestCase):
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(uc, "_load_seleniumbase",
                                    return_value=_factory):
-                result = uc.UcFetcher(subresource_domains).fetch(_MAGALU_URL)
+                result = uc.UcFetcher(
+                    _POLICY, subresource_domains).fetch(_MAGALU_URL)
         return result, holder["driver"]
 
     def test_pins_and_builds_result_from_page_source(self) -> None:
@@ -170,7 +175,7 @@ class UcFetcherWiringTest(unittest.TestCase):
             with mock.patch.object(uc, "_load_seleniumbase",
                                    return_value=_factory):
                 with self.assertRaises(Exception):
-                    uc.UcFetcher().fetch(_MAGALU_URL)
+                    uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
         self.assertTrue(holder["driver"].quit_called)
 
 

@@ -14,17 +14,22 @@ from autolycos import safety
 from autolycos.adapters import http
 from autolycos.errors import FetchError, SSRFError
 
+_POLICY = safety.DomainPolicy(frozenset({
+    "kabum.com.br", "amazon.com.br", "mercadolivre.com.br",
+    "terabyteshop.com.br", "pichau.com.br", "magazineluiza.com.br",
+}))
+
 
 class DomainAllowlistTest(unittest.TestCase):
     def test_exact_and_subdomain_allowed(self) -> None:
-        self.assertTrue(safety.domain_allowed("kabum.com.br"))
-        self.assertTrue(safety.domain_allowed("www.kabum.com.br"))
-        self.assertTrue(safety.domain_allowed("KABUM.COM.BR"))
+        self.assertTrue(_POLICY.domain_allowed("kabum.com.br"))
+        self.assertTrue(_POLICY.domain_allowed("www.kabum.com.br"))
+        self.assertTrue(_POLICY.domain_allowed("KABUM.COM.BR"))
 
     def test_suffix_spoof_rejected(self) -> None:
-        self.assertFalse(safety.domain_allowed("kabum.com.br.evil.com"))
-        self.assertFalse(safety.domain_allowed("evilkabum.com.br"))
-        self.assertFalse(safety.domain_allowed("evil.com"))
+        self.assertFalse(_POLICY.domain_allowed("kabum.com.br.evil.com"))
+        self.assertFalse(_POLICY.domain_allowed("evilkabum.com.br"))
+        self.assertFalse(_POLICY.domain_allowed("evil.com"))
 
 
 class IpGuardTest(unittest.TestCase):
@@ -37,6 +42,19 @@ class IpGuardTest(unittest.TestCase):
         self.assertTrue(safety.ip_is_safe("8.8.8.8"))
         self.assertTrue(safety.ip_is_safe("104.18.0.1"))
 
+    def test_ipv4_mapped_link_local_blocked(self) -> None:
+        # CWE-918 / issue #11054: an IPv4-mapped IPv6 literal embedding the
+        # cloud metadata address must be judged on the EMBEDDED IPv4, not on
+        # IPv6Address.is_global (which was True for the mapped form, letting
+        # the metadata endpoint slip through the allowlist).
+        self.assertFalse(safety.ip_is_safe("::ffff:169.254.169.254"))
+        self.assertFalse(safety.ip_is_safe("::ffff:127.0.0.1"))
+        self.assertFalse(safety.ip_is_safe("::ffff:10.0.0.1"))
+
+    def test_ipv4_mapped_global_allowed(self) -> None:
+        # A mapped GLOBAL address must still be judged safe (no over-blocking).
+        self.assertTrue(safety.ip_is_safe("::ffff:104.18.0.1"))
+
 
 def _addrinfo(ip: str, port: int = 443):
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
@@ -46,29 +64,32 @@ def _addrinfo(ip: str, port: int = 443):
 class ValidateTargetTest(unittest.TestCase):
     def test_non_http_scheme_rejected(self) -> None:
         with self.assertRaises(SSRFError):
-            safety.validate_target("ftp://kabum.com.br/x")
+            safety.validate_target("ftp://kabum.com.br/x", _POLICY)
         with self.assertRaises(SSRFError):
-            safety.validate_target("file:///etc/passwd")
+            safety.validate_target("file:///etc/passwd", _POLICY)
 
     def test_non_allowlisted_domain_rejected(self) -> None:
         with self.assertRaises(SSRFError):
-            safety.validate_target("https://evil.com/x")
+            safety.validate_target("https://evil.com/x", _POLICY)
 
     def test_raw_ip_host_rejected_by_allowlist(self) -> None:
         with self.assertRaises(SSRFError):
-            safety.validate_target("http://169.254.169.254/latest/meta-data")
+            safety.validate_target(
+                "http://169.254.169.254/latest/meta-data", _POLICY)
 
     def test_allowlisted_domain_resolving_private_ip_rejected(self) -> None:
         # DNS-rebind style: allowlisted host that resolves to a private IP.
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("10.1.2.3")):
             with self.assertRaises(SSRFError):
-                safety.validate_target("https://kabum.com.br/produto/1")
+                safety.validate_target(
+                    "https://kabum.com.br/produto/1", _POLICY)
 
     def test_allowlisted_domain_resolving_global_ip_ok(self) -> None:
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("104.18.0.1")):
-            target = safety.validate_target("https://kabum.com.br/produto/1")
+            target = safety.validate_target(
+                "https://kabum.com.br/produto/1", _POLICY)
         self.assertEqual(target.host, "kabum.com.br")
         self.assertEqual(target.ip, "104.18.0.1")   # pinned validated IP
         self.assertEqual(target.scheme, "https")
@@ -78,7 +99,8 @@ class ValidateTargetTest(unittest.TestCase):
         with mock.patch.object(safety.socket, "getaddrinfo",
                                side_effect=socket.gaierror("nope")):
             with self.assertRaises(FetchError):
-                safety.validate_target("https://kabum.com.br/produto/1")
+                safety.validate_target(
+                    "https://kabum.com.br/produto/1", _POLICY)
 
 
 class PinIpTest(unittest.TestCase):
@@ -88,7 +110,8 @@ class PinIpTest(unittest.TestCase):
         # 1st resolution (validation) -> global IP, pinned.
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("104.18.0.1")):
-            target = safety.validate_target("https://kabum.com.br/produto/1")
+            target = safety.validate_target(
+                "https://kabum.com.br/produto/1", _POLICY)
         self.assertEqual(target.ip, "104.18.0.1")
 
         # Simulate a rebind: the underlying resolver now returns a PRIVATE IP.

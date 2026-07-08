@@ -18,7 +18,12 @@ from autolycos import safety
 from autolycos.adapters import browser
 from autolycos.challenge import looks_challenged
 from autolycos.errors import SSRFError
-from autolycos.safety import ValidatedTarget
+from autolycos.safety import DomainPolicy, ValidatedTarget
+
+_POLICY = DomainPolicy(frozenset({
+    "kabum.com.br", "amazon.com.br", "mercadolivre.com.br",
+    "terabyteshop.com.br", "pichau.com.br", "magazineluiza.com.br",
+}))
 
 
 def _addrinfo(ip: str, port: int = 443):
@@ -79,13 +84,14 @@ class BrowserFetcherContractTest(unittest.TestCase):
         # A non-allowlisted target must be rejected by the guard first, so this
         # holds even though Playwright is not installed (no ImportError leaks).
         with self.assertRaises(SSRFError):
-            browser.BrowserFetcher().fetch("https://evil.com/x")
+            browser.BrowserFetcher(_POLICY).fetch("https://evil.com/x")
 
     def test_rebind_to_private_ip_refused(self) -> None:
         with mock.patch.object(safety.socket, "getaddrinfo",
                                return_value=_addrinfo("10.1.2.3")):
             with self.assertRaises(SSRFError):
-                browser.BrowserFetcher().fetch("https://mercadolivre.com.br/p/X")
+                browser.BrowserFetcher(_POLICY).fetch(
+                    "https://mercadolivre.com.br/p/X")
 
 
 # ----- navigation wiring, driven with a FAKE Playwright (no real browser) -----
@@ -168,7 +174,8 @@ class BrowserFetcherWiringTest(unittest.TestCase):
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(browser, "_load_playwright",
                                    return_value=fake_sync_playwright):
-                result = browser.BrowserFetcher(subresource_domains).fetch(
+                result = browser.BrowserFetcher(
+                    _POLICY, subresource_domains).fetch(
                     "https://mercadolivre.com.br/p/MLB1")
         return result, chromium, page
 
@@ -215,7 +222,7 @@ class SubResourceGateTest(unittest.TestCase):
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(browser, "_load_playwright",
                                    return_value=fake_sync_playwright):
-                browser.BrowserFetcher(subresource_domains).fetch(
+                browser.BrowserFetcher(_POLICY, subresource_domains).fetch(
                     "https://mercadolivre.com.br/p/MLB1")
         return page
 
@@ -250,7 +257,7 @@ class SubResourceGateTest(unittest.TestCase):
         # A declared SUB-RESOURCE host is never a valid NAVIGATION target:
         # validate_target rejects it (not in ALLOWED_DOMAINS) before Playwright.
         with self.assertRaises(SSRFError):
-            browser.BrowserFetcher(["http2.mlstatic.com"]).fetch(
+            browser.BrowserFetcher(_POLICY, ["http2.mlstatic.com"]).fetch(
                 "https://http2.mlstatic.com/x")
 
 

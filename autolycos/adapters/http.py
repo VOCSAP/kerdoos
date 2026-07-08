@@ -27,7 +27,7 @@ from requests.adapters import HTTPAdapter
 from ..challenge import looks_challenged
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import validate_target
+from ..safety import DomainPolicy, validate_target
 
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 MAX_REDIRECTS = 5
@@ -103,13 +103,16 @@ class HttpFetcher:
 
     method_name = "http"
 
-    def __init__(self, session: requests.Session | None = None) -> None:
+    def __init__(self, domain_policy: DomainPolicy,
+                 session: requests.Session | None = None) -> None:
+        self._domain_policy = domain_policy
         self._session = session or requests.Session()
 
     def fetch(self, url: str) -> FetchResult:
         current = url
         for _ in range(MAX_REDIRECTS + 1):
-            target = validate_target(current)  # resolves once, pins target.ip
+            # resolves once, pins target.ip
+            target = validate_target(current, self._domain_policy)
             adapter = _PinnedHTTPAdapter(target.host, target.ip)
             self._session.mount(f"{target.scheme}://{target.host}", adapter)
 

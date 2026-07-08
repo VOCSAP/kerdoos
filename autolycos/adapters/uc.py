@@ -39,7 +39,7 @@ from collections.abc import Iterable
 from ..challenge import looks_challenged
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import ValidatedTarget, validate_target
+from ..safety import DomainPolicy, ValidatedTarget, validate_target
 
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 # Reconnect window (s) SeleniumBase UC uses to let the Akamai JS challenge settle.
@@ -107,14 +107,16 @@ class UcFetcher:
 
     method_name = "uc"
 
-    def __init__(self, subresource_domains: Iterable[str] = ()) -> None:
+    def __init__(self, domain_policy: DomainPolicy,
+                 subresource_domains: Iterable[str] = ()) -> None:
+        self._domain_policy = domain_policy
         self._subresource_domains = tuple(subresource_domains)
 
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using SeleniumBase, so a
         # non-allowlisted or rebinding target is refused even if the optional
         # dependency is absent (fail-closed, CWE-918).
-        target = validate_target(url)
+        target = validate_target(url, self._domain_policy)
         rule = _host_resolver_rules(target, self._subresource_domains)
 
         driver_cls = _load_seleniumbase()

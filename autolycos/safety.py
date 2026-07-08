@@ -18,17 +18,6 @@ from urllib.parse import urlsplit
 
 from .errors import FetchError, SSRFError
 
-# Registrable domains of the 6 target sites. A host is allowed iff it equals one
-# of these or is a subdomain (leading-dot match prevents suffix spoofing).
-ALLOWED_DOMAINS: frozenset[str] = frozenset({
-    "kabum.com.br",
-    "amazon.com.br",
-    "mercadolivre.com.br",
-    "terabyteshop.com.br",
-    "pichau.com.br",
-    "magazineluiza.com.br",
-})
-
 ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 _DEFAULT_PORT = {"http": 80, "https": 443}
@@ -45,9 +34,24 @@ class ValidatedTarget:
     ip: str
 
 
-def domain_allowed(host: str) -> bool:
-    host = host.lower().rstrip(".")
-    return any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS)
+@dataclass(frozen=True, slots=True)
+class DomainPolicy:
+    """Caller-injected navigation-domain allowlist.
+
+    autolycos is a generic anti-bot toolkit: it must not hardcode which
+    domains are legitimate to navigate to. The caller (kerdoos) constructs
+    this from its own site catalogue and passes it into every Fetcher and
+    into `validate_target`. A host is allowed iff it equals one of
+    `allowed_domains` or is a subdomain (leading-dot match prevents suffix
+    spoofing, e.g. "evilkabum.com.br" or "kabum.com.br.evil.com").
+    """
+
+    allowed_domains: frozenset[str]
+
+    def domain_allowed(self, host: str) -> bool:
+        host = host.lower().rstrip(".")
+        return any(host == d or host.endswith("." + d)
+                   for d in self.allowed_domains)
 
 
 def ip_is_safe(addr: str) -> bool:
@@ -56,13 +60,19 @@ def ip_is_safe(addr: str) -> bool:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
+    # IPv4-mapped IPv6 (::ffff:a.b.c.d) must be judged on the embedded IPv4:
+    # IPv6Address.is_private/is_global do NOT reflect the mapped address's
+    # own range, so e.g. "::ffff:169.254.169.254" (cloud metadata) would
+    # otherwise slip through as "global" (CWE-918, issue #11054).
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     if (ip.is_private or ip.is_loopback or ip.is_link_local
             or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
         return False
     return ip.is_global
 
 
-def validate_target(url: str) -> ValidatedTarget:
+def validate_target(url: str, domain_policy: DomainPolicy) -> ValidatedTarget:
     """Validate scheme + domain + resolved IPs. Resolve once and pin an IP.
 
     Raises SSRFError when the target is refused (scheme/domain/IP), FetchError
@@ -75,7 +85,7 @@ def validate_target(url: str) -> ValidatedTarget:
     host = parts.hostname
     if not host:
         raise SSRFError("missing host")
-    if not domain_allowed(host):
+    if not domain_policy.domain_allowed(host):
         raise SSRFError(f"domain not in allowlist: {host!r}")
     port = parts.port or _DEFAULT_PORT[scheme]
     try:
