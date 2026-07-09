@@ -26,10 +26,10 @@ from kerdoos.auth.ports import OwnerCredentials, ResolvedIdentity
 
 _SESSION_TOKEN_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
-    owner_id   TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    session_hash TEXT PRIMARY KEY,
+    owner_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id);
 
@@ -56,7 +56,12 @@ class Argon2Hasher:
     """
 
     def __init__(self) -> None:
-        self._ph = _Argon2PH()
+        # Explicit Argon2id parameters (not library defaults, which shift
+        # between releases): OWASP-aligned baseline -- 3 iterations, 64 MiB,
+        # parallelism 4, 32-byte hash, 16-byte salt (gate security L2).
+        self._ph = _Argon2PH(
+            time_cost=3, memory_cost=64 * 1024, parallelism=4,
+            hash_len=32, salt_len=16)
         # A fixed, real Argon2id hash of an unrelated secret; verifying against
         # it costs exactly one real verify without ever matching a user input.
         self._dummy_hash = self._ph.hash("kerdoos-anti-enumeration-dummy")
@@ -102,13 +107,23 @@ class SqliteAuthStore:
 
     # -- credential lookup (login) ----------------------------------------
     def lookup_active_credentials(self, identifier: str) -> OwnerCredentials | None:
+        # Resolve by name FIRST, then by email -- as two separate lookups, NOT
+        # a `name = ? OR email = ?` (which could match two different owners for
+        # one identifier). name takes precedence, so an identifier resolves to
+        # AT MOST one owner deterministically (gate L1).
         conn = self._connect()
         try:
             row = conn.execute(
                 "SELECT id, role, password_hash FROM owners "
-                "WHERE (name = ? OR email = ?) AND state = 'active'",
-                (identifier, identifier),
+                "WHERE name = ? AND state = 'active'",
+                (identifier,),
             ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT id, role, password_hash FROM owners "
+                    "WHERE email = ? AND state = 'active'",
+                    (identifier,),
+                ).fetchone()
         finally:
             conn.close()
         if row is None:
@@ -119,28 +134,31 @@ class SqliteAuthStore:
 
     # -- sessions ----------------------------------------------------------
     def create_session(
-        self, session_id: str, owner_id: str, created_at: str, expires_at: str
+        self, session_hash: str, owner_id: str, created_at: str, expires_at: str
     ) -> None:
+        # session_hash = sha256(session_id): only the hash is persisted, so a
+        # config.db leak does not yield usable session ids (symmetry with
+        # tokens; closes the hijack asymmetry, gate SESSION-HASH).
         conn = self._connect()
         try:
             conn.execute(
-                "INSERT INTO sessions (session_id, owner_id, created_at, expires_at) "
+                "INSERT INTO sessions (session_hash, owner_id, created_at, expires_at) "
                 "VALUES (?, ?, ?, ?)",
-                (session_id, owner_id, created_at, expires_at),
+                (session_hash, owner_id, created_at, expires_at),
             )
             conn.commit()
         finally:
             conn.close()
 
-    def resolve_session(self, session_id: str, now: str) -> ResolvedIdentity | None:
+    def resolve_session(self, session_hash: str, now: str) -> ResolvedIdentity | None:
         conn = self._connect()
         try:
             row = conn.execute(
                 "SELECT o.id AS owner_id, o.role AS role "
                 "FROM sessions s JOIN owners o ON o.id = s.owner_id "
-                "WHERE s.session_id = ? AND o.state = 'active' "
+                "WHERE s.session_hash = ? AND o.state = 'active' "
                 "AND s.expires_at > ?",
-                (session_id, now),
+                (session_hash, now),
             ).fetchone()
         finally:
             conn.close()
@@ -148,10 +166,11 @@ class SqliteAuthStore:
             return None
         return ResolvedIdentity(owner_id=row["owner_id"], role=row["role"])
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(self, session_hash: str) -> None:
         conn = self._connect()
         try:
-            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE session_hash = ?",
+                         (session_hash,))
             conn.commit()
         finally:
             conn.close()

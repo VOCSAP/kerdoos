@@ -97,25 +97,26 @@ class AuthService:
     def create_session(self, principal: Principal) -> str:
         """Mint a revocable session for the acting principal. Returns the opaque
         session id (the WebUI wraps it in a signed cookie at the transport
-        layer, Phase 4)."""
+        layer, Phase 4). Only sha256(session_id) is persisted, so a config.db
+        leak never yields a usable session id."""
         session_id = secrets.token_urlsafe(_SECRET_BYTES)
         now = self._clock()
         self._store.create_session(
-            session_id, principal.owner_id,
+            _token_hash(session_id), principal.owner_id,
             now.isoformat(), (now + self._session_ttl).isoformat())
         return session_id
 
     def verify_session(self, session_id: str) -> Principal | None:
         identity = self._store.resolve_session(
-            session_id, self._clock().isoformat())
+            _token_hash(session_id), self._clock().isoformat())
         if identity is None:
             return None
         return Principal(owner_id=identity.owner_id, role=identity.role)
 
     def revoke_session(self, principal: Principal, session_id: str) -> None:
-        # Scoped delete by owner would be ideal; deleting by session_id is safe
-        # because the id is an unguessable secret held only by its owner.
-        self._store.delete_session(session_id)
+        # Delete by hash (the plaintext id is an unguessable secret held only by
+        # its owner; the DB only ever stored its sha256).
+        self._store.delete_session(_token_hash(session_id))
 
     # -- bearer tokens (MCP) ----------------------------------------------
     def create_token(self, principal: Principal) -> IssuedToken:

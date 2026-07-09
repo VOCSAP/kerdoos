@@ -68,18 +68,20 @@ class AuthStore(Protocol):
         None for an unknown OR disabled identifier (indistinguishable)."""
         ...
 
-    # -- sessions (WebUI) --
+    # -- sessions (WebUI) -- keyed by session_hash = sha256(session_id); only
+    # the hash is ever persisted (the plaintext id lives only in the caller's
+    # cookie), so a config.db leak yields no usable session.
     def create_session(
-        self, session_id: str, owner_id: str, created_at: str, expires_at: str
+        self, session_hash: str, owner_id: str, created_at: str, expires_at: str
     ) -> None:
         ...
 
-    def resolve_session(self, session_id: str, now: str) -> ResolvedIdentity | None:
+    def resolve_session(self, session_hash: str, now: str) -> ResolvedIdentity | None:
         """JOIN owners WHERE owners.state='active' AND expires_at > now, INLINE.
         None if missing/expired/owner-disabled."""
         ...
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(self, session_hash: str) -> None:
         ...
 
     def delete_owner_sessions(self, owner_id: str) -> None:

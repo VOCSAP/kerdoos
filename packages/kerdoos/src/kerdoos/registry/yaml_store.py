@@ -34,11 +34,10 @@ import yaml
 
 from kerdoos.parsers.ports import ParserSpec
 
+from .errors import ConfigError  # re-exported for backward-compatible imports
 from .ports import SiteConfig
 
-
-class ConfigError(ValueError):
-    """The configuration is structurally invalid."""
+__all__ = ["ConfigError", "parse_products_yaml", "parse_sites_yaml"]
 
 
 def _require(mapping: Any, key: str, ctx: str) -> Any:

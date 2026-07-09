@@ -10,6 +10,7 @@ connections.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import os
 import shutil
@@ -24,6 +25,7 @@ from kerdoos.auth.ports import AuthStore, PasswordHasher
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import Principal
 from kerdoos.registry.auth_store import Argon2Hasher, SqliteAuthStore
+from kerdoos.registry.errors import ConfigError
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 
@@ -130,6 +132,48 @@ class AntiEnumerationTest(_AuthTestBase):
         self.counting.hash_ops = 0
         self.assertIsNotNone(self.service.authenticate("alice", "s3cret"))
         self.assertEqual(self.counting.hash_ops, 1)
+
+
+class OwnerUniquenessTest(_AuthTestBase):
+    def test_duplicate_name_rejected_as_config_error(self) -> None:
+        self._add_owner("o1", "alice", "pw")
+        with self.assertRaises(ConfigError):
+            self._add_owner("o2", "alice", "pw")   # same name
+
+    def test_duplicate_email_rejected_as_config_error(self) -> None:
+        self._add_owner("o1", "alice", "pw", email="a@x.com")
+        with self.assertRaises(ConfigError):
+            self._add_owner("o2", "bob", "pw", email="a@x.com")   # same email
+
+    def test_multiple_owners_without_email_ok(self) -> None:
+        # Partial unique index -> many owners may have NULL email (WebUI-only).
+        self.config.ensure_owner("o1", "alice", email=None)
+        self.config.ensure_owner("o2", "bob", email=None)
+        reg_names = {
+            r[0] for r in sqlite3.connect(self.db_path).execute(
+                "SELECT name FROM owners").fetchall()
+        }
+        self.assertIn("alice", reg_names)
+        self.assertIn("bob", reg_names)
+
+
+class SessionHashStorageTest(_AuthTestBase):
+    def test_db_stores_hash_not_plaintext_session_id(self) -> None:
+        self._add_owner("o1", "alice", "pw")
+        session_id = self.service.create_session(Principal("o1", "user"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute("SELECT session_hash FROM sessions").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(rows), 1)
+        stored = rows[0][0]
+        # The plaintext session id is NEVER in the DB; only its sha256.
+        self.assertNotEqual(stored, session_id)
+        self.assertEqual(
+            stored, hashlib.sha256(session_id.encode("utf-8")).hexdigest())
+        # And the plaintext still verifies (resolved by hash).
+        self.assertIsNotNone(self.service.verify_session(session_id))
 
 
 class SessionTest(_AuthTestBase):
@@ -302,8 +346,31 @@ class MigrationTest(unittest.TestCase):
                 "SELECT name, role FROM owners WHERE id = 'legacy'").fetchone()
             self.assertEqual(row["name"], "old")
             self.assertEqual(row["role"], "admin")
+            version = store._conn.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(version, 3)
         finally:
             store.close()
+
+    def test_legacy_duplicate_name_raises_named_config_error(self) -> None:
+        # A pre-uniqueness config.db with duplicate names must fail with a clear
+        # ConfigError (listing the collision), NOT a raw IntegrityError that
+        # leaves the DB unopenable (gate C1).
+        d = tempfile.mkdtemp(prefix="kerdoos-mig-dup-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "config.db")
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE owners (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "email TEXT, role TEXT NOT NULL DEFAULT 'user', "
+            "state TEXT NOT NULL DEFAULT 'active');"
+            "INSERT INTO owners (id, name) VALUES ('a', 'dup');"
+            "INSERT INTO owners (id, name) VALUES ('b', 'dup');"
+        )
+        conn.commit()
+        conn.close()
+        with self.assertRaises(ConfigError) as ctx:
+            SqliteConfigStore(path)
+        self.assertIn("dup", str(ctx.exception))
 
 
 if __name__ == "__main__":

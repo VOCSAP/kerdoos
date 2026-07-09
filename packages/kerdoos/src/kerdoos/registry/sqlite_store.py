@@ -27,6 +27,7 @@ import sqlite3
 from pathlib import Path
 
 from kerdoos.parsers.ports import ParserSpec
+from kerdoos.registry.errors import ConfigError
 
 from .ports import ConfigStore, MutableConfigStore, Product, ProductSource, Registry, SiteConfig
 
@@ -136,12 +137,44 @@ class SqliteConfigStore:
         # resolve to AT MOST one owner. name is the username (UNIQUE); email is
         # UNIQUE only when present (partial index, so many owners may have no
         # email -- the WebUI-only case, Kleos #11059).
+        #
+        # PRE-CHECK duplicates BEFORE creating the unique indexes: a legacy
+        # config.db populated before the uniqueness rule could hold duplicate
+        # names/emails. Without this, CREATE UNIQUE INDEX raises a raw
+        # sqlite3.IntegrityError out of __init__ and the DB becomes unopenable.
+        # Instead we fail with a NAMED ConfigError that lists the collisions so
+        # an operator can fix the data (gate C1).
+        self._reject_duplicate_identities()
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_name ON owners(name)")
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_email "
             "ON owners(email) WHERE email IS NOT NULL")
         self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    def _reject_duplicate_identities(self) -> None:
+        dup_names = [
+            row["name"] for row in self._conn.execute(
+                "SELECT name FROM owners GROUP BY name HAVING COUNT(*) > 1"
+            ).fetchall()
+        ]
+        dup_emails = [
+            row["email"] for row in self._conn.execute(
+                "SELECT email FROM owners WHERE email IS NOT NULL "
+                "GROUP BY email HAVING COUNT(*) > 1"
+            ).fetchall()
+        ]
+        if dup_names or dup_emails:
+            parts = []
+            if dup_names:
+                parts.append(f"duplicate owner names: {sorted(dup_names)}")
+            if dup_emails:
+                parts.append(f"duplicate owner emails: {sorted(dup_emails)}")
+            raise ConfigError(
+                "cannot enforce owner identity uniqueness -- "
+                + "; ".join(parts)
+                + ". Resolve the duplicate rows before opening this config.db."
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -263,18 +296,27 @@ class SqliteConfigStore:
         if created_at is None:
             from datetime import datetime, timezone
             created_at = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            """
-            INSERT INTO owners
-                (id, name, email, role, state, password_hash, created_at)
-            VALUES (?, ?, ?, ?, 'active', ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name, email=excluded.email, role=excluded.role,
-                password_hash=excluded.password_hash
-            """,
-            (owner_id, name, email, role, password_hash, created_at),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO owners
+                    (id, name, email, role, state, password_hash, created_at)
+                VALUES (?, ?, ?, ?, 'active', ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name, email=excluded.email, role=excluded.role,
+                    password_hash=excluded.password_hash
+                """,
+                (owner_id, name, email, role, password_hash, created_at),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError as exc:
+            # A duplicate name/email (unique-index violation) surfaces as a
+            # named domain error, not a raw driver exception (gate C2).
+            self._conn.rollback()
+            raise ConfigError(
+                f"owner identity conflict for name={name!r} email={email!r}: "
+                f"{exc}"
+            ) from exc
         return owner_id
 
     def get_owner_role(self, owner_id: str) -> str | None:

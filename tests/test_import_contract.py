@@ -16,8 +16,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 AUTOLYCOS_SRC = ROOT / "packages" / "autolycos" / "src" / "autolycos"
 KERDOOS_SRC = ROOT / "packages" / "kerdoos" / "src" / "kerdoos"
 
-TOOLS = {"requests", "curl_cffi", "playwright", "seleniumbase",
-         "selenium", "bs4", "httpx", "yaml"}
+TOOLS = {"requests", "curl_cffi", "playwright", "patchright",
+         "playwright_stealth", "seleniumbase", "selenium", "bs4", "httpx",
+         "yaml", "argon2"}
 
 # Concrete adapter / wiring module suffixes that core must never import.
 CONCRETE_SUFFIXES = ("adapters", "router", "factory",
@@ -86,6 +87,9 @@ class ImportContractTest(unittest.TestCase):
             AUTOLYCOS_SRC / "challenge.py",
             KERDOOS_SRC / "parsers" / "ports.py",
             KERDOOS_SRC / "persistence" / "ports.py",
+            # auth ports back AuthService (core.app.auth); they must stay
+            # tool-free so the Argon2/sqlite adapters never leak into core.
+            KERDOOS_SRC / "auth" / "ports.py",
         ]
         for f in port_modules:
             for name in _imports(f):
