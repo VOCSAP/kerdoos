@@ -144,6 +144,45 @@ def cmd_user_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_password() -> str:
+    """Read a password WITHOUT ever accepting it as a CLI arg (plaintext in the
+    process table / shell history). From a pipe/stdin when non-interactive
+    (scripts, tests); via getpass with confirmation on a TTY.
+    """
+    import getpass
+    import sys
+
+    if sys.stdin is not None and not sys.stdin.isatty():
+        password = sys.stdin.readline().rstrip("\n")
+    else:
+        password = getpass.getpass("Password: ")
+        if password != getpass.getpass("Confirm password: "):
+            raise SystemExit("passwords do not match")
+    if not password:
+        raise SystemExit("password must not be empty")
+    return password
+
+
+def cmd_user_add(args: argparse.Namespace) -> int:
+    # Argon2id hashing is imported here (not at module load) so the CLI module
+    # stays importable without argon2 for the non-auth commands/tests.
+    from kerdoos.registry.auth_store import Argon2Hasher
+
+    config_store = SqliteConfigStore(args.config_db)
+    try:
+        password = _read_password()
+        owner_id = uuid.uuid4().hex[:12]
+        role = "admin" if args.admin else "user"
+        password_hash = Argon2Hasher().hash(password)
+        config_store.ensure_owner(
+            owner_id, args.name, role=role, email=args.email,
+            password_hash=password_hash)
+        print(owner_id)
+    finally:
+        config_store.close()
+    return 0
+
+
 def build_parser_cli() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kerdoos", description="Kerdoos CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -185,6 +224,14 @@ def build_parser_cli() -> argparse.ArgumentParser:
     bootstrap.add_argument("--config-db", default="config.db")
     bootstrap.add_argument("--admin", action="store_true", default=False)
     bootstrap.set_defaults(func=cmd_user_bootstrap)
+
+    add = user_sub.add_parser(
+        "add", help="create an owner with a password (prompt/stdin, never an arg)")
+    add.add_argument("--name", required=True, help="username / login handle (unique)")
+    add.add_argument("--email", default=None, help="optional; omit for WebUI-only")
+    add.add_argument("--config-db", default="config.db")
+    add.add_argument("--admin", action="store_true", default=False)
+    add.set_defaults(func=cmd_user_add)
 
     return parser
 

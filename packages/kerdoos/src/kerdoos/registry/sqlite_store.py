@@ -30,13 +30,26 @@ from kerdoos.parsers.ports import ParserSpec
 
 from .ports import ConfigStore, MutableConfigStore, Product, ProductSource, Registry, SiteConfig
 
+_SCHEMA_VERSION = 3
+
+# owners auth columns added in Phase 3 (ADR 0001 S6). email/role/state already
+# existed in Phase 1; password_hash + created_at are added here. On a fresh DB
+# they come from this CREATE; on a pre-Phase-3 DB they are added by _migrate()
+# (additive ALTER, never dropping existing owners).
+_OWNERS_AUTH_COLUMNS = (
+    ("password_hash", "TEXT"),   # Argon2id hash, NULL = no password (WebUI SSO/none)
+    ("created_at", "TEXT"),      # ISO-8601 UTC, set at owner creation
+)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS owners (
-    id      TEXT PRIMARY KEY,
-    name    TEXT NOT NULL,
-    email   TEXT,
-    role    TEXT NOT NULL DEFAULT 'user',
-    state   TEXT NOT NULL DEFAULT 'active'
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    email         TEXT,
+    role          TEXT NOT NULL DEFAULT 'user',
+    state         TEXT NOT NULL DEFAULT 'active',
+    password_hash TEXT,
+    created_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sites (
@@ -100,7 +113,35 @@ class SqliteConfigStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive, idempotent upgrade of a pre-existing config.db.
+
+        Phase 3 adds owners.password_hash + owners.created_at. Column names are
+        module constants (never user input), so the ALTER DDL carries no
+        injectable value (no CWE-89). Existing owners/sites/products/sources are
+        preserved (ALTER ADD COLUMN only).
+        """
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(owners)").fetchall()
+        }
+        for column, coltype in _OWNERS_AUTH_COLUMNS:
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE owners ADD COLUMN {column} {coltype}")
+        # Hybrid identity (Phase 3): a login identifier (name OR email) must
+        # resolve to AT MOST one owner. name is the username (UNIQUE); email is
+        # UNIQUE only when present (partial index, so many owners may have no
+        # email -- the WebUI-only case, Kleos #11059).
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_name ON owners(name)")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_email "
+            "ON owners(email) WHERE email IS NOT NULL")
+        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     def close(self) -> None:
         self._conn.close()
@@ -209,16 +250,29 @@ class SqliteConfigStore:
 
     def ensure_owner(
         self, owner_id: str, name: str, *, role: str = "user",
-        email: str | None = None,
+        email: str | None = None, password_hash: str | None = None,
+        created_at: str | None = None,
     ) -> str:
+        """Create/update an owner (CLI-only write path, single-threaded).
+
+        password_hash is an Argon2id digest (or None for a passwordless owner).
+        This is the OWNER-table write path; the concurrent verify_* READ path
+        lives in SqliteAuthStore (per-op connections), never on this shared
+        connection (Phase 3 concurrency invariant, FD3).
+        """
+        if created_at is None:
+            from datetime import datetime, timezone
+            created_at = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """
-            INSERT INTO owners (id, name, email, role, state)
-            VALUES (?, ?, ?, ?, 'active')
+            INSERT INTO owners
+                (id, name, email, role, state, password_hash, created_at)
+            VALUES (?, ?, ?, ?, 'active', ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name, email=excluded.email, role=excluded.role
+                name=excluded.name, email=excluded.email, role=excluded.role,
+                password_hash=excluded.password_hash
             """,
-            (owner_id, name, email, role),
+            (owner_id, name, email, role, password_hash, created_at),
         )
         self._conn.commit()
         return owner_id
