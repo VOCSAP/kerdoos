@@ -24,10 +24,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from kerdoos.parsers.ports import ParserSpec
 from kerdoos.registry.errors import ConfigError
+
+_BUSY_TIMEOUT_MS = 5000
 
 from .ports import ConfigStore, MutableConfigStore, Product, ProductSource, Registry, SiteConfig
 
@@ -110,14 +114,34 @@ class SqliteConfigStore:
     """ConfigStore + MutableConfigStore backed by config.db."""
 
     def __init__(self, db_path: str | Path) -> None:
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.executescript(_SCHEMA)
-        self._migrate()
-        self._conn.commit()
+        # Connection-PER-OPERATION (architect FD3, ADR 0001 S5.1): no shared
+        # self._conn. Under concurrent ASGI handlers a single check_same_thread
+        # connection would raise sqlite3.ProgrammingError; WAL + busy_timeout
+        # let concurrent readers/writers proceed without a head-of-line lock.
+        # Schema + migration run ONCE here on a dedicated connection.
+        self._path = str(db_path)
+        with self._op() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(_SCHEMA)
+            self._migrate(conn)
 
-    def _migrate(self) -> None:
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        return conn
+
+    @contextmanager
+    def _op(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
         """Additive, idempotent upgrade of a pre-existing config.db.
 
         Phase 3 adds owners.password_hash + owners.created_at. Column names are
@@ -127,11 +151,11 @@ class SqliteConfigStore:
         """
         existing = {
             row["name"]
-            for row in self._conn.execute("PRAGMA table_info(owners)").fetchall()
+            for row in conn.execute("PRAGMA table_info(owners)").fetchall()
         }
         for column, coltype in _OWNERS_AUTH_COLUMNS:
             if column not in existing:
-                self._conn.execute(
+                conn.execute(
                     f"ALTER TABLE owners ADD COLUMN {column} {coltype}")
         # Hybrid identity (Phase 3): a login identifier (name OR email) must
         # resolve to AT MOST one owner. name is the username (UNIQUE); email is
@@ -144,22 +168,22 @@ class SqliteConfigStore:
         # sqlite3.IntegrityError out of __init__ and the DB becomes unopenable.
         # Instead we fail with a NAMED ConfigError that lists the collisions so
         # an operator can fix the data (gate C1).
-        self._reject_duplicate_identities()
-        self._conn.execute(
+        self._reject_duplicate_identities(conn)
+        conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_name ON owners(name)")
-        self._conn.execute(
+        conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_email "
             "ON owners(email) WHERE email IS NOT NULL")
-        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
-    def _reject_duplicate_identities(self) -> None:
+    def _reject_duplicate_identities(self, conn: sqlite3.Connection) -> None:
         dup_names = [
-            row["name"] for row in self._conn.execute(
+            row["name"] for row in conn.execute(
                 "SELECT name FROM owners GROUP BY name HAVING COUNT(*) > 1"
             ).fetchall()
         ]
         dup_emails = [
-            row["email"] for row in self._conn.execute(
+            row["email"] for row in conn.execute(
                 "SELECT email FROM owners WHERE email IS NOT NULL "
                 "GROUP BY email HAVING COUNT(*) > 1"
             ).fetchall()
@@ -177,35 +201,41 @@ class SqliteConfigStore:
             )
 
     def close(self) -> None:
-        self._conn.close()
+        # No-op: connection-per-operation holds no long-lived connection. Kept
+        # for API compatibility with existing callers (CLI) that call close().
+        return None
 
     # -- ConfigStore (read) --------------------------------------------
 
     def load(self, owner: str) -> Registry:
-        sites = self._load_sites()
-        products = self._load_products(owner)
+        with self._op() as conn:
+            sites = self._load_sites(conn)
+            products = self._load_products(conn, owner)
         return Registry(sites=sites, products=products)
 
-    def _load_sites(self) -> dict[str, SiteConfig]:
-        rows = self._conn.execute("SELECT * FROM sites ORDER BY name").fetchall()
+    def _load_sites(self, conn: sqlite3.Connection) -> dict[str, SiteConfig]:
+        rows = conn.execute("SELECT * FROM sites ORDER BY name").fetchall()
         return {row["name"]: _row_to_site(row) for row in rows}
 
     def site_domains(self) -> frozenset[str]:
-        rows = self._conn.execute(
-            "SELECT domain FROM sites WHERE domain != ''"
-        ).fetchall()
+        with self._op() as conn:
+            rows = conn.execute(
+                "SELECT domain FROM sites WHERE domain != ''"
+            ).fetchall()
         return frozenset(row["domain"] for row in rows)
 
-    def _load_products(self, owner: str) -> tuple[Product, ...]:
+    def _load_products(
+        self, conn: sqlite3.Connection, owner: str
+    ) -> tuple[Product, ...]:
         # Single grouped query instead of one sources SELECT per product
         # (N+1): all of an owner's sources are fetched at once and grouped
         # in memory by product_key, preserving deterministic ordering.
-        product_rows = self._conn.execute(
+        product_rows = conn.execute(
             "SELECT product_key, name FROM products WHERE owner_id = ? "
             "ORDER BY product_key",
             (owner,),
         ).fetchall()
-        source_rows = self._conn.execute(
+        source_rows = conn.execute(
             "SELECT source_id, product_key, site, url FROM sources "
             "WHERE owner_id = ? ORDER BY product_key, source_id",
             (owner,),
@@ -230,54 +260,55 @@ class SqliteConfigStore:
     # -- MutableConfigStore (write, interfaces only) --------------------
 
     def add_site(self, site: SiteConfig) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO sites (name, fetcher, domain, tier2_label,
-                                subresource_domains, parser_kind, parser_pix,
-                                parser_card, parser_availability)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                fetcher=excluded.fetcher, domain=excluded.domain,
-                tier2_label=excluded.tier2_label,
-                subresource_domains=excluded.subresource_domains,
-                parser_kind=excluded.parser_kind, parser_pix=excluded.parser_pix,
-                parser_card=excluded.parser_card,
-                parser_availability=excluded.parser_availability
-            """,
-            _site_to_row(site),
-        )
-        self._conn.commit()
+        with self._op() as conn:
+            conn.execute(
+                """
+                INSERT INTO sites (name, fetcher, domain, tier2_label,
+                                    subresource_domains, parser_kind, parser_pix,
+                                    parser_card, parser_availability)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    fetcher=excluded.fetcher, domain=excluded.domain,
+                    tier2_label=excluded.tier2_label,
+                    subresource_domains=excluded.subresource_domains,
+                    parser_kind=excluded.parser_kind, parser_pix=excluded.parser_pix,
+                    parser_card=excluded.parser_card,
+                    parser_availability=excluded.parser_availability
+                """,
+                _site_to_row(site),
+            )
 
     def add_product(self, owner: str, product: Product) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO products (owner_id, product_key, name)
-            VALUES (?, ?, ?)
-            ON CONFLICT(owner_id, product_key) DO UPDATE SET name=excluded.name
-            """,
-            (owner, product.id, product.name),
-        )
-        self._conn.commit()
+        with self._op() as conn:
+            conn.execute(
+                """
+                INSERT INTO products (owner_id, product_key, name)
+                VALUES (?, ?, ?)
+                ON CONFLICT(owner_id, product_key) DO UPDATE SET name=excluded.name
+                """,
+                (owner, product.id, product.name),
+            )
 
     def add_source(self, owner: str, source: ProductSource) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO sources (source_id, owner_id, product_key, site, url)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(source_id) DO NOTHING
-            """,
-            (source.source_id, owner, source.product_id, source.site, source.url),
-        )
-        self._conn.commit()
+        with self._op() as conn:
+            conn.execute(
+                """
+                INSERT INTO sources (source_id, owner_id, product_key, site, url)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO NOTHING
+                """,
+                (source.source_id, owner, source.product_id, source.site,
+                 source.url),
+            )
 
     def remove_source(self, owner: str, source_id: str) -> None:
         # owner-scoped delete: a tenant can never remove another tenant's
         # source, even if it guesses the source_id.
-        self._conn.execute(
-            "DELETE FROM sources WHERE source_id = ? AND owner_id = ?",
-            (source_id, owner),
-        )
-        self._conn.commit()
+        with self._op() as conn:
+            conn.execute(
+                "DELETE FROM sources WHERE source_id = ? AND owner_id = ?",
+                (source_id, owner),
+            )
 
     # -- owner bootstrap (no auth in Phase 1; CLI-only helper) -----------
 
@@ -297,22 +328,23 @@ class SqliteConfigStore:
             from datetime import datetime, timezone
             created_at = datetime.now(timezone.utc).isoformat()
         try:
-            self._conn.execute(
-                """
-                INSERT INTO owners
-                    (id, name, email, role, state, password_hash, created_at)
-                VALUES (?, ?, ?, ?, 'active', ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name=excluded.name, email=excluded.email, role=excluded.role,
-                    password_hash=excluded.password_hash
-                """,
-                (owner_id, name, email, role, password_hash, created_at),
-            )
-            self._conn.commit()
+            with self._op() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO owners
+                        (id, name, email, role, state, password_hash, created_at)
+                    VALUES (?, ?, ?, ?, 'active', ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name, email=excluded.email,
+                        role=excluded.role,
+                        password_hash=excluded.password_hash
+                    """,
+                    (owner_id, name, email, role, password_hash, created_at),
+                )
         except sqlite3.IntegrityError as exc:
             # A duplicate name/email (unique-index violation) surfaces as a
-            # named domain error, not a raw driver exception (gate C2).
-            self._conn.rollback()
+            # named domain error, not a raw driver exception (gate C2). _op has
+            # already closed the connection; no manual rollback needed.
             raise ConfigError(
                 f"owner identity conflict for name={name!r} email={email!r}: "
                 f"{exc}"
@@ -320,9 +352,10 @@ class SqliteConfigStore:
         return owner_id
 
     def get_owner_role(self, owner_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT role FROM owners WHERE id = ?", (owner_id,)
-        ).fetchone()
+        with self._op() as conn:
+            row = conn.execute(
+                "SELECT role FROM owners WHERE id = ?", (owner_id,)
+            ).fetchone()
         return row["role"] if row else None
 
 

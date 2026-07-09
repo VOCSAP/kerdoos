@@ -335,21 +335,26 @@ class MigrationTest(unittest.TestCase):
         conn.close()
 
         # Opening with the Phase 3 store must migrate additively, preserving the
-        # legacy owner, and add the new columns.
+        # legacy owner, and add the new columns. The store is now
+        # connection-per-operation (FD3), so inspect the migrated DB via a fresh
+        # connection on the same file, not a store-held connection.
         store = SqliteConfigStore(path)
+        store.close()
+        insp = sqlite3.connect(path)
+        insp.row_factory = sqlite3.Row
         try:
             cols = {row["name"] for row in
-                    store._conn.execute("PRAGMA table_info(owners)").fetchall()}
+                    insp.execute("PRAGMA table_info(owners)").fetchall()}
             self.assertIn("password_hash", cols)
             self.assertIn("created_at", cols)
-            row = store._conn.execute(
+            row = insp.execute(
                 "SELECT name, role FROM owners WHERE id = 'legacy'").fetchone()
             self.assertEqual(row["name"], "old")
             self.assertEqual(row["role"], "admin")
-            version = store._conn.execute("PRAGMA user_version").fetchone()[0]
+            version = insp.execute("PRAGMA user_version").fetchone()[0]
             self.assertEqual(version, 3)
         finally:
-            store.close()
+            insp.close()
 
     def test_legacy_duplicate_name_raises_named_config_error(self) -> None:
         # A pre-uniqueness config.db with duplicate names must fail with a clear

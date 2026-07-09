@@ -13,11 +13,15 @@ a physical NOT NULL on legacy databases).
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from kerdoos.core.domain import Availability, ScrapeStatus
 
 from .ports import ScrapeRecord
+
+_BUSY_TIMEOUT_MS = 5000
 
 # Fresh databases get owner_id NOT NULL directly (real constraint enforcement).
 # Legacy databases (pre owner_id) cannot get a retroactive NOT NULL via ALTER
@@ -92,7 +96,12 @@ ORDER BY source_id
 
 
 class SqliteStateStore:
-    """StateStore backed by a local SQLite file (or :memory: for tests).
+    """StateStore backed by a local SQLite file, connection-PER-OPERATION.
+
+    Architect FD3 (ADR 0001 S5.1): no shared self._conn -- each method opens its
+    own short-lived WAL connection so concurrent ASGI handlers never hit
+    sqlite3.ProgrammingError or a head-of-line lock. `:memory:` is NOT supported
+    (each per-op connection would see a separate empty DB); tests use temp files.
 
     bootstrap_owner_id: backfill target for legacy (pre owner_id) rows found
     in an existing database on open. Irrelevant for fresh databases.
@@ -104,13 +113,27 @@ class SqliteStateStore:
     ) -> None:
         self._path = str(db_path)
         self._bootstrap_owner_id = bootstrap_owner_id
-        self._conn = sqlite3.connect(self._path)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._migrate()
-        self._conn.commit()
+        with self._op() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(_SCHEMA)
+            self._migrate(conn)
 
-    def _migrate(self) -> None:
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        return conn
+
+    @contextmanager
+    def _op(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
         """Additive, idempotent upgrade of a pre-existing database.
 
         Column/index names are module constants (never user input), so the
@@ -118,66 +141,69 @@ class SqliteStateStore:
         """
         existing = {
             row["name"]
-            for row in self._conn.execute("PRAGMA table_info(scrapes)").fetchall()
+            for row in conn.execute("PRAGMA table_info(scrapes)").fetchall()
         }
         for column in _MEMBER_COLUMNS:
             if column not in existing:
-                self._conn.execute(
+                conn.execute(
                     f"ALTER TABLE scrapes ADD COLUMN {column} INTEGER")
         if "owner_id" not in existing:
             # Legacy DB: nullable ALTER (SQLite can't retroactively add a
             # NOT NULL column to a non-empty table without a constant
             # default), then backfill every existing row to the bootstrap
             # owner so pre-Phase-1 history is preserved and stays queryable.
-            self._conn.execute("ALTER TABLE scrapes ADD COLUMN owner_id TEXT")
-            self._conn.execute(
+            conn.execute("ALTER TABLE scrapes ADD COLUMN owner_id TEXT")
+            conn.execute(
                 "UPDATE scrapes SET owner_id = ? WHERE owner_id IS NULL",
                 (self._bootstrap_owner_id,),
             )
-        self._conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scrapes_owner_source_ts "
             "ON scrapes (owner_id, source_id, ts DESC)"
         )
-        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     def record(self, owner: str, scrape: ScrapeRecord) -> None:
         if not owner:
             # Fail-closed: legacy DBs can't get a physical NOT NULL via
             # ALTER, so the write path is the enforcement point instead.
             raise ValueError("owner must not be empty")
-        self._conn.execute(
-            _INSERT,
-            (
-                owner,
-                scrape.source_id,
-                scrape.ts,
-                scrape.status.value,
-                scrape.price_pix_cents,
-                scrape.price_card_cents,
-                scrape.currency,
-                scrape.availability.value,
-                scrape.method,
-                scrape.error,
-                scrape.raw_ref,
-                scrape.price_pix_member_cents,
-                scrape.price_card_member_cents,
-            ),
-        )
-        self._conn.commit()
+        with self._op() as conn:
+            conn.execute(
+                _INSERT,
+                (
+                    owner,
+                    scrape.source_id,
+                    scrape.ts,
+                    scrape.status.value,
+                    scrape.price_pix_cents,
+                    scrape.price_card_cents,
+                    scrape.currency,
+                    scrape.availability.value,
+                    scrape.method,
+                    scrape.error,
+                    scrape.raw_ref,
+                    scrape.price_pix_member_cents,
+                    scrape.price_card_member_cents,
+                ),
+            )
 
     def history(
         self, owner: str, source_id: str, limit: int = 50
     ) -> list[ScrapeRecord]:
-        rows = self._conn.execute(
-            _SELECT_HISTORY, (owner, source_id, limit)).fetchall()
+        with self._op() as conn:
+            rows = conn.execute(
+                _SELECT_HISTORY, (owner, source_id, limit)).fetchall()
         return [_row_to_record(row) for row in rows]
 
     def latest_all(self, owner: str) -> list[ScrapeRecord]:
-        rows = self._conn.execute(_SELECT_LATEST_ALL, (owner,)).fetchall()
+        with self._op() as conn:
+            rows = conn.execute(_SELECT_LATEST_ALL, (owner,)).fetchall()
         return [_row_to_record(row) for row in rows]
 
     def close(self) -> None:
-        self._conn.close()
+        # No-op: connection-per-operation holds no long-lived connection.
+        return None
 
 
 def _row_to_record(row: sqlite3.Row) -> ScrapeRecord:

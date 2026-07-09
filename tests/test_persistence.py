@@ -54,7 +54,15 @@ class SourceIdTest(unittest.TestCase):
 
 class SqliteStoreTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.store = SqliteStateStore(":memory:")
+        # A temp FILE, not ':memory:': the store is now connection-per-operation
+        # (FD3), so ':memory:' would give each op a separate empty DB. Temp file
+        # is the architect-chosen test discipline (option a).
+        import os
+        import shutil
+        import tempfile
+        self._dir = tempfile.mkdtemp(prefix="kerdoos-state-")
+        self.addCleanup(shutil.rmtree, self._dir, ignore_errors=True)
+        self.store = SqliteStateStore(os.path.join(self._dir, "state.db"))
 
     def tearDown(self) -> None:
         self.store.close()
