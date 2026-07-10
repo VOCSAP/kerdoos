@@ -129,14 +129,21 @@ class AuthStore(Protocol):
         ...
 
     # -- self-service profile (WebUI Phase 4b) --
+    def get_email(self, owner_id: str) -> str | None:
+        """Read owner_id's own email (None if never set or owner_id unknown --
+        never raises for a missing row)."""
+        ...
+
     def set_email(self, owner_id: str, email: str | None) -> None:
         """Set (email=str) or clear (email=None) owner_id's email. Raises
         EmailAlreadyTakenError if a DIFFERENT owner already has that email
         (idx_owners_email unique partial index)."""
         ...
 
-    def list_tokens(self, owner_id: str) -> list[TokenInfo]:
-        """List owner_id's own ACTIVE tokens (state='active'), most recent
-        first (created_at DESC). Never includes the plaintext token or its
-        hash."""
+    def list_tokens(self, owner_id: str, now: str) -> list[TokenInfo]:
+        """List owner_id's own ACTIVE, NOT-YET-EXPIRED tokens (state='active'
+        AND expires_at > now), most recent first (created_at DESC). `now`
+        keeps the expiry cut consistent with resolve_token/resolve_session
+        (caller-supplied clock, never read server time internally). Never
+        includes the plaintext token or its hash."""
         ...

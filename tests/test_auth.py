@@ -310,6 +310,28 @@ class SetEmailTest(_AuthTestBase):
         self.assertIsNone(email)   # rejected, no partial write
 
 
+class GetEmailTest(_AuthTestBase):
+    def test_self_scope_only_reads_own_email(self) -> None:
+        self._add_owner("o1", "alice", "pw", email="alice@example.com")
+        self._add_owner("o2", "bob", "pw", email="bob@example.com")
+        self.assertEqual(
+            self.service.get_email(Principal("o1", "user")), "alice@example.com")
+        self.assertEqual(
+            self.service.get_email(Principal("o2", "user")), "bob@example.com")
+
+    def test_none_when_never_set(self) -> None:
+        self._add_owner("o1", "alice", "pw", email=None)
+        self.assertIsNone(self.service.get_email(Principal("o1", "user")))
+
+    def test_reflects_current_state_after_set_then_clear(self) -> None:
+        self._add_owner("o1", "alice", "pw", email=None)
+        p = Principal("o1", "user")
+        self.service.set_email(p, "alice@example.com")
+        self.assertEqual(self.service.get_email(p), "alice@example.com")
+        self.service.set_email(p, None)
+        self.assertIsNone(self.service.get_email(p))
+
+
 class ListTokensTest(_AuthTestBase):
     def test_self_scope_only_lists_own_tokens(self) -> None:
         self._add_owner("o1", "alice", "pw")
@@ -341,6 +363,22 @@ class ListTokensTest(_AuthTestBase):
         tokens = self.service.list_tokens(p)
         self.assertEqual([t.token_id for t in tokens], [kept.token_id])
 
+    def test_excludes_expired_but_not_revoked_tokens(self) -> None:
+        # An expired token that was never explicitly revoked must not appear
+        # -- clock-consistent with verify_bearer (Kleos fast-follow item 2).
+        self._add_owner("o1", "alice", "pw")
+        p = Principal("o1", "user")
+        clock_box = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        svc = AuthService(
+            self.store, self.real_hasher,
+            token_ttl=timedelta(hours=1), clock=lambda: clock_box["now"])
+        issued = svc.create_token(p)
+        # still within TTL -> visible
+        self.assertEqual([t.token_id for t in svc.list_tokens(p)], [issued.token_id])
+        # advance past expiry, never call revoke_token -> must disappear
+        clock_box["now"] = clock_box["now"] + timedelta(hours=2)
+        self.assertEqual(svc.list_tokens(p), [])
+
     def test_empty_list_for_owner_with_no_tokens(self) -> None:
         self._add_owner("o1", "alice", "pw")
         self.assertEqual(self.service.list_tokens(Principal("o1", "user")), [])
@@ -352,6 +390,7 @@ class ListTokensTest(_AuthTestBase):
             datetime(2026, 1, 1, tzinfo=timezone.utc),
             datetime(2026, 1, 2, tzinfo=timezone.utc),
             datetime(2026, 1, 3, tzinfo=timezone.utc),
+            datetime(2026, 1, 4, tzinfo=timezone.utc),  # list_tokens' own now
         ])
         svc = AuthService(self.store, self.real_hasher, clock=lambda: next(times))
         first = svc.create_token(p)
@@ -484,6 +523,46 @@ class MigrationTest(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             SqliteConfigStore(path)
         self.assertIn("dup", str(ctx.exception))
+
+
+class SqliteAuthStoreEmailUniquenessTest(unittest.TestCase):
+    """Kleos fast-follow item 3 -- SqliteAuthStore must ensure its own
+    idx_owners_email invariant at construction, not silently depend on
+    SqliteConfigStore having run first (Config-before-Auth wiring order)."""
+
+    def test_standalone_construction_rejects_preexisting_duplicate_email(self) -> None:
+        # Build a raw owners table with a duplicate email, WITHOUT ever
+        # constructing a SqliteConfigStore on this path.
+        d = tempfile.mkdtemp(prefix="kerdoos-auth-uniq-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "config.db")
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE owners (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "email TEXT, role TEXT NOT NULL DEFAULT 'user', "
+            "state TEXT NOT NULL DEFAULT 'active', password_hash TEXT, "
+            "created_at TEXT);"
+            "INSERT INTO owners (id, name, email) VALUES ('a', 'alice', 'dup@example.com');"
+            "INSERT INTO owners (id, name, email) VALUES ('b', 'bob', 'dup@example.com');"
+        )
+        conn.commit()
+        conn.close()
+
+        # SqliteAuthStore alone (no SqliteConfigStore involved at all) must
+        # reject deterministically -- not pass silently and only fail later
+        # on the first set_email collision.
+        with self.assertRaises(EmailAlreadyTakenError) as ctx:
+            SqliteAuthStore(path)
+        self.assertIn("dup@example.com", str(ctx.exception))
+
+    def test_standalone_construction_before_owners_table_exists_is_a_noop(self) -> None:
+        # SqliteAuthStore built FIRST, before any SqliteConfigStore has ever
+        # created owners -- must not raise (nothing to enforce yet).
+        d = tempfile.mkdtemp(prefix="kerdoos-auth-uniq-noop-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "config.db")
+        store = SqliteAuthStore(path)  # no owners table yet -- must not raise
+        self.assertIsInstance(store, SqliteAuthStore)
 
 
 if __name__ == "__main__":

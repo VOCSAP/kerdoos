@@ -172,6 +172,12 @@ class AuthService:
         self._store.revoke_owner_tokens(target_owner_id)
 
     # -- self-service profile (WebUI Phase 4b) ------------------------------
+    def get_email(self, principal: Principal) -> str | None:
+        """Read the ACTING principal's own email (self-scope strict -- no
+        target-owner parameter, mirroring set_email/list_tokens). Used to
+        pre-fill the profile form; returns None if never set."""
+        return self._store.get_email(principal.owner_id)
+
     def set_email(self, principal: Principal, email: str | None) -> None:
         """Set or clear the ACTING principal's own email (self-scope strict --
         there is deliberately no target-owner parameter, mirroring
@@ -188,8 +194,9 @@ class AuthService:
         self._store.set_email(principal.owner_id, email)
 
     def list_tokens(self, principal: Principal) -> list[TokenInfo]:
-        """List the ACTING principal's own active bearer tokens (self-scope
-        strict), most recent first. Never returns the plaintext token or its
-        hash -- only enough to label + revoke via
-        revoke_token(principal, token_id)."""
-        return self._store.list_tokens(principal.owner_id)
+        """List the ACTING principal's own active, not-yet-expired bearer
+        tokens (self-scope strict), most recent first. An expired-but-not-
+        revoked token no longer appears (clock-consistent with
+        verify_bearer). Never returns the plaintext token or its hash --
+        only enough to label + revoke via revoke_token(principal, token_id)."""
+        return self._store.list_tokens(principal.owner_id, self._clock().isoformat())

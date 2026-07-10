@@ -15,6 +15,17 @@ path onto owners -- set_email (self-service profile field, Phase 4b). That
 write is narrow (single column, single row by id) and does not change who
 creates the table or its other columns. Construct a SqliteConfigStore on the
 same path first (composition root / tests) so owners exists.
+
+EMAIL UNIQUENESS INVARIANT (fast-follow hardening, Kleos architect finding
+MEDIUM): __init__ ENSURES idx_owners_email itself (pre-check duplicates, then
+CREATE UNIQUE INDEX IF NOT EXISTS) rather than relying on SqliteConfigStore
+having run first. This writer owns its own invariant -- set_email's
+EmailAlreadyTakenError translation no longer silently depends on wiring
+order (Config-before-Auth). If owners does not exist yet (this store built
+standalone, no SqliteConfigStore ever ran on this path), the check is
+skipped silently; SqliteConfigStore's _migrate() creates the identical index
+when it eventually runs. CREATE UNIQUE INDEX IF NOT EXISTS run redundantly by
+both stores is idempotent and safe.
 """
 
 from __future__ import annotations
@@ -97,12 +108,18 @@ class SqliteAuthStore:
 
     def __init__(self, config_db_path: str | Path) -> None:
         self._path = str(config_db_path)
-        # One-time: enable WAL (persists at the DB level) and ensure the
-        # sessions/tokens tables exist. Owners is created by SqliteConfigStore.
+        # One-time: enable WAL (persists at the DB level), ensure the
+        # sessions/tokens tables exist, and ensure this store's OWN
+        # uniqueness invariant on owners.email (idx_owners_email). Owners the
+        # TABLE is still created by SqliteConfigStore -- that ownership is
+        # unchanged -- but set_email's collision translation must not
+        # silently depend on SqliteConfigStore having run first (Kleos
+        # architect finding MEDIUM): this writer now ensures its own index.
         conn = self._connect()
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SESSION_TOKEN_SCHEMA)
+            self._ensure_email_uniqueness(conn)
             conn.commit()
         finally:
             conn.close()
@@ -112,6 +129,40 @@ class SqliteAuthStore:
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         return conn
+
+    def _ensure_email_uniqueness(self, conn: sqlite3.Connection) -> None:
+        # owners is owned/created by SqliteConfigStore. If THIS store is
+        # constructed standalone (no SqliteConfigStore has ever run against
+        # this path), the table does not exist yet -- skip silently, there
+        # is nothing to index or collide on; SqliteConfigStore's own
+        # _migrate() creates the identical idx_owners_email when it runs.
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'owners'"
+        ).fetchone()
+        if exists is None:
+            return
+        # Pre-check BEFORE CREATE UNIQUE INDEX (mirrors SqliteConfigStore.
+        # _migrate/_reject_duplicate_identities, Kleos migration checklist
+        # #11162): a raw CREATE UNIQUE INDEX on a legacy DB with existing
+        # email duplicates raises sqlite3.IntegrityError, which we never let
+        # surface un-translated.
+        dup_emails = [
+            row["email"]
+            for row in conn.execute(
+                "SELECT email FROM owners WHERE email IS NOT NULL "
+                "GROUP BY email HAVING COUNT(*) > 1"
+            ).fetchall()
+        ]
+        if dup_emails:
+            raise EmailAlreadyTakenError(
+                "cannot enforce owner email uniqueness -- duplicate owner "
+                f"emails: {sorted(dup_emails)}. Resolve the duplicate rows "
+                "before opening this config.db."
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_email "
+            "ON owners(email) WHERE email IS NOT NULL"
+        )
 
     # -- credential lookup (login) ----------------------------------------
     def lookup_active_credentials(self, identifier: str) -> OwnerCredentials | None:
@@ -248,6 +299,16 @@ class SqliteAuthStore:
             conn.close()
 
     # -- self-service profile (WebUI Phase 4b) ------------------------------
+    def get_email(self, owner_id: str) -> str | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT email FROM owners WHERE id = ?", (owner_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return row["email"] if row is not None else None
+
     def set_email(self, owner_id: str, email: str | None) -> None:
         # Format validation happens upstream in AuthService; this method only
         # owns the DB write + the uniqueness-collision translation. A missing
@@ -271,14 +332,18 @@ class SqliteAuthStore:
         finally:
             conn.close()
 
-    def list_tokens(self, owner_id: str) -> list[TokenInfo]:
+    def list_tokens(self, owner_id: str, now: str) -> list[TokenInfo]:
+        # expires_at > now mirrors resolve_token's expiry filter (Kleos
+        # fast-follow item 2): an expired-but-not-revoked token must not
+        # appear in the self-service list, even though it is still
+        # state='active' in the DB (revocation and expiry are independent).
         conn = self._connect()
         try:
             rows = conn.execute(
                 "SELECT id, created_at, expires_at FROM tokens "
-                "WHERE owner_id = ? AND state = 'active' "
+                "WHERE owner_id = ? AND state = 'active' AND expires_at > ? "
                 "ORDER BY created_at DESC",
-                (owner_id,),
+                (owner_id, now),
             ).fetchall()
         finally:
             conn.close()
