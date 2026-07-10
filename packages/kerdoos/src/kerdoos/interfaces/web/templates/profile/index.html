@@ -1,0 +1,96 @@
+{% extends "shell.html" %}
+{% block title %}Profil -- Kerdoos{% endblock %}
+{% block content %}
+<div class="main__head">
+  <h1>Profil</h1>
+  <p class="main__subtitle">Identité, email de digest et jetons d'accès API.</p>
+</div>
+
+{% if email_saved %}<div class="banner banner--success" role="status">Email enregistré.</div>{% endif %}
+{% if email_error %}<div class="banner banner--error" role="alert">{{ email_error }}</div>{% endif %}
+
+<div class="card">
+  <h2 class="card__title">Identité</h2>
+  <table class="table">
+    <tbody>
+      <tr><td class="muted">Identifiant</td><td class="name">{{ principal.owner_id }}</td></tr>
+      <tr><td class="muted">Rôle</td><td>{{ principal.role }}</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2 class="card__title">Email de digest</h2>
+  <p class="main__subtitle" style="margin-bottom: var(--space-4)">
+    Sans email, votre veille reste consultable ici mais aucun digest n'est envoyé.
+  </p>
+  <form method="post" action="/profile/email" class="form--inline">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <div class="field">
+      <label class="field__label" for="email">Adresse email</label>
+      <input class="input" id="email" name="email" type="email"
+             value="{{ email or '' }}" placeholder="vous@exemple.com">
+      <span class="field__hint">Laissez vide pour retirer l'email.</span>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">Enregistrer</button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="spread">
+    <h2 class="card__title">Jetons d'accès (API)</h2>
+    <form method="post" action="/profile/tokens">
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+      <button class="btn btn--primary btn--sm" type="submit">Générer un jeton</button>
+    </form>
+  </div>
+
+  {% if new_token %}
+  {% include "profile/_token.html" %}
+  {% endif %}
+
+  {% if tokens is none %}
+  <div class="state">
+    <p class="state__title">Liste des jetons bientôt disponible.</p>
+    <p>La génération et la révocation globale fonctionnent déjà.</p>
+  </div>
+  {% elif tokens %}
+  <table class="table">
+    <thead><tr><th>Identifiant du jeton</th><th>Créé</th><th>Expire</th><th></th></tr></thead>
+    <tbody>
+      {% for t in tokens %}
+      <tr id="token-{{ t.token_id }}">
+        <td class="num">{{ t.token_id }}</td>
+        <td class="muted">{{ t.created_at[:10] }}</td>
+        <td class="muted">{{ t.expires_at[:10] }}</td>
+        <td class="row-actions">
+          <button class="btn btn--danger btn--sm" type="button"
+                  hx-delete="/profile/tokens/{{ t.token_id }}"
+                  hx-confirm="Révoquer ce jeton ?">Révoquer</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="stack" style="margin-top: var(--space-4)">
+    <p class="field__hint">
+      Révoquer tout coupe vos jetons ET vos sessions : vous serez déconnecté.
+    </p>
+    <form method="post" action="/profile/tokens/revoke-all">
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+      <button class="btn btn--danger" type="submit"
+              onclick="return confirm('Révoquer tout votre accès (jetons et sessions) ? Vous serez déconnecté.')">
+        Révoquer tout mon accès
+      </button>
+    </form>
+  </div>
+  {% else %}
+  <div class="state">
+    <p class="state__title">Aucun jeton actif.</p>
+    <p>Générez-en un pour accéder à l'API.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

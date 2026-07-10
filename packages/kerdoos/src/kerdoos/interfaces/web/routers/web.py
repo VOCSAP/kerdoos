@@ -1,0 +1,315 @@
+"""Tenant WebUI (server-rendered Jinja2 + HTMX). Thin views over AppService /
+AuthService (invariant #9): each handler resolves the principal, calls a
+use-case with owner = principal.owner_id, and renders a template. No business
+logic here.
+
+Auth AND CSRF are attached at the ROUTER level (rule FastAPI "au niveau
+router"): verify_session gates every route, verify_csrf gates every unsafe
+method. owner_id ALWAYS comes from the session Principal, never from the request
+body/query, and is never serialised back to the client.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
+
+from kerdoos.core.app.auth import AuthService
+from kerdoos.core.app.services import AppService, Principal, ProductSpec
+from kerdoos.interfaces.web.csrf import csrf_token_for, verify_csrf
+from kerdoos.interfaces.web.deps import (
+    get_app_service,
+    get_auth_service,
+    verify_session,
+)
+from kerdoos.interfaces.web.templates import templates
+
+# Digest cut-off shown in the topbar (ambient time anchor of the watch station).
+_NEXT_CUT = "06:00"
+
+router = APIRouter(dependencies=[Depends(verify_session), Depends(verify_csrf)])
+
+
+def _base(request: Request, principal: Principal, csrf: str, active: str) -> dict:
+    return {
+        "request": request,
+        "principal": principal,
+        "csrf_token": csrf,
+        "active": active,
+        "next_cut": _NEXT_CUT,
+    }
+
+
+# ===== Dashboard =========================================================
+@router.get("/")
+def dashboard(
+    request: Request,
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    owner = principal.owner_id
+    records = svc.list_state(owner)
+    registry = svc.list_config(owner)
+
+    # Presentation join (invariant #9: orchestration, not business logic):
+    # list_state yields ScrapeRecord keyed only by source_id, so pair each with
+    # its product name / site / url from the config. Built directly from
+    # products (not iter_sources) so a dangling site reference never 500s.
+    index: dict[str, tuple] = {}
+    for product in registry.products:
+        for source in product.sources:
+            index[source.source_id] = (product, source)
+
+    rows = []
+    counts = {"ok": 0, "indeterminate": 0, "unavailable": 0}
+    for rec in records:
+        counts[rec.status.value] = counts.get(rec.status.value, 0) + 1
+        meta = index.get(rec.source_id)
+        if meta is not None:
+            product, source = meta
+            rows.append({
+                "record": rec,
+                "product_name": product.name or product.id,
+                "site": source.site,
+                "url": source.url,
+            })
+        else:
+            rows.append({
+                "record": rec, "product_name": rec.source_id,
+                "site": "--", "url": None,
+            })
+
+    briefing = {
+        "ok": counts["ok"],
+        "indeterminate": counts["indeterminate"],
+        "unavailable": counts["unavailable"],
+        "to_watch": counts["indeterminate"] + counts["unavailable"],
+    }
+    ctx = _base(request, principal, csrf, "dashboard")
+    ctx.update(rows=rows, briefing=briefing)
+    return templates.TemplateResponse(request, "dashboard/index.html", ctx)
+
+
+@router.post("/run")
+def run_now(
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+) -> Response:
+    svc.run_now(principal.owner_id)
+    return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+
+
+# ===== History ===========================================================
+@router.get("/history/{source_id}")
+def history(
+    source_id: str,
+    request: Request,
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    owner = principal.owner_id
+    records = svc.get_history(owner, source_id, limit=50)
+    registry = svc.list_config(owner)
+    product_name = source_id
+    site = None
+    for product in registry.products:
+        for source in product.sources:
+            if source.source_id == source_id:
+                product_name = product.name or product.id
+                site = source.site
+    ctx = _base(request, principal, csrf, "products")
+    ctx.update(records=records, source_id=source_id,
+               product_name=product_name, site=site)
+    return templates.TemplateResponse(request, "history/detail.html", ctx)
+
+
+# ===== Products / sources ================================================
+def _render_products(
+    request: Request, principal: Principal, svc: AppService, csrf: str,
+    *, form_error: str | None = None, status_code: int = 200,
+) -> Response:
+    registry = svc.list_config(principal.owner_id)
+    ctx = _base(request, principal, csrf, "products")
+    ctx.update(registry=registry, form_error=form_error)
+    return templates.TemplateResponse(
+        request, "products/index.html", ctx, status_code=status_code)
+
+
+@router.get("/products")
+def products(
+    request: Request,
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    return _render_products(request, principal, svc, csrf)
+
+
+@router.post("/products")
+def add_product(
+    request: Request,
+    product_key: str = Form(...),
+    name: str = Form(""),
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    clean_name = name.strip() or None
+    try:
+        svc.add_product(
+            principal.owner_id,
+            ProductSpec(product_key=product_key.strip(), name=clean_name))
+    except Exception:  # noqa: BLE001 -- surface a generic form error, not the cause
+        return _render_products(
+            request, principal, svc, csrf,
+            form_error="Clé produit invalide ou déjà utilisée.",
+            status_code=status.HTTP_400_BAD_REQUEST)
+    return RedirectResponse("/products", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/sources")
+def add_source(
+    request: Request,
+    product_key: str = Form(...),
+    site: str = Form(...),
+    url: str = Form(...),
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    try:
+        svc.add_source(principal.owner_id, product_key.strip(), site.strip(),
+                       url.strip())
+    except Exception:  # noqa: BLE001 -- generic message (site or URL rejected)
+        return _render_products(
+            request, principal, svc, csrf,
+            form_error="Source refusée : site inconnu ou URL non autorisée.",
+            status_code=status.HTTP_400_BAD_REQUEST)
+    return RedirectResponse("/products", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.delete("/products/{product_key}")
+def remove_product(
+    product_key: str,
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+) -> Response:
+    try:
+        svc.remove_product(principal.owner_id, product_key)
+    except KeyError:
+        # Owner-scoped: unknown OR not-owned both raise KeyError. Return a
+        # generic 404 so the response never reveals whether the key exists for
+        # another tenant (no cross-tenant existence oracle).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT,
+                    headers={"HX-Redirect": "/products"})
+
+
+@router.delete("/sources/{source_id}")
+def remove_source(
+    source_id: str,
+    principal: Principal = Depends(verify_session),
+    svc: AppService = Depends(get_app_service),
+) -> Response:
+    svc.remove_source(principal.owner_id, source_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT,
+                    headers={"HX-Redirect": "/products"})
+
+
+# ===== Profile ===========================================================
+def _list_tokens(auth: AuthService, principal: Principal):
+    """Integration seam: AuthService.list_tokens(principal) is landing in the
+    core (developer -2, gap #2). Until it merges, degrade gracefully (render a
+    'coming soon' note) instead of 500ing -- lights up automatically once the
+    method exists."""
+    fn = getattr(auth, "list_tokens", None)
+    return fn(principal) if fn is not None else None
+
+
+@router.get("/profile")
+def profile(
+    request: Request,
+    principal: Principal = Depends(verify_session),
+    auth: AuthService = Depends(get_auth_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    ctx = _base(request, principal, csrf, "profile")
+    ctx.update(tokens=_list_tokens(auth, principal), email=None, new_token=None)
+    return templates.TemplateResponse(request, "profile/index.html", ctx)
+
+
+@router.post("/profile/tokens")
+def create_token(
+    request: Request,
+    principal: Principal = Depends(verify_session),
+    auth: AuthService = Depends(get_auth_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    issued = auth.create_token(principal)  # self-only; no target-owner param
+    ctx = _base(request, principal, csrf, "profile")
+    # Render (not redirect): the plaintext token is shown ONCE, here only.
+    ctx.update(tokens=_list_tokens(auth, principal), email=None,
+               new_token=issued)
+    return templates.TemplateResponse(request, "profile/index.html", ctx)
+
+
+@router.delete("/profile/tokens/{token_id}")
+def revoke_token(
+    token_id: str,
+    principal: Principal = Depends(verify_session),
+    auth: AuthService = Depends(get_auth_service),
+) -> Response:
+    auth.revoke_token(principal, token_id)  # owner-scoped, own tokens only
+    return Response(status_code=status.HTTP_204_NO_CONTENT,
+                    headers={"HX-Redirect": "/profile"})
+
+
+@router.post("/profile/tokens/revoke-all")
+def revoke_all_tokens(
+    principal: Principal = Depends(verify_session),
+    auth: AuthService = Depends(get_auth_service),
+) -> Response:
+    # revoke_all cuts ALL of the owner's tokens AND sessions -- including the
+    # current one -- so this logs the caller out. Send them to /login (a
+    # /profile redirect would just 401 on the now-dead session).
+    auth.revoke_all(principal, principal.owner_id)  # self-service, full cut
+    return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/profile/email")
+def set_email(
+    request: Request,
+    email: str = Form(""),
+    principal: Principal = Depends(verify_session),
+    auth: AuthService = Depends(get_auth_service),
+    csrf: str = Depends(csrf_token_for),
+) -> Response:
+    # Integration seam: AuthService.set_email(principal, email|None) is landing
+    # in the core (developer -2, gap #1). Self-scope. Degrade gracefully if
+    # absent so the page never 500s pre-integration.
+    value = email.strip() or None
+    ctx = _base(request, principal, csrf, "profile")
+    fn = getattr(auth, "set_email", None)
+    if fn is None:
+        ctx.update(tokens=_list_tokens(auth, principal), email=value,
+                   new_token=None,
+                   email_error="Gestion de l'email bientôt disponible.")
+        return templates.TemplateResponse(request, "profile/index.html", ctx)
+    try:
+        fn(principal, value)
+    except ValueError as exc:
+        # EmailAlreadyTakenError subclasses ValueError; it lives on the
+        # not-yet-merged profile-core branch, so distinguish by class name (no
+        # import of an unlanded symbol). "Taken" stays generic: it never
+        # confirms WHICH other account holds the address (no enumeration).
+        taken = type(exc).__name__ == "EmailAlreadyTakenError"
+        message = ("Email indisponible." if taken else "Email invalide.")
+        ctx.update(tokens=_list_tokens(auth, principal), email=value,
+                   new_token=None, email_error=message)
+        return templates.TemplateResponse(request, "profile/index.html", ctx)
+    ctx.update(tokens=_list_tokens(auth, principal), email=value,
+               new_token=None, email_saved=True)
+    return templates.TemplateResponse(request, "profile/index.html", ctx)

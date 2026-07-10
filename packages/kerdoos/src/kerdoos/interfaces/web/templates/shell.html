@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{# Authenticated app shell: topbar + sidebar + main. The admin nav section is
+   rendered only for an admin principal -- this is convenience, NOT the security
+   boundary (the admin router enforces require_admin server-side). #}
+{% block body %}
+<div class="app">
+  <header class="topbar">
+    <span class="topbar__wordmark">Kerdoos</span>
+    <div class="topbar__context">
+      {% if principal %}<span>{{ principal.owner_id }}</span>{% endif %}
+      <span>prochain digest <span class="topbar__cut">{{ next_cut }}</span></span>
+      <form method="post" action="/auth/logout">
+        {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+        <button class="btn btn--sm" type="submit">Déconnexion</button>
+      </form>
+    </div>
+  </header>
+
+  <nav class="sidebar" aria-label="Navigation principale">
+    <a class="nav__link" href="/"        {% if active == 'dashboard' %}aria-current="page"{% endif %}>Tableau de veille</a>
+    <a class="nav__link" href="/products" {% if active == 'products' %}aria-current="page"{% endif %}>Produits</a>
+    <a class="nav__link" href="/profile"  {% if active == 'profile' %}aria-current="page"{% endif %}>Profil</a>
+    {% if principal and principal.role == 'admin' %}
+    <div class="nav__section">Admin</div>
+    <a class="nav__link" href="/admin" {% if active == 'admin' %}aria-current="page"{% endif %}>Sites</a>
+    {% endif %}
+  </nav>
+
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+{% endblock %}

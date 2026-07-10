@@ -1,0 +1,112 @@
+/* Kerdoos WebUI -- design tokens (buildless, no bundler).
+ *
+ * Single source of truth for the visual system (validated palette, Kleos
+ * #11170). Every surface consumes these custom properties, never a raw hex,
+ * so the "night watch" dark mode fast-follow only has to override the
+ * primitives under :root[data-theme="dark"] -- no consumer edit.
+ *
+ * Direction: pre-dawn watch station. Cold slate neutrals, restrained Hermes
+ * bronze brand accent, and a three-state determinacy signal that is the
+ * product's signature (invariant #3: ok / indeterminate / unavailable, the
+ * indeterminate a first-class citizen, never collapsed).
+ */
+
+/* ===== IBM Plex, self-hosted (@font-face, font-display: swap) ============ */
+/* Sans = UI. Mono = tabular data (the hero of a monitoring tool). Serif is
+ * reserved for the digest preview only. All fall back to a system stack so the
+ * UI is never blank while the woff2 loads (or if an asset is ever missing). */
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400;
+  font-display: swap; src: url("/static/fonts/IBMPlexSans-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500;
+  font-display: swap; src: url("/static/fonts/IBMPlexSans-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600;
+  font-display: swap; src: url("/static/fonts/IBMPlexSans-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400;
+  font-display: swap; src: url("/static/fonts/IBMPlexMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500;
+  font-display: swap; src: url("/static/fonts/IBMPlexMono-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Serif"; font-style: normal; font-weight: 400;
+  font-display: swap; src: url("/static/fonts/IBMPlexSerif-Regular.woff2") format("woff2");
+}
+
+:root {
+  /* --- Slate neutrals: surfaces (borders-first, micro-shift of lightness) --- */
+  --bg-canvas:        #f4f6f8;  /* app background, slate-tinted off-white (not cream) */
+  --surface-1:        #ffffff;  /* card / panel */
+  --surface-2:        #eef1f4;  /* input inset (darker than its surroundings) */
+  --surface-raised:   #ffffff;  /* dropdown / popover: +1 level, hairline + faint shadow */
+
+  /* --- Text: four levels, never two --- */
+  --text-primary:     #1b2430;  /* very dark slate, not pure black */
+  --text-secondary:   #45535f;  /* supporting */
+  --text-tertiary:    #6b7885;  /* metadata, timestamps */
+  --text-muted:       #9aa6b2;  /* disabled / placeholder */
+
+  /* --- Borders: low-opacity hairlines, progression by importance --- */
+  --border-subtle:    rgba(27, 36, 48, .06);
+  --border-default:   rgba(27, 36, 48, .10);
+  --border-strong:    rgba(27, 36, 48, .16);
+
+  /* --- Brand: Hermes bronze, absolute restraint (wordmark, nav active, primary) --- */
+  --brand:            #9a6a3c;
+  --brand-hover:      #855a31;
+  --brand-contrast:   #ffffff;
+
+  /* --- Three-state determinacy signal (THE system, = the signature) --- */
+  --state-ok:         #2f8f8a;  /* calm aqua: acquired reading, discreet (the majority) */
+  --state-ok-bg:      #e2f0ef;
+  --state-indet:      #5b57b8;  /* indigo-mist: first-class, draws the eye (actionable doubt) */
+  --state-indet-bg:   #e7e6f5;
+  --state-unavail:    #b0596a;  /* settled clay: confirmed empty shelf, calm not alarming */
+  --state-unavail-bg: #f4e4e7;
+
+  /* --- System semantics (distinct from the three product states) --- */
+  --danger:           #c0453f;  /* revoke, delete */
+  --danger-hover:     #a5382f;
+  --warning:          #b7791f;
+  --success:          #2f8f5b;  /* action succeeded (toast) */
+
+  /* --- Controls (dedicated tokens, not a reuse of surfaces) --- */
+  --control-bg:       var(--surface-2);
+  --control-border:   rgba(27, 36, 48, .14);
+  --focus-ring:       #5b57b8;  /* aligned with indigo, 2px + offset */
+
+  /* --- Spacing: 4px base --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-8: 48px; --space-10: 64px;
+
+  /* --- Radius: crisp = instrument --- */
+  --radius-sm: 4px;   /* inputs, buttons */
+  --radius-md: 8px;   /* cards */
+  --radius-lg: 12px;  /* modals */
+
+  /* --- Faint elevation for raised surfaces only (borders carry the rest) --- */
+  --shadow-raised: 0 4px 16px rgba(27, 36, 48, .10);
+
+  /* --- Type: families + scale --- */
+  --font-ui:   "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+  --font-doc:  "IBM Plex Serif", Georgia, serif;
+
+  --text-xs: 12px; --text-sm: 13px; --text-base: 14px;
+  --text-lg: 16px; --text-xl: 20px; --text-2xl: 28px;
+
+  --sidebar-w: 216px;
+  --topbar-h:  56px;
+}
+
+/* Dark mode ("night watch") is a post-MVP fast-follow: it will override ONLY
+ * the primitives above under :root[data-theme="dark"] (same hues, inverted
+ * lightness, desaturated states, lean on hairlines). No consumer surface
+ * changes -- that is why every surface below reads --tokens, never a raw hex. */

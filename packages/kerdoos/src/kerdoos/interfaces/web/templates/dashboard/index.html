@@ -1,0 +1,62 @@
+{% extends "shell.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Tableau de veille -- Kerdoos{% endblock %}
+{% block content %}
+<div class="main__head spread">
+  <div>
+    <h1>Tableau de veille</h1>
+    <p class="main__subtitle">Ce qui a bougé, et ce qui est bloqué -- pas en rupture.</p>
+  </div>
+  <form method="post" action="/run">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <button class="btn btn--primary" type="submit">Vérifier maintenant</button>
+  </form>
+</div>
+
+{% if rows %}
+<div class="briefing {% if briefing.to_watch == 0 %}briefing--clear{% endif %}">
+  <span class="briefing__count">{{ briefing.to_watch }}</span>
+  <span class="briefing__text">
+    {% if briefing.to_watch == 0 %}
+      Rien à trancher. {{ briefing.ok }} lecture(s) acquise(s).
+    {% else %}
+      à traiter -- {{ briefing.indeterminate }} indéterminé(s), {{ briefing.unavailable }} indisponible(s).
+    {% endif %}
+  </span>
+</div>
+
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Produit</th><th>Source</th><th>Signal</th>
+        <th class="num">Prix PIX</th><th class="num">Prix carte</th>
+        <th>Palier</th><th>Vu</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="name">{{ r.product_name }}</td>
+        <td>
+          {% if r.url %}<a href="{{ r.url }}" target="_blank" rel="noopener noreferrer">{{ r.site }}</a>
+          {% else %}{{ r.site }}{% endif %}
+        </td>
+        <td>{{ m.signal(r.record.status) }}</td>
+        <td>{{ m.price(r.record.price_pix_cents) }}</td>
+        <td>{{ m.price(r.record.price_card_cents) }}</td>
+        <td>{{ m.tier(r.record.method) }}</td>
+        <td class="muted">{{ r.record.ts[11:16] or '--' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="state">
+  <p class="state__title">Aucun produit surveillé.</p>
+  <p>Ajoutez un produit et une source pour commencer la veille.</p>
+  <div class="state__cta"><a class="btn btn--primary" href="/products">Ajouter un produit</a></div>
+</div>
+{% endif %}
+{% endblock %}

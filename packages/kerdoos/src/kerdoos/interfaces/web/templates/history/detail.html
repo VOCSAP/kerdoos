@@ -1,0 +1,41 @@
+{% extends "shell.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Historique -- Kerdoos{% endblock %}
+{% block content %}
+<div class="main__head">
+  <p class="main__subtitle"><a href="/">Tableau de veille</a> / Historique</p>
+  <h1>{{ product_name or source_id }}</h1>
+  {% if site %}<p class="main__subtitle">{{ site }}</p>{% endif %}
+</div>
+
+{% if records %}
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Relevé</th><th>Signal</th>
+        <th class="num">Prix PIX</th><th class="num">Prix carte</th>
+        <th>Disponibilité</th><th>Palier</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for rec in records %}
+      <tr>
+        <td class="muted">{{ rec.ts[:16] | replace('T', ' ') }}</td>
+        <td>{{ m.signal(rec.status) }}</td>
+        <td>{{ m.price(rec.price_pix_cents) }}</td>
+        <td>{{ m.price(rec.price_card_cents) }}</td>
+        <td class="avail">{{ rec.availability | availability_label }}</td>
+        <td>{{ m.tier(rec.method) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="state">
+  <p class="state__title">Pas encore d'historique.</p>
+  <p>Cette source n'a pas encore été relevée.</p>
+</div>
+{% endif %}
+{% endblock %}

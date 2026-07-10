@@ -1,0 +1,94 @@
+{% extends "shell.html" %}
+{% block title %}Produits -- Kerdoos{% endblock %}
+{% block content %}
+<div class="main__head">
+  <h1>Produits surveillés</h1>
+  <p class="main__subtitle">Gérez votre watchlist -- produits et sources par marchand.</p>
+</div>
+
+{% if form_error %}<div class="banner banner--error" role="alert">{{ form_error }}</div>{% endif %}
+
+<div class="card">
+  <h2 class="card__title">Ajouter un produit</h2>
+  <form method="post" action="/products" class="form--inline">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <div class="field">
+      <label class="field__label" for="product_key">Clé produit</label>
+      <input class="input" id="product_key" name="product_key" required
+             placeholder="ex: rtx-4070">
+      <span class="field__hint">Sans le caractère « : »</span>
+    </div>
+    <div class="field">
+      <label class="field__label" for="name">Nom (optionnel)</label>
+      <input class="input" id="name" name="name" placeholder="ex: RTX 4070">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">Ajouter</button>
+    </div>
+  </form>
+</div>
+
+{% if registry.products %}
+{% for product in registry.products %}
+<div class="card" id="product-{{ product.id }}">
+  <div class="spread">
+    <h2 class="card__title">{{ product.name or product.id }}</h2>
+    <button class="btn btn--danger btn--sm" type="button"
+            hx-delete="/products/{{ product.id }}"
+            hx-confirm="Supprimer « {{ product.name or product.id }} » et toutes ses sources ?">
+      Supprimer le produit
+    </button>
+  </div>
+
+  {% if product.sources %}
+  <table class="table">
+    <thead><tr><th>Marchand</th><th>URL</th><th></th></tr></thead>
+    <tbody>
+      {% for source in product.sources %}
+      <tr id="source-{{ source.source_id }}">
+        <td class="name">{{ source.site }}</td>
+        <td><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.url }}</a></td>
+        <td class="row-actions">
+          <a class="btn btn--sm" href="/history/{{ source.source_id }}">Historique</a>
+          <button class="btn btn--danger btn--sm" type="button"
+                  hx-delete="/sources/{{ source.source_id }}"
+                  hx-confirm="Retirer cette source ?">Retirer</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="main__subtitle">Aucune source. Ajoutez-en une ci-dessous.</p>
+  {% endif %}
+
+  <form method="post" action="/sources" class="form--inline" style="margin-top: var(--space-4)">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <input type="hidden" name="product_key" value="{{ product.id }}">
+    <div class="field">
+      <label class="field__label" for="site-{{ product.id }}">Marchand</label>
+      <select class="select" id="site-{{ product.id }}" name="site" required>
+        <option value="" disabled selected>Choisir un site</option>
+        {% for site_name in registry.sites.keys() %}
+        <option value="{{ site_name }}">{{ site_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label class="field__label" for="url-{{ product.id }}">URL produit</label>
+      <input class="input" id="url-{{ product.id }}" name="url" type="url" required
+             placeholder="https://...">
+    </div>
+    <div class="form-actions">
+      <button class="btn" type="submit">Ajouter une source</button>
+    </div>
+  </form>
+</div>
+{% endfor %}
+{% else %}
+<div class="state">
+  <p class="state__title">Votre watchlist est vide.</p>
+  <p>Ajoutez un premier produit ci-dessus.</p>
+</div>
+{% endif %}
+{% endblock %}

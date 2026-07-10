@@ -1,0 +1,223 @@
+/* Kerdoos WebUI -- components + full state matrix.
+ * Every interactive element: default / hover / focus / active / disabled.
+ * Every data surface: loading (skeleton) / empty / error.
+ */
+
+/* ===== Buttons ========================================================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.2;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.btn:hover { background: var(--surface-2); border-color: var(--border-strong); }
+.btn:active { background: var(--surface-2); transform: translateY(0.5px); }
+.btn:disabled, .btn[aria-disabled="true"] {
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+  cursor: not-allowed;
+}
+.btn--primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--brand-contrast);
+}
+.btn--primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
+.btn--primary:disabled { background: var(--surface-2); border-color: var(--border-subtle); color: var(--text-muted); }
+.btn--danger {
+  background: transparent;
+  border-color: var(--control-border);
+  color: var(--danger);
+}
+.btn--danger:hover { background: var(--state-unavail-bg); border-color: var(--danger); }
+.btn--sm { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); }
+/* HTMX in-flight: the element carries .htmx-request while the request runs. */
+.btn.htmx-request { color: transparent; position: relative; pointer-events: none; }
+.btn.htmx-request::after {
+  content: ""; position: absolute; width: 14px; height: 14px;
+  border: 2px solid currentColor; border-top-color: transparent;
+  border-radius: 50%; color: var(--text-secondary);
+  animation: spin 640ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== Forms ============================================================ */
+.field { display: flex; flex-direction: column; gap: var(--space-1); margin-bottom: var(--space-4); }
+.field__label { font-size: var(--text-sm); font-weight: 500; color: var(--text-secondary); }
+.field__hint  { font-size: var(--text-xs); color: var(--text-tertiary); }
+.input, .select {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--control-bg);      /* inset: darker than its surroundings */
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+}
+.input::placeholder { color: var(--text-muted); }
+.input:hover, .select:hover { border-color: var(--border-strong); }
+.input:focus, .select:focus { outline: 2px solid var(--focus-ring); outline-offset: 1px; border-color: transparent; }
+.input:disabled, .select:disabled { color: var(--text-muted); background: var(--surface-2); cursor: not-allowed; }
+.input[aria-invalid="true"] { border-color: var(--danger); }
+.field__error { font-size: var(--text-xs); color: var(--danger); }
+.form-actions { display: flex; gap: var(--space-3); align-items: center; margin-top: var(--space-2); }
+.form--inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--space-3); align-items: end; }
+
+/* ===== Cards / panels =================================================== */
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+}
+.card + .card { margin-top: var(--space-5); }
+.card__title { font-size: var(--text-base); font-weight: 600; margin-bottom: var(--space-4); }
+
+/* ===== Briefing line (leads the dashboard, replaces KPI cards) ========== */
+.briefing {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  margin-bottom: var(--space-5);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--state-indet);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.briefing__count { font-family: var(--font-data); font-weight: 500; font-size: var(--text-lg); color: var(--text-primary); }
+.briefing__text  { color: var(--text-secondary); font-size: var(--text-sm); }
+.briefing--clear { border-left-color: var(--state-ok); }
+
+/* ===== Table =========================================================== */
+.table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+.table thead th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-default);
+}
+.table tbody td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+.table tbody tr:hover td { background: var(--surface-2); }
+.table tbody tr:focus-within td { background: var(--surface-2); }
+.table .num { font-family: var(--font-data); font-variant-numeric: tabular-nums; color: var(--text-primary); text-align: right; }
+.table .name { color: var(--text-primary); font-weight: 500; }
+.table .muted { color: var(--text-muted); }
+
+/* ===== Three-state signal (the signature). Never a binary dot. ========= */
+.signal {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.signal__glyph { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.signal--ok      { background: var(--state-ok-bg);      color: var(--state-ok); }
+.signal--ok      .signal__glyph { background: var(--state-ok); border-radius: 50%; }
+.signal--indet   { background: var(--state-indet-bg);   color: var(--state-indet); }
+.signal--indet   .signal__glyph { background: var(--state-indet); border-radius: 1px; } /* square: distinct from ok/unavail */
+.signal--unavail { background: var(--state-unavail-bg); color: var(--state-unavail); }
+.signal--unavail .signal__glyph { background: var(--state-unavail); border-radius: 0; }
+/* A transient indeterminate (scrape in flight) pulses, distinct from a settled one. */
+.signal--pending .signal__glyph { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* ===== Escalation tier micro-indicator (http -> tls -> browser -> uc) === */
+.tier { display: inline-flex; gap: 2px; align-items: center; }
+.tier__pip { width: 4px; height: 10px; border-radius: 1px; background: var(--border-strong); }
+.tier__pip--on { background: var(--text-tertiary); }
+.tier__label { font-family: var(--font-data); font-size: var(--text-xs); color: var(--text-tertiary); margin-left: var(--space-1); }
+
+/* ===== Availability chip (secondary to the signal) ===================== */
+.avail { font-size: var(--text-xs); color: var(--text-tertiary); }
+
+/* ===== Empty / error / loading (data surface states) =================== */
+.state {
+  text-align: center;
+  padding: var(--space-8) var(--space-5);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-tertiary);
+}
+.state__title { color: var(--text-secondary); font-weight: 500; margin-bottom: var(--space-2); }
+.state__cta { margin-top: var(--space-4); }
+.state--error { border-color: var(--state-unavail); color: var(--state-unavail); border-style: solid; }
+
+.skeleton {
+  height: 12px; border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--bg-canvas) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s ease-in-out infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+.skeleton-row td { padding: var(--space-3); }
+
+/* Inline error banner (login, form-level). Interface voice, no apology. */
+.banner {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-4);
+}
+.banner--error   { background: var(--state-unavail-bg); color: var(--state-unavail); border: 1px solid var(--state-unavail); }
+.banner--success { background: var(--state-ok-bg); color: var(--state-ok); border: 1px solid var(--state-ok); }
+.banner--reveal  { background: var(--state-indet-bg); color: var(--text-primary); border: 1px solid var(--state-indet); }
+.banner--reveal code { font-family: var(--font-data); font-size: var(--text-sm); word-break: break-all; }
+
+/* ===== Auth surface (login is a full screen, not a modal) ============== */
+.auth {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+}
+.auth__panel {
+  width: 100%; max-width: 360px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  box-shadow: var(--shadow-raised);
+}
+.auth__brand { font-weight: 600; font-size: var(--text-xl); color: var(--brand); letter-spacing: -0.02em; margin-bottom: var(--space-1); }
+.auth__hint { color: var(--text-tertiary); font-size: var(--text-sm); margin-bottom: var(--space-5); }
+
+/* ===== Digest preview: the one place serif appears (bulletin) ========= */
+.digest { font-family: var(--font-doc); color: var(--text-primary); line-height: 1.6; }
+
+/* ===== Standalone error pages (401 / 403) ============================== */
+.errorpage { min-height: 100vh; display: grid; place-items: center; text-align: center; padding: var(--space-6); }
+.errorpage__code { font-family: var(--font-data); font-size: var(--text-sm); color: var(--text-tertiary); letter-spacing: 0.1em; }
+.errorpage h1 { margin: var(--space-3) 0; }
+.errorpage p { color: var(--text-secondary); margin-bottom: var(--space-5); }
+
+.row-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+.stack { display: flex; flex-direction: column; gap: var(--space-4); }
+.spread { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }

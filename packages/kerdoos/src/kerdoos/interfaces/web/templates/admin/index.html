@@ -1,0 +1,94 @@
+{% extends "shell.html" %}
+{% block title %}Admin -- Sites -- Kerdoos{% endblock %}
+{% block content %}
+<div class="main__head">
+  <span class="eyebrow">Admin</span>
+  <h1>Catalogue des sites</h1>
+  <p class="main__subtitle">
+    Enrôler un marchand dans le catalogue global (allowlist de domaines).
+  </p>
+</div>
+
+{% if site_saved %}<div class="banner banner--success" role="status">Site « {{ site_saved }} » enrôlé.</div>{% endif %}
+{% if form_error %}<div class="banner banner--error" role="alert">{{ form_error }}</div>{% endif %}
+
+<div class="card">
+  <h2 class="card__title">Ajouter un site</h2>
+  <form method="post" action="/admin/sites">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <div class="form--inline">
+      <div class="field">
+        <label class="field__label" for="name">Nom</label>
+        <input class="input" id="name" name="name" required placeholder="ex: terabyte">
+      </div>
+      <div class="field">
+        <label class="field__label" for="fetcher">Fetcher</label>
+        <select class="select" id="fetcher" name="fetcher" required>
+          {% for f in ("http", "tls", "browser", "uc_selenium") %}
+          <option value="{{ f }}">{{ f }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field__label" for="domain">Domaine</label>
+        <input class="input" id="domain" name="domain" required placeholder="ex: terabyteshop.com.br">
+      </div>
+    </div>
+    <div class="form--inline">
+      <div class="field">
+        <label class="field__label" for="parser_kind">Parser</label>
+        <select class="select" id="parser_kind" name="parser_kind" required>
+          {% for k in ("jsonld", "statejson", "css", "regex") %}
+          <option value="{{ k }}">{{ k }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field__label" for="parser_pix">Chemin prix PIX</label>
+        <input class="input" id="parser_pix" name="parser_pix" placeholder="optionnel">
+      </div>
+      <div class="field">
+        <label class="field__label" for="parser_card">Chemin prix carte</label>
+        <input class="input" id="parser_card" name="parser_card" placeholder="optionnel">
+      </div>
+    </div>
+    <div class="form--inline">
+      <div class="field">
+        <label class="field__label" for="parser_availability">Chemin disponibilité</label>
+        <input class="input" id="parser_availability" name="parser_availability" placeholder="optionnel">
+      </div>
+      <div class="field">
+        <label class="field__label" for="tier2_label">Label tier membre</label>
+        <input class="input" id="tier2_label" name="tier2_label" placeholder="ex: Prime (optionnel)">
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">Enrôler le site</button>
+    </div>
+  </form>
+</div>
+
+{% if sites %}
+<div class="card">
+  <h2 class="card__title">Sites enrôlés</h2>
+  <table class="table">
+    <thead><tr><th>Nom</th><th>Fetcher</th><th>Domaine</th><th>Parser</th></tr></thead>
+    <tbody>
+      {% for name, site in sites.items() %}
+      <tr>
+        <td class="name">{{ name }}</td>
+        <td>{{ site.fetcher }}</td>
+        <td class="muted">{{ site.domain }}</td>
+        <td>{{ site.parser.kind }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="state">
+  <p class="state__title">Aucun site enrôlé.</p>
+  <p>Ajoutez le premier marchand ci-dessus.</p>
+</div>
+{% endif %}
+{% endblock %}

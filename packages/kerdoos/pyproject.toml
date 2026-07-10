@@ -7,6 +7,12 @@ dependencies = [
     "autolycos",
     "pyyaml>=6.0",
     "fastapi>=0.115",
+    # Server-rendered WebUI (Phase 4b): Jinja2 templates + HTML form parsing.
+    # jinja2 backs fastapi.templating.Jinja2Templates; python-multipart is
+    # required by Starlette to parse application/x-www-form-urlencoded POSTs
+    # (the HTML login + write forms). Buildless: no bundler, no JS toolchain.
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
     # Argon2id password hashing (Phase 3 auth). argon2-cffi is the reference
     # binding; used for owner passwords + the anti-enumeration dummy verify.
     "argon2-cffi>=23.1",

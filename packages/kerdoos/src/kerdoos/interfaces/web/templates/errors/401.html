@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Session expirée -- Kerdoos{% endblock %}
+{% block body %}
+<div class="errorpage">
+  <div>
+    <div class="errorpage__code">401</div>
+    <h1>Session expirée</h1>
+    <p>Votre session n'est plus valide. Reconnectez-vous pour reprendre la veille.</p>
+    <a class="btn btn--primary" href="/login">Se reconnecter</a>
+  </div>
+</div>
+{% endblock %}
