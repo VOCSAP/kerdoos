@@ -51,12 +51,7 @@
   {% include "profile/_token.html" %}
   {% endif %}
 
-  {% if tokens is none %}
-  <div class="state">
-    <p class="state__title">Liste des jetons bientôt disponible.</p>
-    <p>La génération et la révocation globale fonctionnent déjà.</p>
-  </div>
-  {% elif tokens %}
+  {% if tokens %}
   <table class="table">
     <thead><tr><th>Identifiant du jeton</th><th>Créé</th><th>Expire</th><th></th></tr></thead>
     <tbody>

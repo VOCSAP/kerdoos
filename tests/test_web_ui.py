@@ -5,11 +5,10 @@ temp config.db seeded via SqliteConfigStore.ensure_owner + a real Argon2id
 hash). These tests drive the SERVER-RENDERED surface (login form, dashboard,
 products, admin) and the stateless CSRF guard.
 
-Note: the profile screen's set_email / list_tokens integration is deliberately
-NOT exercised here -- those use-cases land on the separate phase4b-profile-core
-branch (team-lead coordination); the route degrades gracefully until then, and
-the integration test is activated by the team-lead after that merge. create_token
-+ revoke_all + the profile render ARE covered (they use existing use-cases).
+The profile screen's set_email / list_tokens integration is fully exercised
+(ProfileIntegrationTest) now that phase4b-profile-core is merged: email
+set/taken/invalid, token create/list/revoke, revoke-all self-logout, and CSRF on
+the profile POSTs. No profile test is skipped.
 """
 
 from __future__ import annotations
@@ -50,13 +49,23 @@ class _WebUITestBase(unittest.TestCase):
         SqliteConfigStore(self.config_db).close()  # run migrations
         self.client = TestClient(create_app())
 
-    def _add_owner(self, owner_id, name, password, *, role="user"):
+    def _add_owner(self, owner_id, name, password, *, role="user", email=None):
         store = SqliteConfigStore(self.config_db)
         try:
-            store.ensure_owner(owner_id, name, role=role,
+            store.ensure_owner(owner_id, name, role=role, email=email,
                                password_hash=self._hasher.hash(password))
         finally:
             store.close()
+
+    def _owner_email(self, owner_id):
+        import sqlite3
+        conn = sqlite3.connect(self.config_db)
+        try:
+            row = conn.execute(
+                "SELECT email FROM owners WHERE id = ?", (owner_id,)).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
 
     def _login(self, identifier, password):
         """HTML login flow -> stores the session cookie on the client."""
@@ -265,6 +274,91 @@ class JsonApiUntouchedTest(_WebUITestBase):
             "/login", json={"identifier": "ghost", "password": "x"})
         self.assertEqual(resp.status_code, 401)
         self.assertEqual(resp.json(), {"detail": "invalid credentials"})
+
+
+_TOKEN_ROW = re.compile(r'id="token-([0-9a-f]+)"')
+
+
+class ProfileIntegrationTest(_WebUITestBase):
+    """Profile use-cases wired to the real AuthService (post profile-core merge)."""
+
+    def setUp(self):
+        super().setUp()
+        self._add_owner("o1", "alice", "s3cret")
+        self._login("alice", "s3cret")
+
+    # -- email --------------------------------------------------------------
+    def test_set_email_updates_owner(self):
+        token = self._csrf()
+        resp = self.client.post(
+            "/profile/email",
+            data={"email": "alice@example.com", "csrf_token": token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Email enregistré", resp.text)
+        self.assertEqual(self._owner_email("o1"), "alice@example.com")
+
+    def test_clear_email_removes_it(self):
+        token = self._csrf()
+        self.client.post("/profile/email",
+                         data={"email": "alice@example.com", "csrf_token": token})
+        self.client.post("/profile/email",
+                         data={"email": "", "csrf_token": token})
+        self.assertIsNone(self._owner_email("o1"))
+
+    def test_email_already_taken_is_generic_no_leak(self):
+        # A different owner already holds this email.
+        self._add_owner("o2", "bob", "s3cret", email="taken@example.com")
+        token = self._csrf()
+        resp = self.client.post(
+            "/profile/email",
+            data={"email": "taken@example.com", "csrf_token": token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Email indisponible", resp.text)
+        # No cross-owner leak: the other owner's identity is never revealed.
+        self.assertNotIn("bob", resp.text)
+        self.assertNotIn("o2", resp.text)
+        self.assertIsNone(self._owner_email("o1"))  # unchanged
+
+    def test_invalid_email_format_is_rejected(self):
+        token = self._csrf()
+        resp = self.client.post(
+            "/profile/email",
+            data={"email": "not-an-email", "csrf_token": token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Email invalide", resp.text)
+        self.assertIsNone(self._owner_email("o1"))
+
+    def test_email_post_without_csrf_is_403(self):
+        resp = self.client.post(
+            "/profile/email", data={"email": "alice@example.com"})
+        self.assertEqual(resp.status_code, 403)
+
+    # -- tokens -------------------------------------------------------------
+    def test_token_create_then_listed_then_revoked(self):
+        token = self._csrf()
+        created = self.client.post(
+            "/profile/tokens", data={"csrf_token": token})
+        self.assertEqual(created.status_code, 200)
+        self.assertIn("Jeton créé", created.text)
+
+        # It now shows up in the real list_tokens table.
+        page = self.client.get("/profile")
+        match = _TOKEN_ROW.search(page.text)
+        self.assertIsNotNone(match, "created token not listed")
+        token_id = match.group(1)
+
+        # Revoke it -> it disappears from the list.
+        resp = self.client.delete(
+            f"/profile/tokens/{token_id}", headers={"X-CSRF-Token": token})
+        self.assertEqual(resp.status_code, 204)
+        self.assertNotIn(f'id="token-{token_id}"', self.client.get("/profile").text)
+
+    def test_token_revoke_without_csrf_is_403(self):
+        token = self._csrf()
+        self.client.post("/profile/tokens", data={"csrf_token": token})
+        token_id = _TOKEN_ROW.search(self.client.get("/profile").text).group(1)
+        resp = self.client.delete(f"/profile/tokens/{token_id}")  # no CSRF header
+        self.assertEqual(resp.status_code, 403)
 
 
 if __name__ == "__main__":

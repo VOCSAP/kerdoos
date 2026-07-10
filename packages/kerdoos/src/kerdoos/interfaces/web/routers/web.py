@@ -14,6 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 
+from kerdoos.auth.ports import EmailAlreadyTakenError
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import AppService, Principal, ProductSpec
 from kerdoos.interfaces.web.csrf import csrf_token_for, verify_csrf
@@ -220,15 +221,6 @@ def remove_source(
 
 
 # ===== Profile ===========================================================
-def _list_tokens(auth: AuthService, principal: Principal):
-    """Integration seam: AuthService.list_tokens(principal) is landing in the
-    core (developer -2, gap #2). Until it merges, degrade gracefully (render a
-    'coming soon' note) instead of 500ing -- lights up automatically once the
-    method exists."""
-    fn = getattr(auth, "list_tokens", None)
-    return fn(principal) if fn is not None else None
-
-
 @router.get("/profile")
 def profile(
     request: Request,
@@ -237,7 +229,7 @@ def profile(
     csrf: str = Depends(csrf_token_for),
 ) -> Response:
     ctx = _base(request, principal, csrf, "profile")
-    ctx.update(tokens=_list_tokens(auth, principal), email=None, new_token=None)
+    ctx.update(tokens=auth.list_tokens(principal), email=None, new_token=None)
     return templates.TemplateResponse(request, "profile/index.html", ctx)
 
 
@@ -251,7 +243,7 @@ def create_token(
     issued = auth.create_token(principal)  # self-only; no target-owner param
     ctx = _base(request, principal, csrf, "profile")
     # Render (not redirect): the plaintext token is shown ONCE, here only.
-    ctx.update(tokens=_list_tokens(auth, principal), email=None,
+    ctx.update(tokens=auth.list_tokens(principal), email=None,
                new_token=issued)
     return templates.TemplateResponse(request, "profile/index.html", ctx)
 
@@ -287,29 +279,21 @@ def set_email(
     auth: AuthService = Depends(get_auth_service),
     csrf: str = Depends(csrf_token_for),
 ) -> Response:
-    # Integration seam: AuthService.set_email(principal, email|None) is landing
-    # in the core (developer -2, gap #1). Self-scope. Degrade gracefully if
-    # absent so the page never 500s pre-integration.
+    # Self-scope (owner from Principal): set or clear the caller's own email.
     value = email.strip() or None
     ctx = _base(request, principal, csrf, "profile")
-    fn = getattr(auth, "set_email", None)
-    if fn is None:
-        ctx.update(tokens=_list_tokens(auth, principal), email=value,
-                   new_token=None,
-                   email_error="Gestion de l'email bientôt disponible.")
-        return templates.TemplateResponse(request, "profile/index.html", ctx)
     try:
-        fn(principal, value)
-    except ValueError as exc:
-        # EmailAlreadyTakenError subclasses ValueError; it lives on the
-        # not-yet-merged profile-core branch, so distinguish by class name (no
-        # import of an unlanded symbol). "Taken" stays generic: it never
-        # confirms WHICH other account holds the address (no enumeration).
-        taken = type(exc).__name__ == "EmailAlreadyTakenError"
-        message = ("Email indisponible." if taken else "Email invalide.")
-        ctx.update(tokens=_list_tokens(auth, principal), email=value,
-                   new_token=None, email_error=message)
+        auth.set_email(principal, value)
+    except EmailAlreadyTakenError:
+        # Generic: never confirm WHICH other account holds the address (no
+        # cross-owner enumeration).
+        ctx.update(tokens=auth.list_tokens(principal), email=value,
+                   new_token=None, email_error="Email indisponible.")
         return templates.TemplateResponse(request, "profile/index.html", ctx)
-    ctx.update(tokens=_list_tokens(auth, principal), email=value,
+    except ValueError:
+        ctx.update(tokens=auth.list_tokens(principal), email=value,
+                   new_token=None, email_error="Email invalide.")
+        return templates.TemplateResponse(request, "profile/index.html", ctx)
+    ctx.update(tokens=auth.list_tokens(principal), email=value,
                new_token=None, email_saved=True)
     return templates.TemplateResponse(request, "profile/index.html", ctx)
