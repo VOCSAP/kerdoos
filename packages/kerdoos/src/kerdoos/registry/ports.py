@@ -21,7 +21,7 @@ one (structural SSRF containment, ADR Q3).
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from kerdoos.parsers.ports import ParserSpec
@@ -83,6 +83,110 @@ class Registry:
                 yield product, source, site
 
 
+# -- Digest jobs (ADR 0003, Phase 6a) ---------------------------------------
+
+# Options are validated by hand against this fixed whitelist (ADR 0003
+# Decision 5 Q-d: dataclass + manual validation, no pydantic). The full
+# per-template option surface is a 6b render concern; 6a only guarantees no
+# unknown/out-of-bounds key ever reaches storage.
+_ALLOWED_OPTION_KEYS = frozenset(
+    {"show_pix", "show_card", "variation_threshold_pct"})
+
+_VALID_FREQUENCY_KINDS = frozenset({"hourly", "daily", "cron"})
+
+
+@dataclass(frozen=True, slots=True)
+class JobOptions:
+    show_pix: bool = True
+    show_card: bool = True
+    # None = no variation filter. 0-100 inclusive when set.
+    variation_threshold_pct: float | None = None
+
+
+def parse_job_options(raw: dict) -> JobOptions:
+    """Validate a raw options dict against the whitelist (fail-closed).
+
+    Unknown keys and out-of-bounds/mistyped values are rejected outright --
+    'options' is never passed through unvalidated to storage or the renderer
+    (ADR 0003 Decision 5).
+    """
+    unknown = set(raw) - _ALLOWED_OPTION_KEYS
+    if unknown:
+        raise ValueError(f"unknown job option keys: {sorted(unknown)}")
+    show_pix = raw.get("show_pix", True)
+    show_card = raw.get("show_card", True)
+    if not isinstance(show_pix, bool):
+        raise ValueError("show_pix must be a bool")
+    if not isinstance(show_card, bool):
+        raise ValueError("show_card must be a bool")
+    threshold = raw.get("variation_threshold_pct")
+    if threshold is not None:
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+            raise ValueError("variation_threshold_pct must be numeric")
+        if not (0 <= threshold <= 100):
+            raise ValueError("variation_threshold_pct must be within [0, 100]")
+        threshold = float(threshold)
+    return JobOptions(
+        show_pix=show_pix, show_card=show_card,
+        variation_threshold_pct=threshold)
+
+
+def dump_job_options(options: JobOptions) -> dict:
+    return {
+        "show_pix": options.show_pix,
+        "show_card": options.show_card,
+        "variation_threshold_pct": options.variation_threshold_pct,
+    }
+
+
+def normalize_schedule(
+    frequency_kind: str, *, minute: int = 0, hour: int = 0,
+    cron_expr: str | None = None,
+) -> str:
+    """Normalize a frequency spec into a cron expression (ADR 0003 Decision 2
+    option B): the evaluator (6b) gets a single code path regardless of how
+    the job was authored. Full cron semantic validation (croniter) is a 6b
+    evaluator concern -- 6a only checks shape (5 space-separated fields).
+    """
+    if frequency_kind == "hourly":
+        if not (0 <= minute <= 59):
+            raise ValueError("minute must be within [0, 59]")
+        return f"{minute} * * * *"
+    if frequency_kind == "daily":
+        if not (0 <= minute <= 59):
+            raise ValueError("minute must be within [0, 59]")
+        if not (0 <= hour <= 23):
+            raise ValueError("hour must be within [0, 23]")
+        return f"{minute} {hour} * * *"
+    if frequency_kind == "cron":
+        if not cron_expr:
+            raise ValueError("cron_expr is required for frequency_kind='cron'")
+        if len(cron_expr.split()) != 5:
+            raise ValueError(
+                f"cron_expr must have exactly 5 space-separated fields: "
+                f"{cron_expr!r}")
+        return cron_expr
+    raise ValueError(f"unknown frequency_kind {frequency_kind!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class DigestJob:
+    id: str                    # opaque uuid (ADR 0003 S4)
+    owner_id: str
+    name: str
+    frequency_kind: str        # 'hourly' | 'daily' | 'cron' -- WebUI round-trip label
+    schedule_cron: str         # always a normalized cron expression (Decision 2)
+    timezone: str = "UTC"      # IANA
+    template_id: str = "default"
+    options: JobOptions = field(default_factory=JobOptions)
+    enabled: bool = True
+    created_at: str | None = None
+    # Sources currently linked (read-side convenience; empty on a bare spec
+    # before create_job links them). Never trusted for IDOR checks -- the
+    # store re-verifies ownership at persist time regardless of this field.
+    source_ids: tuple[str, ...] = ()
+
+
 def validate_product_key(product_key: str) -> None:
     """Reject a product_key that could forge/collide a source_id.
 
@@ -125,6 +229,16 @@ class ConfigStore(Protocol):
         """
         ...
 
+    def list_jobs(self, owner: OwnerId) -> tuple[DigestJob, ...]:
+        """Every digest job owned by owner, most-recently-named order."""
+        ...
+
+    def get_job(self, owner: OwnerId, job_id: str) -> DigestJob:
+        """A single owner-scoped job. Raises KeyError if unknown/not-owned
+        (same discipline as remove_product -- no distinguishing oracle
+        between 'does not exist' and 'belongs to another owner')."""
+        ...
+
 
 @runtime_checkable
 class MutableConfigStore(ConfigStore, Protocol):
@@ -149,4 +263,40 @@ class MutableConfigStore(ConfigStore, Protocol):
         ...
 
     def remove_product(self, owner: OwnerId, product_key: str) -> None:
+        ...
+
+    def create_job(
+        self, owner: OwnerId, job: DigestJob, source_ids: tuple[str, ...]
+    ) -> DigestJob:
+        """Persist job, then link source_ids -- each RE-VERIFIED to belong to
+        owner at persist time (IDOR defense in depth, ADR 0003 finding S2).
+        A source_id that is not owned by `owner` is silently dropped from
+        the returned job's source_ids, never raised (no oracle leak: the
+        caller cannot distinguish 'unknown source' from 'someone else's
+        source')."""
+        ...
+
+    def update_job(self, owner: OwnerId, job_id: str, job: DigestJob) -> DigestJob:
+        """Owner-scoped update of job fields (not its source links -- use
+        add_job_source/remove_job_source for those). Raises KeyError if
+        job_id is unknown or not owned by owner."""
+        ...
+
+    def delete_job(self, owner: OwnerId, job_id: str) -> None:
+        """Owner-scoped delete, cascading digest_job_sources. Raises
+        KeyError if job_id is unknown or not owned by owner (mirrors
+        remove_product)."""
+        ...
+
+    def add_job_source(self, owner: OwnerId, job_id: str, source_id: str) -> bool:
+        """Link source_id to job_id, both re-verified to belong to owner.
+        Raises KeyError if job_id is unknown/not-owned. Returns False
+        (silent no-op, no oracle leak) if source_id is unknown/not-owned."""
+        ...
+
+    def remove_job_source(
+        self, owner: OwnerId, job_id: str, source_id: str
+    ) -> None:
+        """Owner-scoped unlink. Silent no-op if the link does not exist
+        (mirrors remove_source)."""
         ...

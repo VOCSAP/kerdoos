@@ -79,7 +79,7 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("price_pix_member_cents", cols)
                 self.assertIn("price_card_member_cents", cols)
                 self.assertIn("owner_id", cols)
-                self.assertEqual(_user_version(path), 3)
+                self.assertEqual(_user_version(path), 4)
                 # Legacy history survives, backfilled to the bootstrap owner,
                 # member prices read back as NULL.
                 history = store.history("bootstrap", "legacy:kabum:1")

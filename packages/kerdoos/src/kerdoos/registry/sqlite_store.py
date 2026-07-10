@@ -26,6 +26,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from kerdoos.parsers.ports import ParserSpec
@@ -33,9 +34,19 @@ from kerdoos.registry.errors import ConfigError
 
 _BUSY_TIMEOUT_MS = 5000
 
-from .ports import ConfigStore, MutableConfigStore, Product, ProductSource, Registry, SiteConfig
+from .ports import (
+    ConfigStore,
+    DigestJob,
+    MutableConfigStore,
+    Product,
+    ProductSource,
+    Registry,
+    SiteConfig,
+    dump_job_options,
+    parse_job_options,
+)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # owners auth columns added in Phase 3 (ADR 0001 S6). email/role/state already
 # existed in Phase 1; password_hash + created_at are added here. On a fresh DB
@@ -86,6 +97,38 @@ CREATE TABLE IF NOT EXISTS sources (
     FOREIGN KEY (owner_id, product_key) REFERENCES products (owner_id, product_key),
     FOREIGN KEY (site) REFERENCES sites (name)
 );
+
+-- Phase 6a (ADR 0003 S4). UNIQUE(owner_id, name) is safe INLINE here (unlike
+-- the owners identity indexes in _migrate()) because this table is BRAND NEW
+-- -- there are no pre-existing rows on any DB that could violate it, so the
+-- #11162 pre-check-before-CREATE-UNIQUE-INDEX pitfall does not apply.
+CREATE TABLE IF NOT EXISTS digest_jobs (
+    id             TEXT PRIMARY KEY,
+    owner_id       TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    frequency_kind TEXT NOT NULL,
+    schedule_cron  TEXT NOT NULL,
+    timezone       TEXT NOT NULL DEFAULT 'UTC',
+    template_id    TEXT NOT NULL,
+    options        TEXT NOT NULL DEFAULT '{}',
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    created_at     TEXT,
+    UNIQUE (owner_id, name)
+);
+
+-- owner_id is carried here too (not just derivable via a join to
+-- digest_jobs) so every read/write can filter it INLINE, same discipline as
+-- `sources` -- no cross-DB FK exists to state.db's job_runs (ADR 0003 T2),
+-- but this table stays entirely inside config.db so the FK to digest_jobs
+-- and sources IS safe to declare.
+CREATE TABLE IF NOT EXISTS digest_job_sources (
+    owner_id   TEXT NOT NULL,
+    job_id     TEXT NOT NULL,
+    source_id  TEXT NOT NULL,
+    PRIMARY KEY (job_id, source_id),
+    FOREIGN KEY (job_id)    REFERENCES digest_jobs (id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES sources (source_id) ON DELETE CASCADE
+);
 """
 
 
@@ -108,6 +151,21 @@ def _row_to_site(row: sqlite3.Row) -> SiteConfig:
             card=row["parser_card"], availability=row["parser_availability"],
         ),
     )
+
+
+def _row_to_job(row: sqlite3.Row, source_ids: tuple[str, ...]) -> DigestJob:
+    return DigestJob(
+        id=row["id"], owner_id=row["owner_id"], name=row["name"],
+        frequency_kind=row["frequency_kind"], schedule_cron=row["schedule_cron"],
+        timezone=row["timezone"], template_id=row["template_id"],
+        options=parse_job_options(json.loads(row["options"])),
+        enabled=bool(row["enabled"]), created_at=row["created_at"],
+        source_ids=source_ids,
+    )
+
+
+def _replace_job(job: DigestJob, **changes: object) -> DigestJob:
+    return replace(job, **changes)
 
 
 class SqliteConfigStore:
@@ -334,6 +392,164 @@ class SqliteConfigStore:
             conn.execute(
                 "DELETE FROM products WHERE owner_id = ? AND product_key = ?",
                 (owner, product_key),
+            )
+
+    # -- digest jobs (Phase 6a, ADR 0003) --------------------------------
+
+    def _link_sources(
+        self, conn: sqlite3.Connection, owner: str, job_id: str,
+        source_ids: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Link each source_id to job_id via an owner-scoped INSERT...SELECT:
+        a source_id is only linked if it actually belongs to owner (double-
+        scoping IDOR defense, ADR 0003 finding S2). Not-owned/unknown
+        source_ids are silently skipped -- rowcount tells us, without ever
+        raising (no oracle: the caller cannot tell 'unknown' from 'someone
+        else's source' from the response shape)."""
+        linked: list[str] = []
+        for source_id in source_ids:
+            cur = conn.execute(
+                """
+                INSERT INTO digest_job_sources (owner_id, job_id, source_id)
+                SELECT ?, ?, source_id FROM sources
+                WHERE owner_id = ? AND source_id = ?
+                ON CONFLICT(job_id, source_id) DO NOTHING
+                """,
+                (owner, job_id, owner, source_id),
+            )
+            if cur.rowcount == 1:
+                linked.append(source_id)
+        return tuple(linked)
+
+    def _load_job_sources(
+        self, conn: sqlite3.Connection, owner: str, job_id: str
+    ) -> tuple[str, ...]:
+        rows = conn.execute(
+            "SELECT source_id FROM digest_job_sources "
+            "WHERE owner_id = ? AND job_id = ? ORDER BY source_id",
+            (owner, job_id),
+        ).fetchall()
+        return tuple(row["source_id"] for row in rows)
+
+    def create_job(
+        self, owner: str, job: DigestJob, source_ids: tuple[str, ...]
+    ) -> DigestJob:
+        with self._op() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO digest_jobs
+                        (id, owner_id, name, frequency_kind, schedule_cron,
+                         timezone, template_id, options, enabled, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (job.id, owner, job.name, job.frequency_kind,
+                     job.schedule_cron, job.timezone, job.template_id,
+                     json.dumps(dump_job_options(job.options)),
+                     1 if job.enabled else 0, job.created_at),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConfigError(
+                    f"digest job name conflict for owner={owner!r} "
+                    f"name={job.name!r}: {exc}"
+                ) from exc
+            linked = self._link_sources(conn, owner, job.id, source_ids)
+        return _replace_job(job, owner_id=owner, source_ids=linked)
+
+    def list_jobs(self, owner: str) -> tuple[DigestJob, ...]:
+        with self._op() as conn:
+            rows = conn.execute(
+                "SELECT * FROM digest_jobs WHERE owner_id = ? ORDER BY name",
+                (owner,),
+            ).fetchall()
+            jobs = [
+                _row_to_job(row, self._load_job_sources(conn, owner, row["id"]))
+                for row in rows
+            ]
+        return tuple(jobs)
+
+    def get_job(self, owner: str, job_id: str) -> DigestJob:
+        with self._op() as conn:
+            row = conn.execute(
+                "SELECT * FROM digest_jobs WHERE owner_id = ? AND id = ?",
+                (owner, job_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    f"unknown digest job {job_id!r} for owner {owner!r}")
+            source_ids = self._load_job_sources(conn, owner, job_id)
+        return _row_to_job(row, source_ids)
+
+    def update_job(self, owner: str, job_id: str, job: DigestJob) -> DigestJob:
+        with self._op() as conn:
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE digest_jobs SET
+                        name = ?, frequency_kind = ?, schedule_cron = ?,
+                        timezone = ?, template_id = ?, options = ?, enabled = ?
+                    WHERE owner_id = ? AND id = ?
+                    """,
+                    (job.name, job.frequency_kind, job.schedule_cron,
+                     job.timezone, job.template_id,
+                     json.dumps(dump_job_options(job.options)),
+                     1 if job.enabled else 0, owner, job_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConfigError(
+                    f"digest job name conflict for owner={owner!r} "
+                    f"name={job.name!r}: {exc}"
+                ) from exc
+            if cur.rowcount == 0:
+                raise KeyError(
+                    f"unknown digest job {job_id!r} for owner {owner!r}")
+            source_ids = self._load_job_sources(conn, owner, job_id)
+        return _replace_job(job, id=job_id, owner_id=owner, source_ids=source_ids)
+
+    def delete_job(self, owner: str, job_id: str) -> None:
+        # owner-scoped existence check FIRST, same discipline as
+        # remove_product: a tenant can never delete another tenant's job,
+        # even knowing its exact job_id.
+        with self._op() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM digest_jobs WHERE owner_id = ? AND id = ?",
+                (owner, job_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    f"unknown digest job {job_id!r} for owner {owner!r}")
+            # Explicit owner-scoped cascade delete (defense in depth on top
+            # of the FK ON DELETE CASCADE -- same belt-and-braces pattern as
+            # remove_product's manual sources delete).
+            conn.execute(
+                "DELETE FROM digest_job_sources WHERE owner_id = ? AND job_id = ?",
+                (owner, job_id),
+            )
+            conn.execute(
+                "DELETE FROM digest_jobs WHERE owner_id = ? AND id = ?",
+                (owner, job_id),
+            )
+
+    def add_job_source(self, owner: str, job_id: str, source_id: str) -> bool:
+        with self._op() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM digest_jobs WHERE owner_id = ? AND id = ?",
+                (owner, job_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    f"unknown digest job {job_id!r} for owner {owner!r}")
+            linked = self._link_sources(conn, owner, job_id, (source_id,))
+        return bool(linked)
+
+    def remove_job_source(self, owner: str, job_id: str, source_id: str) -> None:
+        # owner-scoped delete, silent no-op if the link is absent (mirrors
+        # remove_source's discipline).
+        with self._op() as conn:
+            conn.execute(
+                "DELETE FROM digest_job_sources "
+                "WHERE owner_id = ? AND job_id = ? AND source_id = ?",
+                (owner, job_id, source_id),
             )
 
     # -- owner bootstrap (no auth in Phase 1; CLI-only helper) -----------

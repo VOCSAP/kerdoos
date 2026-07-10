@@ -13,6 +13,7 @@ injected here via the constructor.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -24,12 +25,15 @@ from kerdoos.core.orchestrator import scrape_and_record
 from kerdoos.parsers.ports import Parser, ParserSpec
 from kerdoos.persistence.ports import ScrapeRecord, StateStore
 from kerdoos.registry.ports import (
+    DigestJob,
     MutableConfigStore,
     Product,
     ProductSource,
     Registry,
     SiteConfig,
     make_source_id,
+    normalize_schedule,
+    parse_job_options,
     validate_product_key,
 )
 from kerdoos.registry.url_validation import validate_source_url
@@ -59,6 +63,28 @@ class Principal:
 class ProductSpec:
     product_key: str
     name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DigestJobSpec:
+    """Interface-facing spec for create_job/update_job (ADR 0003 Phase 6a).
+
+    frequency_kind/minute/hour/cron_expr are normalized into DigestJob.
+    schedule_cron by normalize_schedule() -- callers never author a cron
+    expression directly except in the 'cron' escape hatch. options is a raw
+    dict, validated against the whitelist by parse_job_options() before it
+    ever reaches DigestJob/storage (ADR 0003 Decision 5, fail-closed)."""
+
+    name: str
+    frequency_kind: str        # 'hourly' | 'daily' | 'cron'
+    minute: int = 0
+    hour: int = 0
+    cron_expr: str | None = None
+    timezone: str = "UTC"
+    template_id: str = "default"
+    options: dict = field(default_factory=dict)
+    enabled: bool = True
+    source_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +180,71 @@ class AppService:
 
     def remove_product(self, owner: str, product_key: str) -> None:
         self._config.remove_product(owner, product_key)
+
+    # -- digest jobs (Phase 6a, ADR 0003) --------------------------------
+
+    def create_job(self, principal: Principal, spec: DigestJobSpec) -> DigestJob:
+        # create_job takes Principal (not owner: str) -- mirrors add_site's
+        # convention of taking the resolved caller identity, since job_id
+        # generation + the create-time cron/options normalization are both
+        # authorization-adjacent (ADR 0003 finding S2: owner_id must always
+        # come from the resolved Principal, never a request body field).
+        if not principal.owner_id:
+            raise ValueError("owner must not be empty")
+        schedule_cron = normalize_schedule(
+            spec.frequency_kind, minute=spec.minute, hour=spec.hour,
+            cron_expr=spec.cron_expr,
+        )
+        options = parse_job_options(spec.options)
+        job = DigestJob(
+            id=str(uuid.uuid4()), owner_id=principal.owner_id, name=spec.name,
+            frequency_kind=spec.frequency_kind, schedule_cron=schedule_cron,
+            timezone=spec.timezone, template_id=spec.template_id,
+            options=options, enabled=spec.enabled, created_at=self._clock(),
+        )
+        # Double-scoping IDOR defense (ADR 0003 finding S2): the store
+        # RE-VERIFIES each source_id belongs to principal.owner_id at
+        # persist time via an owner-scoped INSERT...SELECT -- this call
+        # never trusts spec.source_ids at face value.
+        return self._config.create_job(
+            principal.owner_id, job, spec.source_ids)
+
+    def list_jobs(self, owner: str) -> tuple[DigestJob, ...]:
+        return self._config.list_jobs(owner)
+
+    def get_job(self, owner: str, job_id: str) -> DigestJob:
+        return self._config.get_job(owner, job_id)
+
+    def update_job(
+        self, owner: str, job_id: str, spec: DigestJobSpec
+    ) -> DigestJob:
+        if not owner:
+            raise ValueError("owner must not be empty")
+        schedule_cron = normalize_schedule(
+            spec.frequency_kind, minute=spec.minute, hour=spec.hour,
+            cron_expr=spec.cron_expr,
+        )
+        options = parse_job_options(spec.options)
+        job = DigestJob(
+            id=job_id, owner_id=owner, name=spec.name,
+            frequency_kind=spec.frequency_kind, schedule_cron=schedule_cron,
+            timezone=spec.timezone, template_id=spec.template_id,
+            options=options, enabled=spec.enabled,
+        )
+        return self._config.update_job(owner, job_id, job)
+
+    def delete_job(self, owner: str, job_id: str) -> None:
+        self._config.delete_job(owner, job_id)
+
+    def add_job_source(self, owner: str, job_id: str, source_id: str) -> bool:
+        # Re-verified at the store layer regardless of caller intent (same
+        # double-scoping defense as create_job).
+        return self._config.add_job_source(owner, job_id, source_id)
+
+    def remove_job_source(
+        self, owner: str, job_id: str, source_id: str
+    ) -> None:
+        self._config.remove_job_source(owner, job_id, source_id)
 
     # -- run ------------------------------------------------------------
 

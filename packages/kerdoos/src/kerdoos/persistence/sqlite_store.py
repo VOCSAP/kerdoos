@@ -19,7 +19,7 @@ from pathlib import Path
 
 from kerdoos.core.domain import Availability, ScrapeStatus
 
-from .ports import ScrapeRecord
+from .ports import JobRun, ScrapeRecord
 
 _BUSY_TIMEOUT_MS = 5000
 
@@ -46,6 +46,22 @@ CREATE TABLE IF NOT EXISTS scrapes (
 );
 CREATE INDEX IF NOT EXISTS idx_scrapes_source_ts
     ON scrapes (source_id, ts DESC);
+
+-- Phase 6a (ADR 0003 T2/Decision 3). No FK to config.db's digest_jobs --
+-- state.db and config.db are physically separate SQLite files, so no
+-- cross-DB FK is possible; any join is done in-memory at the service layer
+-- (6b evaluator concern). (job_id, window_start) PK is the idempotence key:
+-- INSERT ... ON CONFLICT DO NOTHING makes a duplicate tick a safe no-op.
+CREATE TABLE IF NOT EXISTS job_runs (
+    job_id       TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    fired_at     TEXT NOT NULL,
+    sent_at      TEXT,
+    status       TEXT NOT NULL,
+    error        TEXT,
+    PRIMARY KEY (job_id, window_start)
+);
 """
 # idx_scrapes_owner_source_ts is created in _migrate(), NOT here: on a legacy
 # (pre owner_id) database, this executescript() runs BEFORE the additive ALTER
@@ -55,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_scrapes_source_ts
 
 # Additive, idempotent migrations, applied in order to whatever schema version
 # an existing database is at. No table recreation, so history is preserved.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _MEMBER_COLUMNS = ("price_pix_member_cents", "price_card_member_cents")
 
 _INSERT = """
@@ -200,6 +216,24 @@ class SqliteStateStore:
         with self._op() as conn:
             rows = conn.execute(_SELECT_LATEST_ALL, (owner,)).fetchall()
         return [_row_to_record(row) for row in rows]
+
+    def record_job_run(self, run: JobRun) -> bool:
+        # ON CONFLICT DO NOTHING on the (job_id, window_start) PK -- the
+        # idempotence key from ADR 0003 Decision 3. rowcount tells the caller
+        # whether THIS call was the one that actually recorded the firing.
+        with self._op() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO job_runs
+                    (job_id, owner_id, window_start, fired_at, sent_at,
+                     status, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id, window_start) DO NOTHING
+                """,
+                (run.job_id, run.owner_id, run.window_start, run.fired_at,
+                 run.sent_at, run.status, run.error),
+            )
+        return cur.rowcount == 1
 
     def close(self) -> None:
         # No-op: connection-per-operation holds no long-lived connection.

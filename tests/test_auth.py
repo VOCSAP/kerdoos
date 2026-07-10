@@ -499,7 +499,7 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(row["name"], "old")
             self.assertEqual(row["role"], "admin")
             version = insp.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
         finally:
             insp.close()
 
