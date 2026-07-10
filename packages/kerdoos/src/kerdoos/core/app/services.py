@@ -152,6 +152,9 @@ class AppService:
     def remove_source(self, owner: str, source_id: str) -> None:
         self._config.remove_source(owner, source_id)
 
+    def remove_product(self, owner: str, product_key: str) -> None:
+        self._config.remove_product(owner, product_key)
+
     # -- run ------------------------------------------------------------
 
     def run_now(self, owner: str) -> RunResult:

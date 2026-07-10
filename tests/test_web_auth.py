@@ -31,7 +31,7 @@ class _WebAuthTestBase(unittest.TestCase):
         self.config_db = os.path.join(self._dir, "config.db")
         self.state_db = os.path.join(self._dir, "state.db")
         env = {
-            "KERDOOS_SESSION_SECRET": "test-session-secret",
+            "KERDOOS_SESSION_SECRET": "test-session-secret-padded-to-32chars",
             "KERDOOS_CONFIG_DB": self.config_db,
             "KERDOOS_STATE_DB": self.state_db,
             "KERDOOS_COOKIE_SECURE": "false",
@@ -77,6 +77,26 @@ class MissingSecretTest(unittest.TestCase):
             os.environ.pop("KERDOOS_SESSION_SECRET", None)
             with self.assertRaises(RuntimeError):
                 create_app()
+
+    def test_create_app_raises_on_short_session_secret(self) -> None:
+        # Fast-follow from the Phase 4a gate (architect MEDIUM): a non-empty
+        # but short secret is brute-forceable and must be rejected too, not
+        # just an absent one.
+        with mock.patch.dict(os.environ, {"KERDOOS_SESSION_SECRET": "x"}):
+            with self.assertRaises(RuntimeError):
+                create_app()
+
+    def test_create_app_accepts_32_char_session_secret(self) -> None:
+        secret = "a" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "KERDOOS_SESSION_SECRET": secret,
+                "KERDOOS_CONFIG_DB": os.path.join(tmp, "config.db"),
+                "KERDOOS_STATE_DB": os.path.join(tmp, "state.db"),
+                "KERDOOS_COOKIE_SECURE": "false",
+            }
+            with mock.patch.dict(os.environ, env):
+                create_app()  # must not raise (boundary: 32 is accepted)
 
 
 class LoginTest(_WebAuthTestBase):
@@ -158,6 +178,30 @@ class LogoutTest(_WebAuthTestBase):
         self.assertEqual(resp.status_code, 200)
 
         self.assertEqual(self.client.get("/me").status_code, 401)
+
+    def test_logout_revokes_session_server_side_not_just_client_cookie(
+        self,
+    ) -> None:
+        # Fast-follow from the Phase 4a gate (reviewer LOW): the previous test
+        # only checks the CLIENT's post-logout state (cookie cleared by the
+        # response), which conflates "client dropped its cookie" with "server
+        # revoked the session". Capture the still-validly-signed cookie value
+        # BEFORE logout and replay it AFTER logout: its HMAC signature is
+        # still correct (SessionCookie.read() would accept it), so a 401 here
+        # can only come from AuthService.verify_session finding the session
+        # gone server-side -- proving real revocation, not a signature check.
+        self._add_owner("o1", "alice", "s3cret")
+        self._login("alice", "s3cret")
+        self.assertEqual(self.client.get("/me").status_code, 200)
+        captured_cookie = self.client.cookies.get("kerdoos_session")
+        self.assertIsNotNone(captured_cookie)
+
+        resp = self.client.post("/logout")
+        self.assertEqual(resp.status_code, 200)
+
+        self.client.cookies.set("kerdoos_session", captured_cookie)
+        replayed = self.client.get("/me")
+        self.assertEqual(replayed.status_code, 401)
 
     def test_logout_without_session_still_succeeds(self) -> None:
         resp = self.client.post("/logout")

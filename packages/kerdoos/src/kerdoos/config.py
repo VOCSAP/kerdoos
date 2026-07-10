@@ -15,6 +15,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+# Fast-follow from the Phase 4a gate (architect MEDIUM finding): a non-empty
+# but short secret (e.g. a single character) still passes the HMAC key API,
+# but is brute-forceable -- require a real minimum, not just "set".
+MIN_SESSION_SECRET_LENGTH = 32
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -29,6 +34,12 @@ class Settings:
                 "KERDOOS_SESSION_SECRET is not set: the WebUI refuses to start "
                 "without an HMAC key for signed session cookies (no insecure "
                 "default)."
+            )
+        if len(self.session_secret) < MIN_SESSION_SECRET_LENGTH:
+            raise RuntimeError(
+                f"KERDOOS_SESSION_SECRET is too short ({len(self.session_secret)} "
+                f"chars): the WebUI refuses to start with fewer than "
+                f"{MIN_SESSION_SECRET_LENGTH} characters (brute-forceable HMAC key)."
             )
         return self.session_secret
 

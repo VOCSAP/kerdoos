@@ -310,6 +310,32 @@ class SqliteConfigStore:
                 (source_id, owner),
             )
 
+    def remove_product(self, owner: str, product_key: str) -> None:
+        # owner-scoped existence check FIRST (last rampart, invariant
+        # multi-tenant): a tenant can never remove another tenant's product,
+        # even knowing its exact product_key. Unlike remove_source's silent
+        # no-op, an unknown/not-owned product_key raises -- the 4b-web forms
+        # need a hard signal to distinguish "already gone" from "not yours".
+        with self._op() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM products WHERE owner_id = ? AND product_key = ?",
+                (owner, product_key),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    f"unknown product {product_key!r} for owner {owner!r}")
+            # Sources reference (owner_id, product_key) via FK -- delete them
+            # first (cascade) so PRAGMA foreign_keys=ON does not reject the
+            # product delete. Same owner-scoped filter on both deletes.
+            conn.execute(
+                "DELETE FROM sources WHERE owner_id = ? AND product_key = ?",
+                (owner, product_key),
+            )
+            conn.execute(
+                "DELETE FROM products WHERE owner_id = ? AND product_key = ?",
+                (owner, product_key),
+            )
+
     # -- owner bootstrap (no auth in Phase 1; CLI-only helper) -----------
 
     def ensure_owner(

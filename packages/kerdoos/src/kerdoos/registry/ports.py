@@ -1,7 +1,7 @@
 """ConfigStore port + configuration DTOs (ADR 0001 S4 -- multi-tenant).
 
 Config (sites + products/sources) is read via ConfigStore.load(owner); mutation
-(add_site/add_product/add_source/remove_source) is a SEPARATE, wider contract
+(add_site/add_product/add_source/remove_source/remove_product) is a SEPARATE, wider contract
 (MutableConfigStore, ISP) reserved for interfaces (CLI/WebUI/MCP) so the core
 never accidentally receives write authority. One concrete adapter
 (SqliteConfigStore) implements both.
@@ -146,4 +146,7 @@ class MutableConfigStore(ConfigStore, Protocol):
         ...
 
     def remove_source(self, owner: OwnerId, source_id: str) -> None:
+        ...
+
+    def remove_product(self, owner: OwnerId, product_key: str) -> None:
         ...

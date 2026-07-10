@@ -82,6 +82,39 @@ class ConfigTenancyTest(_TenancyTestBase):
         self.assertEqual(
             len(self.service.list_config("owner1").products[0].sources), 0)
 
+    def test_remove_product_cannot_cross_tenant(self) -> None:
+        self.service.add_product("owner1", ProductSpec("aw3225qf"))
+        self.service.add_source(
+            "owner1", "aw3225qf", "kabum",
+            "https://www.kabum.com.br/produto/1/a")
+        # owner2 cannot remove owner1's product, even knowing its exact key --
+        # the owner-scoped existence check fails, nothing is deleted.
+        with self.assertRaises(KeyError):
+            self.service.remove_product("owner2", "aw3225qf")
+        registry1 = self.service.list_config("owner1")
+        self.assertEqual(len(registry1.products), 1)
+        self.assertEqual(len(registry1.products[0].sources), 1)
+
+    def test_remove_product_cascades_its_sources(self) -> None:
+        self.service.add_product("owner1", ProductSpec("aw3225qf"))
+        self.service.add_source(
+            "owner1", "aw3225qf", "kabum",
+            "https://www.kabum.com.br/produto/1/a")
+        self.service.add_source(
+            "owner1", "aw3225qf", "kabum",
+            "https://www.kabum.com.br/produto/2/b")
+        self.service.remove_product("owner1", "aw3225qf")
+        self.assertEqual(len(self.service.list_config("owner1").products), 0)
+
+    def test_remove_product_with_no_sources_is_ok(self) -> None:
+        self.service.add_product("owner1", ProductSpec("aw3225qf"))
+        self.service.remove_product("owner1", "aw3225qf")
+        self.assertEqual(len(self.service.list_config("owner1").products), 0)
+
+    def test_remove_product_rejects_unknown_key(self) -> None:
+        with self.assertRaises(KeyError):
+            self.service.remove_product("owner1", "never-created")
+
     def test_add_source_rejects_unknown_site(self) -> None:
         self.service.add_product("owner1", ProductSpec("aw3225qf"))
         with self.assertRaises(KeyError):

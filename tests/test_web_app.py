@@ -27,7 +27,7 @@ class HealthTest(unittest.TestCase):
         self._dir = tempfile.mkdtemp(prefix="kerdoos-web-health-")
         self.addCleanup(shutil.rmtree, self._dir, ignore_errors=True)
         patcher = mock.patch.dict(os.environ, {
-            "KERDOOS_SESSION_SECRET": "test-session-secret",
+            "KERDOOS_SESSION_SECRET": "test-session-secret-padded-to-32chars",
             "KERDOOS_CONFIG_DB": os.path.join(self._dir, "config.db"),
             "KERDOOS_STATE_DB": os.path.join(self._dir, "state.db"),
             "KERDOOS_COOKIE_SECURE": "false",
