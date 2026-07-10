@@ -100,6 +100,12 @@ async def verify_csrf(
         submitted = raw if isinstance(raw, str) else None
 
     expected = issue_csrf(secret, session_id)
-    if not submitted or not hmac.compare_digest(expected, submitted):
+    # Compare in BYTES: hmac.compare_digest raises TypeError on a str with a
+    # codepoint > 127, so a crafted non-ASCII X-CSRF-Token must not reach it as
+    # str (that would 500). Encoding both operands makes a non-ASCII token
+    # simply mismatch -> a clean 403.
+    if not submitted or not hmac.compare_digest(
+        expected.encode("utf-8"), submitted.encode("utf-8")
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="invalid csrf token")

@@ -21,8 +21,10 @@ from kerdoos.interfaces.web.csrf import csrf_token_for, verify_csrf
 from kerdoos.interfaces.web.deps import (
     get_app_service,
     get_auth_service,
+    get_session_cookie,
     verify_session,
 )
+from kerdoos.interfaces.web.security import SessionCookie
 from kerdoos.interfaces.web.templates import templates
 
 # Digest cut-off shown in the topbar (ambient time anchor of the watch station).
@@ -162,10 +164,12 @@ def add_product(
         svc.add_product(
             principal.owner_id,
             ProductSpec(product_key=product_key.strip(), name=clean_name))
-    except Exception:  # noqa: BLE001 -- surface a generic form error, not the cause
+    except (ValueError, KeyError):
+        # DOMAIN errors only (bad product_key -> ValueError). Anything
+        # unexpected propagates to 500 -- never masked as a client 400.
         return _render_products(
             request, principal, svc, csrf,
-            form_error="Clé produit invalide ou déjà utilisée.",
+            form_error="Clé produit invalide.",
             status_code=status.HTTP_400_BAD_REQUEST)
     return RedirectResponse("/products", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -183,7 +187,10 @@ def add_source(
     try:
         svc.add_source(principal.owner_id, product_key.strip(), site.strip(),
                        url.strip())
-    except Exception:  # noqa: BLE001 -- generic message (site or URL rejected)
+    except (ValueError, KeyError):
+        # DOMAIN errors only: KeyError (unknown site), UrlValidationError /
+        # ConfigError (both ValueError subclasses: rejected URL / domain,
+        # invalid product_key). Anything unexpected propagates to 500.
         return _render_products(
             request, principal, svc, csrf,
             form_error="Source refusée : site inconnu ou URL non autorisée.",
@@ -229,7 +236,8 @@ def profile(
     csrf: str = Depends(csrf_token_for),
 ) -> Response:
     ctx = _base(request, principal, csrf, "profile")
-    ctx.update(tokens=auth.list_tokens(principal), email=None, new_token=None)
+    ctx.update(tokens=auth.list_tokens(principal),
+               email=auth.get_email(principal), new_token=None)
     return templates.TemplateResponse(request, "profile/index.html", ctx)
 
 
@@ -243,8 +251,8 @@ def create_token(
     issued = auth.create_token(principal)  # self-only; no target-owner param
     ctx = _base(request, principal, csrf, "profile")
     # Render (not redirect): the plaintext token is shown ONCE, here only.
-    ctx.update(tokens=auth.list_tokens(principal), email=None,
-               new_token=issued)
+    ctx.update(tokens=auth.list_tokens(principal),
+               email=auth.get_email(principal), new_token=issued)
     return templates.TemplateResponse(request, "profile/index.html", ctx)
 
 
@@ -263,12 +271,17 @@ def revoke_token(
 def revoke_all_tokens(
     principal: Principal = Depends(verify_session),
     auth: AuthService = Depends(get_auth_service),
+    cookie: SessionCookie = Depends(get_session_cookie),
 ) -> Response:
     # revoke_all cuts ALL of the owner's tokens AND sessions -- including the
     # current one -- so this logs the caller out. Send them to /login (a
     # /profile redirect would just 401 on the now-dead session).
     auth.revoke_all(principal, principal.owner_id)  # self-service, full cut
-    return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    redirect = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    # Clear the now-revoked cookie client-side too (mirror logout): the session
+    # is dead server-side, so the stale cookie must not linger in the browser.
+    redirect.delete_cookie(**cookie.clear_kwargs())
+    return redirect
 
 
 @router.post("/profile/email")

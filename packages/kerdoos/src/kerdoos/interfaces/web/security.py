@@ -44,8 +44,14 @@ class SessionCookie:
         if not session_id or not signature:
             return None
         expected = self._sign(session_id)
-        # Constant-time comparison: no early-exit timing leak on the signature.
-        if not hmac.compare_digest(expected, signature):
+        # Constant-time comparison in BYTES: hmac.compare_digest raises
+        # TypeError on a str with a codepoint > 127, so a tampered cookie
+        # carrying a non-ASCII "signature" must not reach it as str (that would
+        # 500 the request). Encoding both operands makes it a clean mismatch
+        # -> None (rejected), preserving the no-early-exit timing property.
+        if not hmac.compare_digest(
+            expected.encode("utf-8"), signature.encode("utf-8")
+        ):
             return None
         return session_id
 

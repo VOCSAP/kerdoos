@@ -69,16 +69,27 @@ class _WebUITestBase(unittest.TestCase):
 
     def _login(self, identifier, password):
         """HTML login flow -> stores the session cookie on the client."""
-        return self.client.post(
+        return self._login_on(self.client, identifier, password)
+
+    def _login_on(self, client, identifier, password):
+        return client.post(
             "/auth/login",
             data={"identifier": identifier, "password": password})
 
     def _csrf(self):
         """Read this session's CSRF token from a rendered page's <meta>."""
-        page = self.client.get("/")
+        return self._csrf_on(self.client)
+
+    def _csrf_on(self, client):
+        page = client.get("/")
         match = _CSRF_META.search(page.text)
         assert match, "no csrf-token meta on the dashboard"
         return match.group(1)
+
+    def _fresh_client(self):
+        """A second app instance over the SAME config/state DB (distinct session
+        jar), to exercise cross-session / cross-tenant flows."""
+        return TestClient(create_app())
 
     def _add_site(self, name="terabyte", domain="terabyteshop.com.br"):
         store = SqliteConfigStore(self.config_db)
@@ -274,6 +285,97 @@ class JsonApiUntouchedTest(_WebUITestBase):
             "/login", json={"identifier": "ghost", "password": "x"})
         self.assertEqual(resp.status_code, 401)
         self.assertEqual(resp.json(), {"detail": "invalid credentials"})
+
+
+class HardeningTest(_WebUITestBase):
+    """Fast-follow hardenings (re-gate security -5 + reviewer -4)."""
+
+    def test_non_ascii_csrf_token_is_403_not_500(self):
+        # compare_digest would TypeError on a str codepoint > 127 (-> 500);
+        # comparing in bytes makes it a clean mismatch -> 403.
+        self._add_owner("o1", "alice", "s3cret")
+        self._login("alice", "s3cret")
+        # Bytes header value so a raw >127 octet (0xe9) reaches the server as a
+        # latin-1 str (httpx refuses to ascii-encode a non-ASCII str header).
+        resp = self.client.post(
+            "/products",
+            data={"product_key": "x"},
+            headers={"X-CSRF-Token": b"abc\xe9def"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_csrf_token_from_another_session_is_rejected(self):
+        # Token bound to session A must not validate on session B.
+        self._add_owner("o1", "alice", "s3cret")
+        self._login("alice", "s3cret")
+        token_a = self._csrf()
+
+        client_b = self._fresh_client()
+        self._login_on(client_b, "alice", "s3cret")  # a DIFFERENT session
+        resp = client_b.post(
+            "/products", data={"product_key": "rtx-4070", "csrf_token": token_a})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_idor_cross_tenant_remove_product_is_404_and_no_deletion(self):
+        # Owner A owns rtx-4070; owner B tries to delete A's REAL product_key.
+        self._add_owner("oa", "alice", "s3cret")
+        self._add_owner("ob", "bob", "s3cret")
+        self._login("alice", "s3cret")
+        self._add_site()
+        token_a = self._csrf()
+        self.client.post(
+            "/products", data={"product_key": "rtx-4070", "csrf_token": token_a})
+
+        client_b = self._fresh_client()
+        self._login_on(client_b, "bob", "s3cret")
+        token_b = self._csrf_on(client_b)
+        resp = client_b.delete(
+            "/products/rtx-4070", headers={"X-CSRF-Token": token_b})
+        self.assertEqual(resp.status_code, 404)  # owner-scoped KeyError, generic
+        # A's product is untouched.
+        self.assertIn('id="product-rtx-4070"', self.client.get("/products").text)
+
+    def test_logout_revokes_session_server_side(self):
+        self._add_owner("o1", "alice", "s3cret")
+        self._login("alice", "s3cret")
+        stale = self.client.cookies.get("kerdoos_session")
+        self.assertEqual(self.client.get("/me").status_code, 200)
+        self.client.post("/auth/logout")
+        # Replay the still-validly-signed cookie: server-side revocation -> 401.
+        self.client.cookies.set("kerdoos_session", stale)
+        self.assertEqual(self.client.get("/me").status_code, 401)
+
+    def test_revoke_all_revokes_session_server_side(self):
+        self._add_owner("o1", "alice", "s3cret")
+        self._login("alice", "s3cret")
+        stale = self.client.cookies.get("kerdoos_session")
+        token = self._csrf()
+        self.client.post("/profile/tokens/revoke-all", data={"csrf_token": token})
+        self.client.cookies.set("kerdoos_session", stale)
+        self.assertEqual(self.client.get("/me").status_code, 401)
+
+    def test_unexpected_error_is_500_not_masked_as_400(self):
+        # A domain error is a 400; an UNEXPECTED error must NOT be masked as 400.
+        self._add_owner("o1", "alice", "s3cret")
+        app = create_app()
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("unexpected")
+
+        app.state.app_service.add_product = _boom
+        client = TestClient(app, raise_server_exceptions=False)
+        self._login_on(client, "alice", "s3cret")
+        token = self._csrf_on(client)
+        resp = client.post(
+            "/products", data={"product_key": "rtx-4070", "csrf_token": token})
+        self.assertEqual(resp.status_code, 500)
+
+
+class PrefillTest(_WebUITestBase):
+    def test_profile_prefills_current_email(self):
+        self._add_owner("o1", "alice", "s3cret", email="alice@example.com")
+        self._login("alice", "s3cret")
+        page = self.client.get("/profile")
+        self.assertIn('value="alice@example.com"', page.text)
 
 
 _TOKEN_ROW = re.compile(r'id="token-([0-9a-f]+)"')
