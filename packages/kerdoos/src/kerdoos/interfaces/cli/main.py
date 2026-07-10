@@ -192,7 +192,10 @@ def build_parser_cli() -> argparse.ArgumentParser:
     run.add_argument("--config-db", default="config.db",
                      help="SQLite ConfigStore path")
     run.add_argument("--db", default="kerdoos.db",
-                     help="SQLite state store path (':memory:' for ephemeral)")
+                     help="SQLite state store path (connection-per-operation; "
+                          "':memory:' is a distinct in-memory DB per connection "
+                          "and loses all data between operations, use a real "
+                          "file path even for ephemeral runs)")
     run.add_argument("--dry-run", action="store_true", default=True,
                      help="render digest to stdout, do not send mail (default)")
     run.set_defaults(func=cmd_run)

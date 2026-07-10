@@ -72,6 +72,11 @@ class AuthService:
         self._token_ttl = token_ttl
         self._clock = clock
 
+    @property
+    def session_ttl_seconds(self) -> int:
+        """Session lifetime in seconds (for the cookie Max-Age)."""
+        return int(self._session_ttl.total_seconds())
+
     # -- login (anti-enumeration) -----------------------------------------
     def authenticate(self, identifier: str, password: str) -> Principal | None:
         """Resolve an owner by name OR email and verify the password.

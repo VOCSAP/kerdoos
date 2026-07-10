@@ -1,13 +1,22 @@
-"""Placeholder for the future auth-gated router (ADR 0001, post-MVP).
+"""Auth-gated router (ADR 0001, post-MVP): every route requires a valid
+signed session cookie (Depends(verify_session) attached at the ROUTER level,
+rule FastAPI "auth au niveau router, jamais par endpoint" -- impossible to
+add a route here and forget the dependency).
 
-Empty at Phase 0 (structural only -- no auth, no use-cases yet). Kept as its
-own APIRouter from day one so the auth dependency can be attached at the
-router level later (rule FastAPI "auth au niveau router, jamais par
-endpoint") without having to retrofit every route with `Depends(...)`.
+Phase 4a: a minimal JSON stub (`/me`) to prove the auth wiring end to end.
+Real use-cases (config CRUD, run digest) land in later WebUI phases.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-router = APIRouter()
+from kerdoos.core.app.services import Principal
+from kerdoos.interfaces.web.deps import verify_session
+
+router = APIRouter(dependencies=[Depends(verify_session)])
+
+
+@router.get("/me")
+def me(principal: Principal = Depends(verify_session)) -> dict[str, str]:
+    return {"owner_id": principal.owner_id, "role": principal.role}
