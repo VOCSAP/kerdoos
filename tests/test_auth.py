@@ -21,7 +21,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from kerdoos.auth.ports import AuthStore, PasswordHasher
+from kerdoos.auth.ports import (
+    AuthStore,
+    EmailAlreadyTakenError,
+    PasswordHasher,
+)
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import Principal
 from kerdoos.registry.auth_store import Argon2Hasher, SqliteAuthStore
@@ -253,6 +257,110 @@ class TokenAuthZTest(_AuthTestBase):
         victim_tok = self.service.create_token(Principal("victim", "user"))
         self.service.revoke_all(admin, "victim")
         self.assertIsNone(self.service.verify_bearer(victim_tok.token))
+
+
+class SetEmailTest(_AuthTestBase):
+    def test_self_scope_only_affects_own_row(self) -> None:
+        self._add_owner("o1", "alice", "pw", email=None)
+        self._add_owner("o2", "bob", "pw", email=None)
+        self.service.set_email(Principal("o1", "user"), "alice@example.com")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = dict(conn.execute(
+                "SELECT id, email FROM owners").fetchall())
+        finally:
+            conn.close()
+        self.assertEqual(rows["o1"], "alice@example.com")
+        self.assertIsNone(rows["o2"])   # untouched -- no target-owner param
+
+    def test_removal_with_none(self) -> None:
+        self._add_owner("o1", "alice", "pw", email="alice@example.com")
+        self.service.set_email(Principal("o1", "user"), None)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            email = conn.execute(
+                "SELECT email FROM owners WHERE id = 'o1'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertIsNone(email)
+
+    def test_invalid_format_rejected(self) -> None:
+        self._add_owner("o1", "alice", "pw", email=None)
+        with self.assertRaises(ValueError):
+            self.service.set_email(Principal("o1", "user"), "not-an-email")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            email = conn.execute(
+                "SELECT email FROM owners WHERE id = 'o1'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertIsNone(email)   # rejected before it ever reached the store
+
+    def test_collision_rejected_as_named_error(self) -> None:
+        self._add_owner("o1", "alice", "pw", email="taken@example.com")
+        self._add_owner("o2", "bob", "pw", email=None)
+        with self.assertRaises(EmailAlreadyTakenError):
+            self.service.set_email(Principal("o2", "user"), "taken@example.com")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            email = conn.execute(
+                "SELECT email FROM owners WHERE id = 'o2'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertIsNone(email)   # rejected, no partial write
+
+
+class ListTokensTest(_AuthTestBase):
+    def test_self_scope_only_lists_own_tokens(self) -> None:
+        self._add_owner("o1", "alice", "pw")
+        self._add_owner("o2", "bob", "pw")
+        mine = self.service.create_token(Principal("o1", "user"))
+        self.service.create_token(Principal("o2", "user"))
+        tokens = self.service.list_tokens(Principal("o1", "user"))
+        self.assertEqual([t.token_id for t in tokens], [mine.token_id])
+
+    def test_never_leaks_plaintext_or_hash(self) -> None:
+        self._add_owner("o1", "alice", "pw")
+        issued = self.service.create_token(Principal("o1", "user"))
+        tokens = self.service.list_tokens(Principal("o1", "user"))
+        self.assertEqual(len(tokens), 1)
+        info = tokens[0]
+        self.assertEqual(info.token_id, issued.token_id)
+        # No plaintext/hash field exists on TokenInfo at all -- and the
+        # plaintext token value never appears anywhere on the object.
+        self.assertNotIn("token", vars(info) if hasattr(info, "__dict__") else {})
+        for value in (info.token_id, info.created_at, info.expires_at):
+            self.assertNotEqual(value, issued.token)
+
+    def test_excludes_revoked_tokens(self) -> None:
+        self._add_owner("o1", "alice", "pw")
+        p = Principal("o1", "user")
+        kept = self.service.create_token(p)
+        revoked = self.service.create_token(p)
+        self.service.revoke_token(p, revoked.token_id)
+        tokens = self.service.list_tokens(p)
+        self.assertEqual([t.token_id for t in tokens], [kept.token_id])
+
+    def test_empty_list_for_owner_with_no_tokens(self) -> None:
+        self._add_owner("o1", "alice", "pw")
+        self.assertEqual(self.service.list_tokens(Principal("o1", "user")), [])
+
+    def test_ordered_created_at_desc(self) -> None:
+        self._add_owner("o1", "alice", "pw")
+        p = Principal("o1", "user")
+        times = iter([
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 2, tzinfo=timezone.utc),
+            datetime(2026, 1, 3, tzinfo=timezone.utc),
+        ])
+        svc = AuthService(self.store, self.real_hasher, clock=lambda: next(times))
+        first = svc.create_token(p)
+        second = svc.create_token(p)
+        third = svc.create_token(p)
+        tokens = svc.list_tokens(p)
+        self.assertEqual(
+            [t.token_id for t in tokens],
+            [third.token_id, second.token_id, first.token_id])
 
 
 class ConcurrencyTest(_AuthTestBase):
