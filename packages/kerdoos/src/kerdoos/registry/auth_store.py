@@ -9,8 +9,11 @@ sqlite3.ProgrammingError and no head-of-line global lock. WAL journal mode +
 busy_timeout mean a concurrent login write never blocks readers ("ni
 head-of-line lock").
 
-The owners TABLE itself is owned/created by SqliteConfigStore; this store only
-creates sessions/tokens and READS owners. Construct a SqliteConfigStore on the
+The owners TABLE itself is owned/created by SqliteConfigStore; this store
+creates sessions/tokens, READS owners, and owns ONE explicitly-scoped write
+path onto owners -- set_email (self-service profile field, Phase 4b). That
+write is narrow (single column, single row by id) and does not change who
+creates the table or its other columns. Construct a SqliteConfigStore on the
 same path first (composition root / tests) so owners exists.
 """
 
@@ -22,7 +25,12 @@ from pathlib import Path
 from argon2 import PasswordHasher as _Argon2PH
 from argon2.exceptions import Argon2Error, VerifyMismatchError
 
-from kerdoos.auth.ports import OwnerCredentials, ResolvedIdentity
+from kerdoos.auth.ports import (
+    EmailAlreadyTakenError,
+    OwnerCredentials,
+    ResolvedIdentity,
+    TokenInfo,
+)
 
 _SESSION_TOKEN_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -238,3 +246,47 @@ class SqliteAuthStore:
             conn.commit()
         finally:
             conn.close()
+
+    # -- self-service profile (WebUI Phase 4b) ------------------------------
+    def set_email(self, owner_id: str, email: str | None) -> None:
+        # Format validation happens upstream in AuthService; this method only
+        # owns the DB write + the uniqueness-collision translation. A missing
+        # owner_id is a silent 0-row UPDATE (no error) -- the caller is always
+        # an authenticated principal, so the row exists.
+        conn = self._connect()
+        try:
+            try:
+                conn.execute(
+                    "UPDATE owners SET email = ? WHERE id = ?",
+                    (email, owner_id),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                # idx_owners_email (UNIQUE partial index) collision -- NEVER
+                # let the raw IntegrityError surface (Kleos #11162: named
+                # error, not a crash).
+                conn.rollback()
+                raise EmailAlreadyTakenError(
+                    f"email already in use: {email!r}") from exc
+        finally:
+            conn.close()
+
+    def list_tokens(self, owner_id: str) -> list[TokenInfo]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, created_at, expires_at FROM tokens "
+                "WHERE owner_id = ? AND state = 'active' "
+                "ORDER BY created_at DESC",
+                (owner_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            TokenInfo(
+                token_id=row["id"],
+                created_at=row["created_at"],
+                expires_at=row["expires_at"],
+            )
+            for row in rows
+        ]

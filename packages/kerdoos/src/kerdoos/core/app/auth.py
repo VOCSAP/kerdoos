@@ -22,12 +22,13 @@ Security invariants enforced here:
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from kerdoos.auth.ports import AuthStore, PasswordHasher
+from kerdoos.auth.ports import AuthStore, PasswordHasher, TokenInfo
 from kerdoos.core.app.services import Principal
 
 # High-entropy opaque secrets (session id / bearer token). 256 bits of
@@ -36,6 +37,11 @@ from kerdoos.core.app.services import Principal
 _SECRET_BYTES = 32
 DEFAULT_SESSION_TTL = timedelta(days=14)
 DEFAULT_TOKEN_TTL = timedelta(days=90)
+
+# Basic format check only (not RFC 5322): "something@something.tld". The
+# store enforces real uniqueness; this just rejects obviously-malformed input
+# before it ever reaches SQL.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _utcnow() -> datetime:
@@ -164,3 +170,26 @@ class AuthService:
             )
         self._store.delete_owner_sessions(target_owner_id)
         self._store.revoke_owner_tokens(target_owner_id)
+
+    # -- self-service profile (WebUI Phase 4b) ------------------------------
+    def set_email(self, principal: Principal, email: str | None) -> None:
+        """Set or clear the ACTING principal's own email (self-scope strict --
+        there is deliberately no target-owner parameter, mirroring
+        create_token/revoke_token: a principal can only ever touch its own
+        row). email=None removes it (owners.email is nullable by design, cf.
+        the identity ADR).
+
+        Raises ValueError on an obviously malformed non-None email, or
+        EmailAlreadyTakenError (from the store) if a different owner already
+        has that email -- never a raw sqlite3.IntegrityError.
+        """
+        if email is not None and not _EMAIL_RE.match(email):
+            raise ValueError(f"invalid email format: {email!r}")
+        self._store.set_email(principal.owner_id, email)
+
+    def list_tokens(self, principal: Principal) -> list[TokenInfo]:
+        """List the ACTING principal's own active bearer tokens (self-scope
+        strict), most recent first. Never returns the plaintext token or its
+        hash -- only enough to label + revoke via
+        revoke_token(principal, token_id)."""
+        return self._store.list_tokens(principal.owner_id)

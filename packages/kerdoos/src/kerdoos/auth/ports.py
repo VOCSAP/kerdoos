@@ -35,6 +35,27 @@ class ResolvedIdentity:
     role: str
 
 
+@dataclass(frozen=True, slots=True)
+class TokenInfo:
+    """One of a principal's own bearer tokens, for self-service listing
+    (list_tokens). NEVER carries the plaintext token or its sha256 hash --
+    only enough to label and revoke it by id (revoke_token(principal,
+    token_id) already exists)."""
+
+    token_id: str
+    created_at: str
+    expires_at: str
+
+
+class EmailAlreadyTakenError(ValueError):
+    """Raised by AuthStore.set_email when the requested email is already used
+    by a DIFFERENT owner (idx_owners_email unique partial index collision,
+    translated from sqlite3.IntegrityError -- never let it surface raw, cf.
+    Kleos #11162). Kept in auth.ports rather than registry.errors.ConfigError
+    so the auth module's error taxonomy stays self-contained (AuthService
+    depends ONLY on auth.ports + same-package Principal)."""
+
+
 @runtime_checkable
 class PasswordHasher(Protocol):
     """Argon2id password hashing + a constant-cost dummy verify for anti-enum."""
@@ -105,4 +126,17 @@ class AuthStore(Protocol):
         ...
 
     def revoke_owner_tokens(self, owner_id: str) -> None:
+        ...
+
+    # -- self-service profile (WebUI Phase 4b) --
+    def set_email(self, owner_id: str, email: str | None) -> None:
+        """Set (email=str) or clear (email=None) owner_id's email. Raises
+        EmailAlreadyTakenError if a DIFFERENT owner already has that email
+        (idx_owners_email unique partial index)."""
+        ...
+
+    def list_tokens(self, owner_id: str) -> list[TokenInfo]:
+        """List owner_id's own ACTIVE tokens (state='active'), most recent
+        first (created_at DESC). Never includes the plaintext token or its
+        hash."""
         ...
