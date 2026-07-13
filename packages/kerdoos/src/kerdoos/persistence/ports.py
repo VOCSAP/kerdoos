@@ -125,3 +125,20 @@ class StateStore(Protocol):
         must skip a tick for a job that is still in flight from a previous
         tick (ADR 0003 Decision 4 / architect finding #6)."""
         ...
+
+    def reap_stale_job_run(
+        self, owner: str, job_id: str, *, fired_before: str,
+    ) -> bool:
+        """Reaper/TTL sweep (ADR 0003 Phase 6b fast-follow, architect
+        addendum). If `job_id` (owner-scoped, same IDOR-safe double-scoping
+        discipline as has_active_job_run) has a job_runs row with status
+        'queued' or 'running' AND fired_at < fired_before (an explicit
+        max-send-timeout bound, NOT window_start), transition it to the
+        TERMINAL status 'error' -- an UPDATE, never a DELETE. The row (and
+        its (job_id, window_start) primary key) must survive so
+        record_job_run's ON CONFLICT DO NOTHING still blocks a re-insert for
+        the SAME window: a reaped run is at-most-once for that window,
+        recovery only happens at the NEXT window_start. Returns True if a
+        row was found stale and reaped, False otherwise (never raises on a
+        missing/already-terminal row, same discipline as update_job_run)."""
+        ...

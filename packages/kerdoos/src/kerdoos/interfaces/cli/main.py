@@ -79,6 +79,7 @@ def cmd_digest(args: argparse.Namespace) -> int:
             config_store=config_store, state_store=state_store,
             router=router, parser_factory=build_parser,
             sender=sender,
+            reaper_timeout_seconds=settings.digest_reaper_timeout_seconds,
         ))
     finally:
         config_store.close()

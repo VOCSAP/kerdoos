@@ -17,7 +17,7 @@ import threading
 import time
 import unittest
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from autolycos.ports import FetchResult
@@ -97,17 +97,26 @@ class _SendCall:
 
 class _RecordingSender:
     """DigestSender double: records every successful send(); raises for any
-    job whose name is in fail_for (Plan B per-job error-path tests)."""
+    job whose name is in fail_for (Plan B per-job error-path tests); returns
+    False (owner has no email, ADR 0003 Decision 9) for any job whose name is
+    in no_email_for -- item 3 of the Phase 6b fast-follow bundle."""
 
-    def __init__(self, fail_for: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self, fail_for: frozenset[str] = frozenset(),
+        no_email_for: frozenset[str] = frozenset(),
+    ) -> None:
         self.calls: list[_SendCall] = []
         self._fail_for = fail_for
+        self._no_email_for = no_email_for
 
-    def send(self, job, records, generated_at, tier2_labels) -> None:
+    def send(self, job, records, generated_at, tier2_labels) -> bool:
         if job.name in self._fail_for:
             raise RuntimeError(f"send failed for job {job.name!r}")
+        if job.name in self._no_email_for:
+            return False
         self.calls.append(_SendCall(
             job, list(records), generated_at, dict(tier2_labels)))
+        return True
 
 
 class _EvaluatorTestBase(unittest.IsolatedAsyncioTestCase):
@@ -367,6 +376,218 @@ class PlanBNotifyTest(_EvaluatorTestBase):
         self.assertEqual(summary.notified_jobs, 1)
         self.assertEqual([c.job.name for c in sender.calls], ["ok-job"])
 
+    async def test_owner_without_email_persists_skipped_no_email_not_sent(self) -> None:
+        """Phase 6b fast-follow item 3: send() returning False (owner has no
+        email, ADR 0003 Decision 9) must NOT be recorded as 'sent' -- it
+        must persist the observability-correct 'skipped_no_email' status,
+        distinguishable from a real send in job_runs."""
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="no-email-job", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick_now - _minutes(1))
+        sender = _RecordingSender(no_email_for=frozenset({"no-email-job"}))
+
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+
+        self.assertEqual(summary.notified_jobs, 0)
+        self.assertEqual(summary.skipped_jobs, 1)
+        self.assertEqual(summary.errors, 0)
+        # send() was invoked (returned False) but never RECORDED as a call
+        # -- proves the evaluator branched on the bool return, not just
+        # "no exception raised".
+        self.assertEqual(sender.calls, [])
+        window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
+        with self.state._op() as conn:
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
+                (job.id, window_start),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "skipped_no_email")
+
+
+class ReaperStaleJobRunEndToEndTest(_EvaluatorTestBase):
+    """Phase 6b fast-follow item 2 (RELIABILITY, architect addendum):
+    reaper/TTL sweep exercised through the real evaluate_tick entry point,
+    proving the full contract -- reap to terminal 'error' (never DELETE),
+    at-most-once for the SAME window (no double-send), recovery only at the
+    NEXT window_start."""
+
+    async def test_stranded_row_reaped_no_same_window_refire_recovers_next_window(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly", source_ids=(sid,)))
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick_now - _minutes(1))
+        window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
+        # Simulate a crash mid-send on a PREVIOUS tick within the SAME
+        # window: fired 10 minutes ago -- older than the default 300s/5min
+        # reaper bound -- and still stuck in 'running'.
+        stranded_fired_at = (tick_now - timedelta(minutes=10)).isoformat()
+        self.state.record_job_run(JobRun(
+            job_id=job.id, owner_id="owner1", window_start=window_start,
+            fired_at=stranded_fired_at, status="running",
+        ))
+        sender = _RecordingSender()
+
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+
+        # Reaped to terminal 'error' -- proven by has_active_job_run
+        # flipping to False (a stranded row left un-reaped would block this
+        # job's per-job singleton coalescing FOREVER).
+        self.assertFalse(self.state.has_active_job_run("owner1", job.id))
+        with self.state._op() as conn:
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
+                (job.id, window_start),
+            ).fetchone()
+        self.assertEqual(row["status"], "error")
+        # No send for the SAME window: record_job_run's ON CONFLICT DO
+        # NOTHING blocks the re-insert (the PK survives the reap -- UPDATE,
+        # never DELETE) -- at-most-once for that window, NOT a re-fire.
+        self.assertEqual(sender.calls, [])
+        self.assertEqual(summary.notified_jobs, 0)
+
+        # Recovery happens at the NEXT window_start, not a same-window retry.
+        next_tick = tick_now + timedelta(hours=1)
+        next_window_start = compute_window_start(job.schedule_cron, job.timezone, next_tick)
+        self.assertNotEqual(next_window_start, window_start)
+        self._seed_history("owner1", sid, next_tick - _minutes(1))
+
+        summary2 = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=next_tick,
+        )
+
+        self.assertEqual(summary2.notified_jobs, 1)
+        self.assertEqual(len(sender.calls), 1)
+        self.assertEqual(sender.calls[0].job.id, job.id)
+
+    async def test_fresh_in_flight_row_is_not_reaped_and_still_coalesces(self) -> None:
+        """Control case: a row fired WITHIN the timeout bound must be left
+        alone by the reaper and still coalesce the tick (has_active_job_run
+        stays True) -- proves the timeout threshold itself is what
+        distinguishes stranded from legitimately in-flight."""
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly", source_ids=(sid,)))
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick_now - _minutes(1))
+        window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
+        fresh_fired_at = (tick_now - timedelta(minutes=1)).isoformat()
+        self.state.record_job_run(JobRun(
+            job_id=job.id, owner_id="owner1", window_start=window_start,
+            fired_at=fresh_fired_at, status="running",
+        ))
+        sender = _RecordingSender()
+
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+
+        self.assertTrue(self.state.has_active_job_run("owner1", job.id))
+        self.assertEqual(sender.calls, [])
+        self.assertEqual(summary.skipped_jobs, 1)
+        self.assertEqual(summary.notified_jobs, 0)
+
+
+class ReapStaleJobRunUnitTest(unittest.TestCase):
+    """StateStore.reap_stale_job_run edge cases (Phase 6b fast-follow item
+    2), exercised directly against SqliteStateStore -- no evaluator
+    involved."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = SqliteStateStore(Path(self._tmp.name) / "state.db")
+
+    def tearDown(self) -> None:
+        self.state.close()
+        self._tmp.cleanup()
+
+    def _status(self, job_id: str, window_start: str) -> str | None:
+        with self.state._op() as conn:
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
+                (job_id, window_start),
+            ).fetchone()
+        return row["status"] if row is not None else None
+
+    def test_missing_row_returns_false_never_raises(self) -> None:
+        result = self.state.reap_stale_job_run(
+            "owner1", "no-such-job", fired_before="2026-07-13T10:00:00+00:00")
+        self.assertFalse(result)
+
+    def test_already_terminal_row_is_a_no_op(self) -> None:
+        self.state.record_job_run(JobRun(
+            job_id="job1", owner_id="owner1",
+            window_start="2026-07-13T10:00:00+00:00",
+            fired_at="2026-07-13T09:00:00+00:00", status="sent",
+            sent_at="2026-07-13T09:00:05+00:00",
+        ))
+        result = self.state.reap_stale_job_run(
+            "owner1", "job1", fired_before="2026-07-13T23:59:59+00:00")
+        self.assertFalse(result)
+        self.assertEqual(
+            self._status("job1", "2026-07-13T10:00:00+00:00"), "sent")
+
+    def test_owner_scoping_never_cross_reaps(self) -> None:
+        """IDOR-safe double-scoping (mirrors has_active_job_run's discipline,
+        architect's explicit owner-scope requirement): a stale row under a
+        DIFFERENT owner must never be reaped by a call scoped to the wrong
+        owner, even with a colliding job_id."""
+        self.state.record_job_run(JobRun(
+            job_id="shared-job-id", owner_id="victim-owner",
+            window_start="2026-07-13T10:00:00+00:00",
+            fired_at="2026-07-13T09:00:00+00:00", status="running",
+        ))
+        result = self.state.reap_stale_job_run(
+            "attacker-owner", "shared-job-id",
+            fired_before="2026-07-13T23:59:59+00:00")
+        self.assertFalse(result)
+        self.assertEqual(
+            self._status("shared-job-id", "2026-07-13T10:00:00+00:00"),
+            "running")
+
+    def test_stale_queued_or_running_row_is_reaped_to_terminal_error(self) -> None:
+        self.state.record_job_run(JobRun(
+            job_id="job1", owner_id="owner1",
+            window_start="2026-07-13T10:00:00+00:00",
+            fired_at="2026-07-13T09:50:00+00:00", status="queued",
+        ))
+        result = self.state.reap_stale_job_run(
+            "owner1", "job1", fired_before="2026-07-13T09:55:00+00:00")
+        self.assertTrue(result)
+        self.assertEqual(
+            self._status("job1", "2026-07-13T10:00:00+00:00"), "error")
+
+    def test_fresh_row_not_older_than_bound_is_left_untouched(self) -> None:
+        self.state.record_job_run(JobRun(
+            job_id="job1", owner_id="owner1",
+            window_start="2026-07-13T10:00:00+00:00",
+            fired_at="2026-07-13T09:59:00+00:00", status="running",
+        ))
+        result = self.state.reap_stale_job_run(
+            "owner1", "job1", fired_before="2026-07-13T09:55:00+00:00")
+        self.assertFalse(result)
+        self.assertEqual(
+            self._status("job1", "2026-07-13T10:00:00+00:00"), "running")
+
 
 class _SlowRecordingSender:
     """DigestSender double whose send() blocks briefly on a real thread
@@ -381,7 +602,7 @@ class _SlowRecordingSender:
         self.max_active = 0
         self.calls: list[str] = []
 
-    def send(self, job, records, generated_at, tier2_labels) -> None:
+    def send(self, job, records, generated_at, tier2_labels) -> bool:
         with self._lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
@@ -389,6 +610,7 @@ class _SlowRecordingSender:
         with self._lock:
             self.calls.append(job.name)
             self.active -= 1
+        return True
 
 
 class PlanBConcurrencyCeilingTest(unittest.IsolatedAsyncioTestCase):

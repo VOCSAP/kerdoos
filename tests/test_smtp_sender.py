@@ -8,14 +8,23 @@ owner-scoped ConfigStore.load(job.owner_id) read ONLY -- with two owners'
 data coexisting in the same config store, only the sending job's own owner's
 sources may ever appear in the rendered output.
 
-Owner-without-email: send() must return normally (no raise, no SMTP
-connection attempt) when email_lookup(job.owner_id) returns None, so the
-evaluator's per-job try/except does not mark the run 'error' -- ADR 0003
-Decision 9 auto-resume on a later window.
+Owner-without-email (Phase 6b fast-follow item 3): send() must return False
+(not raise, not attempt an SMTP connection) when email_lookup(job.owner_id)
+returns None, so _run_plan_b can persist JobRun.status == 'skipped_no_email'
+instead of wrongly marking the run 'sent' -- ADR 0003 Decision 9 auto-resume
+on a later window.
+
+S6 (CWE-295, Phase 6b fast-follow item 1): starttls() must be called with a
+verifying ssl.SSLContext (check_hostname=True, CERT_REQUIRED via
+ssl.create_default_context()) -- fail-closed: an unsupported STARTTLS or an
+invalid server certificate must raise, never fall back to a silent plaintext
+send.
 """
 
 from __future__ import annotations
 
+import smtplib
+import ssl
 import unittest
 from dataclasses import dataclass, field
 from unittest.mock import patch
@@ -49,6 +58,7 @@ class _FakeSMTP:
         self.host = host
         self.port = port
         self.started_tls = False
+        self.starttls_context: object | None = None
         self.logged_in: tuple[str, str] | None = None
         self.sent_message = None
         _FakeSMTP.instances.append(self)
@@ -59,8 +69,9 @@ class _FakeSMTP:
     def __exit__(self, *exc_info) -> bool:
         return False
 
-    def starttls(self) -> None:
+    def starttls(self, context=None) -> None:
         self.started_tls = True
+        self.starttls_context = context
 
     def login(self, username: str, password: str) -> None:
         self.logged_in = (username, password)
@@ -222,18 +233,101 @@ class OwnerScopingTest(_SmtpSenderTestBase):
 
 
 class NoEmailSkipTest(unittest.TestCase):
-    def test_send_returns_without_raising_and_without_smtp_connection(self) -> None:
+    def test_send_returns_false_without_raising_and_without_smtp_connection(self) -> None:
         registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
         config_store = _FakeConfigStore({"owner1": registry})
         sender = SmtpDigestSender(
             config_store, _POLICY, lambda owner: None, _SMTP_SETTINGS)
 
         with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _ExplodingSMTP):
-            sender.send(job=_job(), records=[_record()],
+            sent = sender.send(job=_job(), records=[_record()],
                        generated_at="2026-07-13T00:00:00+00:00", tier2_labels={})
-        # No exception raised (asserted implicitly by reaching this line) --
-        # and _ExplodingSMTP would have failed the test loudly if send()
-        # had attempted a connection despite the missing email.
+        # No exception raised, no SMTP connection attempted (_ExplodingSMTP
+        # would have failed loudly), AND the bool return is explicitly False
+        # -- item 3 of the Phase 6b fast-follow bundle: this is the signal
+        # _run_plan_b uses to persist JobRun.status == 'skipped_no_email'
+        # instead of silently marking the run 'sent'.
+        self.assertIs(sent, False)
+
+
+class StarttlsSslContextTest(_SmtpSenderTestBase):
+    """S6 (CWE-295, Phase 6b fast-follow item 1): starttls() must be called
+    with a verifying SSLContext (check_hostname=True, CERT_REQUIRED) -- never
+    the bare no-arg form, which historically risks an unverified/permissive
+    fallback."""
+
+    def test_starttls_is_called_with_a_verifying_ssl_context(self) -> None:
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "owner1@example.com", _SMTP_SETTINGS)
+
+        sent = sender.send(job=_job(), records=[_record()],
+                   generated_at="2026-07-13T00:00:00+00:00", tier2_labels={})
+
+        self.assertIs(sent, True)
+        self.assertEqual(len(_FakeSMTP.instances), 1)
+        fake = _FakeSMTP.instances[0]
+        self.assertTrue(fake.started_tls)
+        context = fake.starttls_context
+        self.assertIsNotNone(context)
+        self.assertIs(context.check_hostname, True)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_starttls_not_supported_by_server_fails_closed_no_plaintext_send(self) -> None:
+        """FAIL-CLOSED (architect requirement): if the server does not
+        support STARTTLS, send() must raise -- NEVER silently fall back to
+        a plaintext send. This is the adversarial test for item 1: it
+        proves there is no code path where the message is handed to
+        send_message() without TLS having been established first."""
+
+        class _NoStarttlsSMTP(_FakeSMTP):
+            def starttls(self, context=None) -> None:
+                raise smtplib.SMTPNotSupportedError(
+                    "STARTTLS extension not supported by server.")
+
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "owner1@example.com", _SMTP_SETTINGS)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _NoStarttlsSMTP):
+            with self.assertRaises(smtplib.SMTPNotSupportedError):
+                sender.send(job=_job(), records=[_record()],
+                           generated_at="2026-07-13T00:00:00+00:00", tier2_labels={})
+
+        # The one SMTP instance created must never have had send_message()
+        # called on it -- proves no plaintext fallback happened after the
+        # STARTTLS rejection.
+        self.assertEqual(len(_NoStarttlsSMTP.instances), 1)
+        self.assertIsNone(_NoStarttlsSMTP.instances[0].sent_message)
+
+    def test_server_presenting_an_invalid_cert_is_refused_no_silent_plaintext(self) -> None:
+        """Adversarial: a server whose certificate fails verification (self
+        -signed / hostname mismatch) must cause starttls() to raise -- proves
+        the SSLContext actually passed is a VERIFYING one (not a
+        no-verification stand-in), by simulating what a verifying context
+        does on a bad cert."""
+
+        class _BadCertSMTP(_FakeSMTP):
+            def starttls(self, context=None) -> None:
+                # A real ssl.create_default_context() raises exactly this on
+                # a self-signed/invalid certificate during the TLS handshake.
+                raise ssl.SSLCertVerificationError(
+                    "certificate verify failed: self-signed certificate")
+
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "owner1@example.com", _SMTP_SETTINGS)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _BadCertSMTP):
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                sender.send(job=_job(), records=[_record()],
+                           generated_at="2026-07-13T00:00:00+00:00", tier2_labels={})
+
+        self.assertEqual(len(_BadCertSMTP.instances), 1)
+        self.assertIsNone(_BadCertSMTP.instances[0].sent_message)
 
 
 if __name__ == "__main__":

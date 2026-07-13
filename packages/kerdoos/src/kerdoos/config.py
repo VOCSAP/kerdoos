@@ -20,6 +20,15 @@ which is exactly what makes create_app()/cmd_digest fall back to
 LogDigestSender (security policy: never bake a mail relay into the code).
 smtp_port defaults to 587 (STARTTLS submission), but that default only
 matters once an operator has already set KERDOOS_SMTP_HOST.
+
+KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS (ADR 0003 Phase 6b fast-follow): the
+explicit max-send-timeout bound (default 300s / 5 min) core.evaluator's
+reaper sweep uses to reclaim a job_runs row stranded in 'queued'/'running'
+(e.g. the process crashed mid-send). Only wired into `kerdoos digest`
+(interfaces/cli/main.py's cmd_digest, the external-cron trigger) -- the
+WebUI's intra-process evaluator (interfaces/web/app.py) always uses
+core.evaluator.evaluate_tick's own 300s function default instead of reading
+this setting.
 """
 
 from __future__ import annotations
@@ -36,6 +45,11 @@ MIN_SESSION_SECRET_LENGTH = 32
 # is set (never used to invent an SMTP relay when SMTP is unconfigured).
 DEFAULT_SMTP_PORT = 587
 
+# Reaper max-send-timeout default (ADR 0003 Phase 6b fast-follow) -- must be
+# an EXPLICIT bound, not derived from tick_seconds (2*tick would couple an
+# unrelated timer to a correctness-affecting staleness window).
+DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS = 300
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -51,6 +65,7 @@ class Settings:
     smtp_username: str | None
     smtp_password: str | None
     smtp_use_tls: bool
+    digest_reaper_timeout_seconds: int
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -86,4 +101,7 @@ def get_settings() -> Settings:
         smtp_password=os.environ.get("KERDOOS_SMTP_PASSWORD") or None,
         smtp_use_tls=(
             os.environ.get("KERDOOS_SMTP_USE_TLS", "true").lower() != "false"),
+        digest_reaper_timeout_seconds=int(os.environ.get(
+            "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
+            str(DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS))),
     )

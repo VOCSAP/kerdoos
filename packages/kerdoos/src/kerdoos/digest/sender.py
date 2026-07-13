@@ -31,9 +31,10 @@ class LogDigestSender:
         records: list[ScrapeRecord],
         generated_at: str,
         tier2_labels: Mapping[str, str],
-    ) -> None:
+    ) -> bool:
         body = render_digest(records, generated_at, tier2_labels)
         logger.info(
             "digest for job=%s (%s) owner=%s:\n%s",
             job.id, job.name, job.owner_id, body,
         )
+        return True

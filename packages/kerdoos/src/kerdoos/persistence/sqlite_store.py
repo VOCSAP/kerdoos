@@ -276,6 +276,32 @@ class SqliteStateStore:
             ).fetchone()
         return row is not None
 
+    def reap_stale_job_run(
+        self, owner: str, job_id: str, *, fired_before: str,
+    ) -> bool:
+        # Owner-scoped (ADR 0003 fast-follow architect addendum, S2-style
+        # double-scoping): WHERE owner_id=? AND job_id=? filters INLINE, so
+        # this can never reap another owner's row even given a colliding
+        # job_id. status IN ('queued','running') AND fired_at < ? ensures an
+        # already-terminal row is left untouched (rowcount 0). UPDATE only
+        # -- never DELETE, so the (job_id, window_start) PK survives and
+        # record_job_run's ON CONFLICT DO NOTHING still blocks a same-window
+        # re-fire after reaping (exactly-once preserved; recovery is at the
+        # NEXT window_start only).
+        with self._op() as conn:
+            cur = conn.execute(
+                """
+                UPDATE job_runs
+                SET status = 'error',
+                    error = 'reaped: stale job_run past max-send-timeout'
+                WHERE owner_id = ? AND job_id = ?
+                  AND status IN ('queued', 'running')
+                  AND fired_at < ?
+                """,
+                (owner, job_id, fired_before),
+            )
+        return cur.rowcount == 1
+
     def close(self) -> None:
         # No-op: connection-per-operation holds no long-lived connection.
         return None

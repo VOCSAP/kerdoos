@@ -20,19 +20,29 @@ sweep -- so a digest can only ever contain the sending job's OWN owner's
 products/sources/records. Never touches list_all_enabled_jobs() or any
 other owner-unscoped primitive.
 
-Owner-without-email (auto-resume): if email_lookup(job.owner_id) returns
-None, send() logs at INFO and returns normally -- it must NOT raise, since
-core/evaluator.py's _run_plan_b marks a raised exception as a job-run
-"error" (which does not retry until the NEXT window). A normal return marks
-the run "sent" for this window, but since no state persists the "owner had
-no email" fact, the very next enabled window naturally tries again once an
-email is configured -- no special-case evaluator state needed.
+Owner-without-email (ADR 0003 Decision 9): if email_lookup(job.owner_id)
+returns None, send() logs at INFO and returns False -- it must NOT raise,
+since core/evaluator.py's _run_plan_b marks a raised exception as a job-run
+"error" (which does not retry until the NEXT window). _run_plan_b persists a
+False return as job-run status "skipped_no_email" (not "sent"), so the fact
+is observable, and the very next enabled window naturally tries again once
+an email is configured -- no special-case evaluator state needed beyond the
+status value itself.
+
+S6 (CWE-295, ADR 0003 fast-follow 6b): STARTTLS is negotiated with an
+explicit ssl.create_default_context() (check_hostname=True,
+verify_mode=CERT_REQUIRED) -- never the bare no-arg starttls(), which would
+leave certificate/hostname verification to whatever default smtplib/ssl
+happen to apply. Fail-closed is preserved unchanged: if use_tls=True and the
+server does not advertise STARTTLS support, smtplib.SMTPNotSupportedError
+propagates uncaught -- there is no plaintext fallback path.
 """
 
 from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from email.message import EmailMessage
@@ -89,14 +99,14 @@ class SmtpDigestSender:
         records: list[ScrapeRecord],
         generated_at: str,
         tier2_labels: Mapping[str, str],
-    ) -> None:
+    ) -> bool:
         to_addr = self._email_lookup(job.owner_id)
         if not to_addr:
             logger.info(
                 "digest for job=%s owner=%s: no email configured, skipping "
                 "(will retry on a later window)", job.id, job.owner_id,
             )
-            return
+            return False
 
         # S2: owner-scoped read only -- never a global/unscoped registry sweep.
         registry = self._config.load(job.owner_id)
@@ -122,10 +132,15 @@ class SmtpDigestSender:
 
         with smtplib.SMTP(self._smtp.host, self._smtp.port) as client:
             if self._smtp.use_tls:
-                client.starttls()
+                # S6 (CWE-295): explicit context -- check_hostname=True,
+                # verify_mode=CERT_REQUIRED. No STARTTLS support on the
+                # server -> SMTPNotSupportedError propagates uncaught
+                # (fail-closed, never a plaintext fallback).
+                client.starttls(context=ssl.create_default_context())
             if self._smtp.username and self._smtp.password:
                 client.login(self._smtp.username, self._smtp.password)
             client.send_message(message)
+        return True
 
 
 def _clean_header_block(body: str) -> str:

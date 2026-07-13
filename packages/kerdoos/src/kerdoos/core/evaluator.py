@@ -82,7 +82,11 @@ class DigestSender(Protocol):
         records: list[ScrapeRecord],
         generated_at: str,
         tier2_labels: Mapping[str, str],
-    ) -> None:
+    ) -> bool:
+        """Returns True if the digest was actually sent, False if it was
+        skipped because the owner has no email configured (ADR 0003
+        Decision 9) -- never raise for that case, an exception means
+        job-run status 'error' instead of 'skipped_no_email'."""
         ...
 
 
@@ -224,7 +228,7 @@ async def _run_plan_b(
                 # via asyncio.to_thread so a real blocking SMTP call cannot
                 # stall the event loop while holding the semaphore slot.
                 async with send_semaphore:
-                    await asyncio.to_thread(
+                    sent = await asyncio.to_thread(
                         sender.send, job, records, now_iso, tier2_labels)
             except Exception as exc:  # noqa: BLE001 -- one job must not kill the tick
                 state_store.update_job_run(
@@ -233,12 +237,59 @@ async def _run_plan_b(
                 )
                 summary.errors += 1
                 continue
-            state_store.update_job_run(
-                job.id, window_start, status="sent", sent_at=now_iso)
-            summary.notified_jobs += 1
+            if sent:
+                state_store.update_job_run(
+                    job.id, window_start, status="sent", sent_at=now_iso)
+                summary.notified_jobs += 1
+            else:
+                # ADR 0003 Decision 9 / fast-follow observability: the owner
+                # has no email configured. Never "sent" -- the auto-resume
+                # behavior (retry on a later window) is unchanged, only the
+                # persisted status now reflects reality.
+                state_store.update_job_run(
+                    job.id, window_start, status="skipped_no_email")
+                summary.skipped_jobs += 1
         except Exception as exc:  # noqa: BLE001 -- one job must not kill the tick
             logger.warning("evaluator: job %s failed: %s", job.id, exc)
             summary.errors += 1
+
+
+async def _reap_stale_job_runs(
+    *,
+    jobs: tuple[DigestJob, ...],
+    state_store: StateStore,
+    tick_now: datetime,
+    reaper_timeout_seconds: int,
+) -> None:
+    """Reaper/TTL sweep (ADR 0003 Phase 6b fast-follow, architect addendum).
+    For every enabled job this tick, reap ITS OWN stale job_runs row (owner
+    + job_id scoped, StateStore.reap_stale_job_run) if it has sat in
+    'queued'/'running' with fired_at older than reaper_timeout_seconds --
+    e.g. the evaluator crashed mid-send on a previous tick. A stranded row
+    never gets DELETEd (transitioned to terminal 'error' only), so the
+    (job_id, window_start) idempotence key survives and that SAME window can
+    never re-fire/double-send; recovery happens at the NEXT window_start.
+
+    Runs synchronously inside evaluate_tick, BEFORE _run_plan_b's
+    has_active_job_run check, so a stranded row never permanently blocks
+    that job's per-job singleton coalescing. This placement is what makes
+    the sweep single-writer-safe without a new lock: evaluate_tick has
+    exactly two mutually-exclusive callers system-wide (run_evaluator_loop,
+    gated by should_start_intra_process_evaluator's workers<=1 guard-rail,
+    versus the CLI's cmd_digest external-cron path for workers>1) -- the
+    reaper never runs from a third entry point that could race an in-flight
+    send outside that guard."""
+    fired_before = (
+        tick_now - timedelta(seconds=reaper_timeout_seconds)).isoformat()
+    for job in jobs:
+        try:
+            state_store.reap_stale_job_run(
+                job.owner_id, job.id, fired_before=fired_before)
+        except Exception as exc:  # noqa: BLE001 -- one job must not kill the tick
+            logger.warning(
+                "evaluator: reap failed for owner=%s job=%s: %s",
+                job.owner_id, job.id, exc,
+            )
 
 
 async def evaluate_tick(
@@ -251,13 +302,20 @@ async def evaluate_tick(
     now: datetime | None = None,
     max_concurrent_sends: int = 1,
     send_semaphore: asyncio.Semaphore | None = None,
+    reaper_timeout_seconds: int = 300,
 ) -> EvaluationSummary:
-    """Run exactly ONE evaluation tick: Plan A (scrape dedup) then Plan B
-    (per-job notify). Shared by the intra-process timer (run_evaluator_loop)
-    and the `kerdoos digest` CLI (ADR 0003 Decision 8: two triggers, one
-    logic). Never raises -- a total failure to even list jobs is caught and
-    reported via EvaluationSummary.errors so a single bad tick can never
-    kill the outer loop.
+    """Run exactly ONE evaluation tick: a reaper sweep, then Plan A (scrape
+    dedup), then Plan B (per-job notify). Shared by the intra-process timer
+    (run_evaluator_loop) and the `kerdoos digest` CLI (ADR 0003 Decision 8:
+    two triggers, one logic). Never raises -- a total failure to even list
+    jobs is caught and reported via EvaluationSummary.errors so a single bad
+    tick can never kill the outer loop.
+
+    reaper_timeout_seconds (ADR 0003 Phase 6b fast-follow): the explicit
+    max-send-timeout bound _reap_stale_job_runs uses to decide a job_runs
+    row is stranded (fired_at older than this many seconds ago). Default
+    300s (5 minutes). A plain function default, not threaded through
+    Settings -- mirrors max_concurrent_sends's precedent.
 
     send_semaphore (S4, ADR 0003 Phase 6b tranche 4): the ceiling on
     simultaneously in-flight sender.send calls. By default a FRESH
@@ -288,6 +346,11 @@ async def evaluate_tick(
 
     if not jobs:
         return summary
+
+    await _reap_stale_job_runs(
+        jobs=jobs, state_store=state_store, tick_now=tick_now,
+        reaper_timeout_seconds=reaper_timeout_seconds,
+    )
 
     source_index: dict[str, dict[str, tuple]] = {}
     for owner_id in sorted({job.owner_id for job in jobs}):
@@ -328,11 +391,17 @@ async def run_evaluator_loop(
     tick_seconds: int = 60,
     stop_event: asyncio.Event | None = None,
     max_concurrent_sends: int = 1,
+    reaper_timeout_seconds: int = 300,
 ) -> None:
     """Intra-process timer: evaluate_tick every tick_seconds until
     stop_event is set. A crashing tick is caught and logged so it never
     kills the loop (the same per-item resilience discipline as Plan A/B,
     applied one level up).
+
+    reaper_timeout_seconds is forwarded to every evaluate_tick call as-is
+    (see evaluate_tick's docstring) -- interfaces/web/app.py's lifespan does
+    not pass this explicitly, so the intra-process evaluator always uses the
+    300s function default.
 
     Builds ONE send_semaphore (S4) here and reuses it across every tick of
     this loop -- ticks of the SAME loop never overlap (each await blocks the
@@ -347,6 +416,7 @@ async def run_evaluator_loop(
                 config_store=config_store, state_store=state_store,
                 router=router, parser_factory=parser_factory, sender=sender,
                 send_semaphore=send_semaphore,
+                reaper_timeout_seconds=reaper_timeout_seconds,
             )
         except Exception:  # noqa: BLE001 -- one crashed tick must not kill the loop
             logger.exception("evaluator: tick failed unexpectedly")
