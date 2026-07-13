@@ -10,6 +10,7 @@ AppService, SessionCookie) are read from app.state, built once by create_app
 
 from __future__ import annotations
 
+from autolycos.safety import DomainPolicy
 from fastapi import Depends, HTTPException, Request, status
 
 from kerdoos.core.app.auth import AuthService
@@ -23,6 +24,13 @@ def get_auth_service(request: Request) -> AuthService:
 
 def get_app_service(request: Request) -> AppService:
     return request.app.state.app_service
+
+
+def get_domain_policy(request: Request) -> DomainPolicy:
+    # Notifications digest preview (Phase 6-web): the same DomainPolicy the run
+    # path uses, so build_digest_view scheme/domain-checks preview hrefs
+    # identically (no divergence between preview and the real dispatched digest).
+    return request.app.state.domain_policy
 
 
 def get_session_cookie(request: Request) -> SessionCookie:

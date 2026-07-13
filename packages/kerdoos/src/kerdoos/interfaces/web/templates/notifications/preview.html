@@ -1,0 +1,20 @@
+{% extends "shell.html" %}
+{% block title %}Aperçu -- {{ job.name }} -- Kerdoos{% endblock %}
+{% block content %}
+<div class="main__head">
+  <h1>Aperçu du digest</h1>
+  <p class="main__subtitle">« {{ job.name }} » -- rendu tel qu'il partira par mail, à partir des dernières lectures connues.</p>
+</div>
+
+<div class="row-actions" style="justify-content: flex-start; margin-bottom: var(--space-4)">
+  <a class="btn btn--sm" href="/notifications">Retour aux notifications</a>
+</div>
+
+<div class="card">
+  {# preview_html is a self-contained email document. It is escaped by
+     autoescape INTO the srcdoc attribute (the browser decodes it, the iframe
+     isolates it) -- no |safe, and the sandbox blocks scripts/navigation. #}
+  <iframe class="digest-frame" title="Aperçu du digest rendu"
+          sandbox srcdoc="{{ preview_html }}"></iframe>
+</div>
+{% endblock %}

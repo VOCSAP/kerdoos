@@ -78,10 +78,48 @@ def tier_level(method: str | None) -> int:
     return 0
 
 
+# -- digest jobs (Phase 6-web) -------------------------------------------
+
+_TEMPLATE_LABELS = {"default": "Standard"}
+
+
+def schedule_label(job) -> str:
+    """Human-readable cadence from a DigestJob (round-trips schedule_cron).
+
+    ASCII-only to match the other presentation filters. Falls back to the raw
+    cron for any shape it does not recognise (never raises on a bad field)."""
+    fields = str(job.schedule_cron).split()
+    try:
+        if job.frequency_kind == "hourly" and len(fields) == 5:
+            return f"Chaque heure a :{int(fields[0]):02d}"
+        if job.frequency_kind == "daily" and len(fields) == 5:
+            return f"Chaque jour a {int(fields[1]):02d}:{int(fields[0]):02d}"
+    except ValueError:
+        pass
+    if job.frequency_kind == "cron":
+        return f"Cron : {job.schedule_cron}"
+    return str(job.schedule_cron)
+
+
+def frequency_label(frequency_kind: str) -> str:
+    return {
+        "hourly": "Horaire",
+        "daily": "Quotidien",
+        "cron": "Cron",
+    }.get(frequency_kind, frequency_kind)
+
+
+def template_label(template_id: str) -> str:
+    return _TEMPLATE_LABELS.get(template_id, template_id)
+
+
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 templates.env.filters["brl"] = format_brl
 templates.env.filters["status_class"] = status_class
 templates.env.filters["status_label"] = status_label
 templates.env.filters["availability_label"] = availability_label
 templates.env.filters["tier_level"] = tier_level
+templates.env.filters["schedule_label"] = schedule_label
+templates.env.filters["frequency_label"] = frequency_label
+templates.env.filters["template_label"] = template_label
 templates.env.globals["tier_ladder"] = _TIER_LADDER

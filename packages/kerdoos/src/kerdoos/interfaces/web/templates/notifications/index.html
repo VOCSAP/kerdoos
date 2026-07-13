@@ -1,0 +1,222 @@
+{% extends "shell.html" %}
+{% block title %}Notifications -- Kerdoos{% endblock %}
+{% block content %}
+<div class="main__head">
+  <h1>Notifications</h1>
+  <p class="main__subtitle">Planifiez vos digests -- quelles sources, quel rythme, quel fuseau. Un seul mail agrégé par déclenchement.</p>
+</div>
+
+{% if form_error %}<div class="banner banner--error" role="alert">{{ form_error }}</div>{% endif %}
+
+<div class="card">
+  <h2 class="card__title">Créer une notification</h2>
+
+  <div class="banner banner--warning cadence-warn" role="note">
+    <strong>Cadence &amp; furtivité.</strong> Plus la fréquence est haute, plus le risque
+    de blocage anti-bot augmente. Un rythme quotidien reste sûr ; réservez l'horaire aux besoins réels.
+    <div class="cadence-warn__hot">
+      Vous avez choisi <strong>horaire</strong> : surveillez de près les états
+      <em>indéterminés</em>, ils signalent souvent une défense qui s'active.
+    </div>
+  </div>
+
+  <form method="post" action="/notifications" class="stack" style="margin-top: var(--space-4)">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+
+    <div class="field">
+      <label class="field__label" for="name">Nom</label>
+      <input class="input" id="name" name="name" required maxlength="120"
+             placeholder="ex: Veille GPU quotidienne">
+    </div>
+
+    <fieldset class="freq-fieldset">
+      <span class="field__label">Fréquence</span>
+      <div class="segmented" role="radiogroup" aria-label="Fréquence">
+        <input class="seg-hourly" type="radio" name="frequency_kind" id="freq-hourly" value="hourly">
+        <label for="freq-hourly">Horaire</label>
+        <input class="seg-daily" type="radio" name="frequency_kind" id="freq-daily" value="daily" checked>
+        <label for="freq-daily">Quotidien</label>
+        <input class="seg-cron" type="radio" name="frequency_kind" id="freq-cron" value="cron">
+        <label for="freq-cron">Cron</label>
+      </div>
+
+      <div class="freq-group freq-group--hourly field">
+        <label class="field__label" for="minute-h">Minute de l'heure</label>
+        <input class="input" id="minute-h" name="minute" type="number" min="0" max="59" value="0">
+        <span class="field__hint">0 à 59 -- déclenché chaque heure à cette minute.</span>
+      </div>
+
+      <div class="freq-group freq-group--daily">
+        <div class="form--inline">
+          <div class="field">
+            <label class="field__label" for="hour-d">Heure</label>
+            <input class="input" id="hour-d" name="hour" type="number" min="0" max="23" value="8">
+          </div>
+          <div class="field">
+            <label class="field__label" for="minute-d">Minute</label>
+            <input class="input" id="minute-d" name="minute" type="number" min="0" max="59" value="0">
+          </div>
+        </div>
+        <span class="field__hint">Déclenché chaque jour à cette heure locale.</span>
+      </div>
+
+      <div class="freq-group freq-group--cron field">
+        <label class="field__label" for="cron">Expression cron</label>
+        <input class="input" id="cron" name="cron_expr" placeholder="*/30 * * * *"
+               style="font-family: var(--font-data)">
+        <span class="field__hint">5 champs standard : min heure jour mois jour-semaine.</span>
+      </div>
+    </fieldset>
+
+    <div class="form--inline">
+      <div class="field">
+        <label class="field__label" for="timezone">Fuseau (IANA)</label>
+        <select class="select" id="timezone" name="timezone">
+          {% for tz in timezones %}
+          <option value="{{ tz }}" {% if tz == 'America/Sao_Paulo' %}selected{% endif %}>{{ tz }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field__label" for="template_id">Gabarit</label>
+        <select class="select" id="template_id" name="template_id">
+          {% for tid in template_ids %}
+          <option value="{{ tid }}">{{ tid | template_label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="field__label">Options du digest</span>
+      <label class="check" style="border: 0; padding-left: 0">
+        <input type="checkbox" name="show_pix" value="1" checked>
+        <span class="check__name">Afficher le prix Pix</span>
+      </label>
+      <label class="check" style="border: 0; padding-left: 0">
+        <input type="checkbox" name="show_card" value="1" checked>
+        <span class="check__name">Afficher le prix carte</span>
+      </label>
+    </div>
+
+    <div class="field">
+      <label class="field__label" for="threshold">Seuil de variation (%)</label>
+      <input class="input" id="threshold" name="variation_threshold_pct" type="number"
+             min="0" max="100" step="0.1" placeholder="optionnel">
+      <span class="field__hint">Ne notifier qu'au-delà de cette variation. Vide = toute variation.</span>
+    </div>
+
+    <div class="field">
+      <span class="field__label">Sources surveillées</span>
+      {% if sources %}
+      <div class="check-list">
+        {% for s in sources %}
+        <label class="check">
+          <input type="checkbox" name="source_ids" value="{{ s.source_id }}">
+          <span class="check__name">{{ s.product_name }}</span>
+          <span class="check__site">{{ s.site }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <span class="field__hint">Cochez les sources à inclure. Modifiable ensuite par notification.</span>
+      {% else %}
+      <p class="main__subtitle">Aucune source disponible. Ajoutez d'abord des produits et sources dans « Produits ».</p>
+      {% endif %}
+    </div>
+
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">Créer la notification</button>
+    </div>
+  </form>
+</div>
+
+{% if jobs %}
+{% for job in jobs %}
+<div class="card" id="job-{{ job.id }}">
+  <div class="spread">
+    <h2 class="card__title">{{ job.name }}</h2>
+    {% if job.enabled %}
+    <span class="badge badge--on"><span class="badge__dot"></span>Active</span>
+    {% else %}
+    <span class="badge badge--paused"><span class="badge__dot"></span>Suspendue</span>
+    {% endif %}
+  </div>
+
+  <div class="job-meta">
+    <div class="job-meta__item">
+      <span class="job-meta__k">Rythme</span>
+      <span class="job-meta__v">{{ job | schedule_label }}</span>
+    </div>
+    <div class="job-meta__item">
+      <span class="job-meta__k">Fuseau</span>
+      <span class="job-meta__v">{{ job.timezone }}</span>
+    </div>
+    <div class="job-meta__item">
+      <span class="job-meta__k">Gabarit</span>
+      <span class="job-meta__v">{{ job.template_id | template_label }}</span>
+    </div>
+    <div class="job-meta__item">
+      <span class="job-meta__k">Sources</span>
+      <span class="job-meta__v">{{ job.source_ids | length }}</span>
+    </div>
+  </div>
+
+  {% if job.source_ids %}
+  <table class="table">
+    <thead><tr><th>Produit</th><th>Marchand</th><th></th></tr></thead>
+    <tbody>
+      {% for sid in job.source_ids %}
+      {% set src = source_by_id.get(sid) %}
+      <tr id="job-{{ job.id }}-src-{{ sid }}">
+        <td class="name">{% if src %}{{ src.product_name }}{% else %}{{ sid }}{% endif %}</td>
+        <td>{% if src %}{{ src.site }}{% else %}--{% endif %}</td>
+        <td class="row-actions">
+          <button class="btn btn--danger btn--sm" type="button"
+                  hx-delete="/notifications/{{ job.id }}/sources/{{ sid }}"
+                  hx-confirm="Retirer cette source de la notification ?">Retirer</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="main__subtitle">Aucune source liée -- le digest serait vide.</p>
+  {% endif %}
+
+  {% if sources %}
+  <form method="post" action="/notifications/{{ job.id }}/sources" class="form--inline" style="margin-top: var(--space-3)">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <div class="field">
+      <label class="field__label" for="add-src-{{ job.id }}">Ajouter une source</label>
+      <select class="select" id="add-src-{{ job.id }}" name="source_id" required>
+        <option value="" disabled selected>Choisir une source</option>
+        {% for s in sources %}
+        <option value="{{ s.source_id }}">{{ s.product_name }} -- {{ s.site }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-actions">
+      <button class="btn" type="submit">Lier</button>
+    </div>
+  </form>
+  {% endif %}
+
+  <div class="row-actions" style="margin-top: var(--space-4)">
+    <a class="btn btn--sm" href="/notifications/{{ job.id }}/preview">Aperçu du digest</a>
+    <form method="post" action="/notifications/{{ job.id }}/enabled" style="display: inline">
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+      <button class="btn btn--sm" type="submit">{% if job.enabled %}Suspendre{% else %}Activer{% endif %}</button>
+    </form>
+    <button class="btn btn--danger btn--sm" type="button"
+            hx-delete="/notifications/{{ job.id }}"
+            hx-confirm="Supprimer « {{ job.name }} » ?">Supprimer</button>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="state">
+  <p class="state__title">Aucune notification.</p>
+  <p>Créez-en une ci-dessus pour recevoir un digest planifié.</p>
+</div>
+{% endif %}
+{% endblock %}

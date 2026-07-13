@@ -119,6 +119,9 @@ def create_app() -> FastAPI:
         SqliteAuthStore(settings.config_db), Argon2Hasher())
     app.state.app_service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
+    # Exposed for the Notifications digest preview (Phase 6-web): build_digest_view
+    # needs the SAME DomainPolicy the run path uses to scheme/domain-check hrefs.
+    app.state.domain_policy = domain_policy
     app.state.session_cookie = SessionCookie(secret, secure=settings.cookie_secure)
     # CSRF tokens are derived from this same secret (domain-separated by a
     # b"csrf:" prefix inside csrf.issue_csrf), so no separate key to manage.

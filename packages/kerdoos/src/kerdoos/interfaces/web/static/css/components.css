@@ -221,3 +221,106 @@
 .row-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
 .stack { display: flex; flex-direction: column; gap: var(--space-4); }
 .spread { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+
+/* ======================================================================== */
+/* Phase 6-web additions -- Notifications (digest jobs).                     */
+/* NEW primitives, all token-based (no raw hex) so the dark fast-follow      */
+/* inherits them. Flagged here rather than introduced silently.             */
+/* ======================================================================== */
+
+/* --- Warning banner: the anti-bot cadence caution. A THIRD voice, distinct
+ * from error (clay) and success (aqua) -- uses the pre-existing --warning
+ * token (bronze-adjacent), because "watching too eagerly gets you blocked" is
+ * a caution, not a failure. Not an error red, not a neutral hint. */
+.banner--warning {
+  /* Derived from the --warning primitive, not a raw hex: the dark fast-follow
+   * inherits it automatically once --warning is overridden. */
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface-1));
+  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--surface-1));
+}
+.banner--warning strong { color: var(--text-primary); }
+/* Escalates when the highest cadence (hourly) is selected: the caution earns
+ * a heavier left rule, quietly, without shouting. */
+.cadence-warn__hot { display: none; margin-top: var(--space-2); }
+.freq-fieldset:has(.seg-hourly:checked) .cadence-warn { border-left: 3px solid var(--warning); }
+.freq-fieldset:has(.seg-hourly:checked) .cadence-warn__hot { display: block; }
+
+/* --- Enabled / paused badge. Operational state of a JOB -- deliberately NOT
+ * a .signal. The three-state signal is reserved for product determinacy
+ * (invariant #3); conflating "job paused" with "reading indeterminate" would
+ * corrupt the signature. So a job gets its own, quieter badge. */
+.badge {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  padding: 2px var(--space-2);
+  font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.02em;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  color: var(--text-tertiary); background: var(--surface-2);
+}
+.badge__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.badge--on     { color: var(--state-ok); background: var(--state-ok-bg); border-color: transparent; }
+.badge--paused { color: var(--text-tertiary); background: var(--surface-2); }
+
+/* --- Segmented control: cadence kind (hourly / daily / cron). Radios styled
+ * as a single instrument switch. The native radios stay in the DOM (keyboard
+ * + a11y); labels are the visible faces. */
+.segmented { display: inline-flex; border: 1px solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
+.segmented input { position: absolute; opacity: 0; pointer-events: none; }
+.segmented label {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm); font-weight: 500; color: var(--text-secondary);
+  background: var(--surface-1); cursor: pointer;
+  border-right: 1px solid var(--control-border);
+  transition: background 120ms ease, color 120ms ease;
+}
+.segmented label:last-of-type { border-right: 0; }
+.segmented label:hover { background: var(--surface-2); }
+.segmented input:checked + label { background: var(--brand); color: var(--brand-contrast); }
+.segmented input:focus-visible + label { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+/* --- Conditional cadence sub-fields. Revealed by the segmented radio via
+ * :has(). Degrades gracefully: without :has() support, all three groups stay
+ * visible (the server ignores the irrelevant ones per frequency_kind). */
+.freq-group { margin-top: var(--space-4); }
+.freq-fieldset { border: 0; padding: 0; margin: 0; }
+.freq-fieldset:has(.seg-daily:checked)  .freq-group--hourly,
+.freq-fieldset:has(.seg-cron:checked)   .freq-group--hourly,
+.freq-fieldset:has(.seg-hourly:checked) .freq-group--daily,
+.freq-fieldset:has(.seg-cron:checked)   .freq-group--daily,
+.freq-fieldset:has(.seg-hourly:checked) .freq-group--cron,
+.freq-fieldset:has(.seg-daily:checked)  .freq-group--cron { display: none; }
+
+/* --- Source picker: a scrollable checkbox roster. No multi-select primitive
+ * existed; a native <select multiple> is unstyleable and hides the merchant.  */
+.check-list {
+  display: flex; flex-direction: column;
+  max-height: 220px; overflow-y: auto;
+  border: 1px solid var(--control-border); border-radius: var(--radius-sm);
+  background: var(--control-bg);
+}
+.check {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer; font-size: var(--text-sm); color: var(--text-secondary);
+}
+.check:last-child { border-bottom: 0; }
+.check:hover { background: var(--surface-2); }
+.check input { accent-color: var(--brand); flex: none; }
+.check__site { font-family: var(--font-data); font-size: var(--text-xs); color: var(--text-tertiary); }
+.check__name { color: var(--text-primary); font-weight: 500; }
+
+/* --- Job card meta row: schedule / tz / template / source count. */
+.job-meta { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-3) 0; }
+.job-meta__item { font-size: var(--text-sm); color: var(--text-secondary); }
+.job-meta__k { font-size: var(--text-xs); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 2px; }
+.job-meta__v { font-family: var(--font-data); color: var(--text-primary); }
+
+/* --- Digest preview: the rendered email in a sandboxed iframe. Serif lives
+ * inside the digest document itself (.digest); this only frames it. */
+.digest-frame {
+  width: 100%; min-height: 520px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-md);
+  background: var(--surface-1);
+}

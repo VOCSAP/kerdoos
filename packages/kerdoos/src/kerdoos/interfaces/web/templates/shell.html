@@ -19,6 +19,7 @@
   <nav class="sidebar" aria-label="Navigation principale">
     <a class="nav__link" href="/"        {% if active == 'dashboard' %}aria-current="page"{% endif %}>Tableau de veille</a>
     <a class="nav__link" href="/products" {% if active == 'products' %}aria-current="page"{% endif %}>Produits</a>
+    <a class="nav__link" href="/notifications" {% if active == 'notifications' %}aria-current="page"{% endif %}>Notifications</a>
     <a class="nav__link" href="/profile"  {% if active == 'profile' %}aria-current="page"{% endif %}>Profil</a>
     {% if principal and principal.role == 'admin' %}
     <div class="nav__section">Admin</div>
