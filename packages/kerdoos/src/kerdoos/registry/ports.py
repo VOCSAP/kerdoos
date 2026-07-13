@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+from zoneinfo import available_timezones
 
 from kerdoos.parsers.ports import ParserSpec
 
@@ -167,6 +168,20 @@ def normalize_schedule(
                 f"{cron_expr!r}")
         return cron_expr
     raise ValueError(f"unknown frequency_kind {frequency_kind!r}")
+
+
+def validate_timezone(timezone: str) -> None:
+    """Reject an unknown/malformed IANA timezone string at authoring time
+    (ADR 0003 Phase 6b, architect finding #8).
+
+    A malformed tz must never reach storage: zoneinfo.ZoneInfo(bad_tz) would
+    otherwise only fail later, at evaluator tick time (core/scheduler.py),
+    where a per-job try/except isolates the crash from other jobs but still
+    silently strands that job forever. Checking here, at create_job/update_job
+    time, fails closed and gives the caller an actionable error immediately.
+    """
+    if timezone not in available_timezones():
+        raise ValueError(f"unknown IANA timezone {timezone!r}")
 
 
 @dataclass(frozen=True, slots=True)

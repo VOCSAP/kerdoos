@@ -53,9 +53,22 @@ class JobRun:
 
     job_id: str
     owner_id: str
-    window_start: str             # ISO-8601 UTC, start of the evaluator tick window
+    # ISO-8601 UTC. NOT the raw evaluator tick timestamp -- the most recent
+    # occurrence of the job's OWN cron schedule (in the job's own IANA tz)
+    # that is <= the tick time, quantized via
+    # core.scheduler.compute_window_start (ADR 0003 Phase 6b, architect
+    # finding #5). A daily job ticked every 60s must resolve to the SAME
+    # window_start for every tick within that day's window, or the
+    # (job_id, window_start) idempotence key below is defeated and the job
+    # re-fires on every tick.
+    window_start: str
     fired_at: str                 # ISO-8601 UTC, when the evaluator actually ran this
-    status: str                   # 'sent' | 'skipped' | 'error' (6b defines the enum)
+    # 'queued' | 'running' | 'sent' | 'skipped' | 'skipped_no_email' | 'error'
+    # (Phase 6a persisted only 'sent'/'skipped'/'error'; Phase 6b adds
+    # 'queued'/'running' as the evaluator's own in-flight states -- see
+    # StateStore.has_active_job_run -- and 'skipped_no_email' for an owner
+    # without an email at send time, ADR 0003 Decision 9).
+    status: str
     sent_at: str | None = None
     error: str | None = None
 
@@ -87,4 +100,28 @@ class StateStore(Protocol):
         record for (job_id, window_start), False if it was already recorded
         (idempotent no-op -- ADR 0003 Decision 3 idempotence key). Never
         raises on a duplicate; the bool return is the only signal."""
+        ...
+
+    def update_job_run(
+        self,
+        job_id: str,
+        window_start: str,
+        *,
+        status: str,
+        sent_at: str | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Transition an EXISTING (job_id, window_start) row's status
+        (Phase 6b lifecycle -- ADR 0003 architect finding #6, e.g.
+        'queued' -> 'running' -> 'sent'/'skipped'/'error'). Returns True if a
+        row was found and updated, False if no row exists for that
+        (job_id, window_start) pair (never raises on a missing row)."""
+        ...
+
+    def has_active_job_run(self, owner: str, job_id: str) -> bool:
+        """True while `job_id` (scoped to `owner`, IDOR-safe double-scoping
+        per ADR 0003 finding S2) has a job_runs row with status 'queued' or
+        'running' -- the per-job singleton coalescing check: the evaluator
+        must skip a tick for a job that is still in flight from a previous
+        tick (ADR 0003 Decision 4 / architect finding #6)."""
         ...

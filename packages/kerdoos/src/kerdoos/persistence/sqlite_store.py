@@ -235,6 +235,47 @@ class SqliteStateStore:
             )
         return cur.rowcount == 1
 
+    def update_job_run(
+        self,
+        job_id: str,
+        window_start: str,
+        *,
+        status: str,
+        sent_at: str | None = None,
+        error: str | None = None,
+    ) -> bool:
+        # No owner_id filter here BY DESIGN: (job_id, window_start) is the
+        # PRIMARY KEY (already globally unique), so there is nothing to scope
+        # further -- unlike record_job_run's INSERT (which carries owner_id
+        # to persist it), an UPDATE targeting the PK cannot cross tenants.
+        with self._op() as conn:
+            cur = conn.execute(
+                """
+                UPDATE job_runs
+                SET status = ?, sent_at = ?, error = ?
+                WHERE job_id = ? AND window_start = ?
+                """,
+                (status, sent_at, error, job_id, window_start),
+            )
+        return cur.rowcount == 1
+
+    def has_active_job_run(self, owner: str, job_id: str) -> bool:
+        # Double-scoping IDOR defense (ADR 0003 finding S2): owner_id is
+        # filtered INLINE here even though job_id alone would already be a
+        # UUID (practically unguessable) -- same discipline as every other
+        # StateStore method, never trust a bare job_id at face value.
+        with self._op() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM job_runs
+                WHERE owner_id = ? AND job_id = ?
+                  AND status IN ('queued', 'running')
+                LIMIT 1
+                """,
+                (owner, job_id),
+            ).fetchone()
+        return row is not None
+
     def close(self) -> None:
         # No-op: connection-per-operation holds no long-lived connection.
         return None

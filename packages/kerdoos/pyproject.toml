@@ -16,6 +16,10 @@ dependencies = [
     # Argon2id password hashing (Phase 3 auth). argon2-cffi is the reference
     # binding; used for owner passwords + the anti-enumeration dummy verify.
     "argon2-cffi>=23.1",
+    # Cron evaluation (Phase 6b, ADR 0003 Decision 2/Q-b) + IANA tz database
+    # (zoneinfo is stdlib 3.9+ but ships no data on slim images).
+    "croniter>=2.0",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

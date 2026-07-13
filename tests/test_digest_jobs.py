@@ -132,6 +132,38 @@ class CreateJobTest(_DigestJobsTestBase):
             Principal(owner_id="owner2"),
             DigestJobSpec(name="dup", frequency_kind="hourly"))
 
+    def test_create_job_accepts_known_iana_timezone(self) -> None:
+        principal = Principal(owner_id="owner1")
+        job = self.service.create_job(
+            principal, DigestJobSpec(
+                name="job1", frequency_kind="hourly",
+                timezone="America/Sao_Paulo"))
+        self.assertEqual(job.timezone, "America/Sao_Paulo")
+
+    def test_create_job_rejects_unknown_timezone(self) -> None:
+        # Architect finding #8: a malformed tz must never reach storage --
+        # the evaluator (core/scheduler.py) needs a valid zoneinfo.ZoneInfo
+        # to compute window_start for this job.
+        principal = Principal(owner_id="owner1")
+        with self.assertRaises(ValueError):
+            self.service.create_job(
+                principal, DigestJobSpec(
+                    name="job1", frequency_kind="hourly",
+                    timezone="Not/A_Zone"))
+
+    def test_update_job_rejects_unknown_timezone(self) -> None:
+        principal = Principal(owner_id="owner1")
+        job = self.service.create_job(
+            principal, DigestJobSpec(name="job1", frequency_kind="hourly"))
+        with self.assertRaises(ValueError):
+            self.service.update_job(
+                "owner1", job.id,
+                DigestJobSpec(
+                    name="job1", frequency_kind="hourly",
+                    timezone="Not/A_Zone"))
+        # Untouched by the rejected update.
+        self.assertEqual(self.service.get_job("owner1", job.id).timezone, "UTC")
+
 
 class IdorTest(_DigestJobsTestBase):
     """The double-scoping IDOR defense (ADR 0003 finding S2): a source_id
@@ -359,6 +391,62 @@ class JobRunTest(unittest.TestCase):
         )
         self.assertTrue(self.state.record_job_run(run1))
         self.assertTrue(self.state.record_job_run(run2))
+
+    # -- Phase 6b lifecycle (architect finding #6) -----------------------
+
+    def test_update_job_run_transitions_existing_row(self) -> None:
+        run = JobRun(
+            job_id="job1", owner_id="owner1", window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="queued",
+        )
+        self.assertTrue(self.state.record_job_run(run))
+        ok = self.state.update_job_run(
+            "job1", "2026-07-10T00:00:00+00:00",
+            status="running")
+        self.assertTrue(ok)
+        ok = self.state.update_job_run(
+            "job1", "2026-07-10T00:00:00+00:00",
+            status="sent", sent_at="2026-07-10T00:00:06+00:00")
+        self.assertTrue(ok)
+
+    def test_update_job_run_missing_row_returns_false(self) -> None:
+        ok = self.state.update_job_run(
+            "no-such-job", "2026-07-10T00:00:00+00:00", status="running")
+        self.assertFalse(ok)
+
+    def test_has_active_job_run_true_while_queued_or_running(self) -> None:
+        run = JobRun(
+            job_id="job1", owner_id="owner1", window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="queued",
+        )
+        self.state.record_job_run(run)
+        self.assertTrue(self.state.has_active_job_run("owner1", "job1"))
+        self.state.update_job_run(
+            "job1", "2026-07-10T00:00:00+00:00", status="running")
+        self.assertTrue(self.state.has_active_job_run("owner1", "job1"))
+
+    def test_has_active_job_run_false_once_terminal(self) -> None:
+        run = JobRun(
+            job_id="job1", owner_id="owner1", window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="queued",
+        )
+        self.state.record_job_run(run)
+        self.state.update_job_run(
+            "job1", "2026-07-10T00:00:00+00:00",
+            status="sent", sent_at="2026-07-10T00:00:06+00:00")
+        self.assertFalse(self.state.has_active_job_run("owner1", "job1"))
+
+    def test_has_active_job_run_is_owner_scoped(self) -> None:
+        # Double-scoping IDOR defense (finding S2): a job_id shared by
+        # coincidence (or forged) across two owners must not leak activity
+        # state across the tenant boundary.
+        run = JobRun(
+            job_id="shared-id", owner_id="ownerA", window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="running",
+        )
+        self.state.record_job_run(run)
+        self.assertTrue(self.state.has_active_job_run("ownerA", "shared-id"))
+        self.assertFalse(self.state.has_active_job_run("ownerB", "shared-id"))
 
 
 if __name__ == "__main__":

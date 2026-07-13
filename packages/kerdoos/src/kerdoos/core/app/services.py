@@ -35,6 +35,7 @@ from kerdoos.registry.ports import (
     normalize_schedule,
     parse_job_options,
     validate_product_key,
+    validate_timezone,
 )
 from kerdoos.registry.url_validation import validate_source_url
 
@@ -84,6 +85,13 @@ class DigestJobSpec:
     template_id: str = "default"
     options: dict = field(default_factory=dict)
     enabled: bool = True
+    # create_job-ONLY (ADR 0003 Phase 6b, architect finding #7): source
+    # linking at creation goes through this field, but AppService.update_job
+    # NEVER reads it -- relinking sources on an existing job is only done via
+    # add_job_source/remove_job_source. Passing a changed source_ids to
+    # update_job is silently a no-op for linkage (the returned DigestJob's
+    # source_ids is still accurate, since the store reloads it fresh from DB
+    # regardless of this field's value).
     source_ids: tuple[str, ...] = ()
 
 
@@ -195,6 +203,10 @@ class AppService:
             spec.frequency_kind, minute=spec.minute, hour=spec.hour,
             cron_expr=spec.cron_expr,
         )
+        # Fail-closed on a malformed IANA tz (finding #8): must never reach
+        # storage, since the evaluator (core/scheduler.py) needs a valid
+        # zoneinfo.ZoneInfo to compute window_start for this job.
+        validate_timezone(spec.timezone)
         options = parse_job_options(spec.options)
         job = DigestJob(
             id=str(uuid.uuid4()), owner_id=principal.owner_id, name=spec.name,
@@ -218,12 +230,16 @@ class AppService:
     def update_job(
         self, owner: str, job_id: str, spec: DigestJobSpec
     ) -> DigestJob:
+        # NOTE (finding #7): spec.source_ids is intentionally IGNORED here --
+        # see DigestJobSpec.source_ids docstring. Use add_job_source/
+        # remove_job_source to change an existing job's linked sources.
         if not owner:
             raise ValueError("owner must not be empty")
         schedule_cron = normalize_schedule(
             spec.frequency_kind, minute=spec.minute, hour=spec.hour,
             cron_expr=spec.cron_expr,
         )
+        validate_timezone(spec.timezone)
         options = parse_job_options(spec.options)
         job = DigestJob(
             id=job_id, owner_id=owner, name=spec.name,
