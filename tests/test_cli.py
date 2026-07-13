@@ -18,9 +18,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from datetime import datetime, timezone
+
+from autolycos.router import StaticRouter
+
+from kerdoos.core.app.services import (
+    AppService, DigestJobSpec, Principal, ProductSpec)
 from kerdoos.core.domain import Availability, ScrapeStatus
 from kerdoos.interfaces.cli import main as cli
+from kerdoos.parsers.factory import build_parser
+from kerdoos.parsers.ports import ParserSpec
 from kerdoos.persistence.ports import ScrapeRecord
+from kerdoos.persistence.sqlite_store import SqliteStateStore
+from kerdoos.registry.domain_policy import CatalogueDomainPolicy
+from kerdoos.registry.ports import SiteConfig
+from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 _SITES = """\
 sites:
@@ -94,6 +106,65 @@ class CliResilienceTest(unittest.TestCase):
         self.assertIn("simulated adapter blowup", out)   # failed source degraded
         self.assertIn("ok=1", out)                        # good source survived
         self.assertIn("indeterminate=1", out)
+
+
+_DIGEST_SITE = SiteConfig(
+    name="kabum", fetcher="http", domain="kabum.com.br",
+    parser=ParserSpec(kind="statejson", pix="a", card="b", availability="c"),
+)
+
+
+class CliDigestTest(unittest.TestCase):
+    """`kerdoos digest` (ADR 0003 Decision 8): one evaluate_tick, then exit.
+
+    Seeds a FRESH scrape history so Plan A finds nothing stale to scrape --
+    keeps this test hermetic (no network) without monkeypatching the
+    scraper, unlike CliResilienceTest above.
+    """
+
+    def test_one_tick_notifies_and_prints_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            config_db = d / "config.db"
+            state_db = d / "state.db"
+
+            config_store = SqliteConfigStore(config_db)
+            state_store = SqliteStateStore(state_db)
+            domain_policy = CatalogueDomainPolicy(config_store)
+            router = StaticRouter(domain_policy)
+            service = AppService(
+                config_store, state_store, router, domain_policy, build_parser)
+            config_store.add_site(_DIGEST_SITE)
+            service.add_product("owner1", ProductSpec("p1"))
+            source = service.add_source(
+                "owner1", "p1", "kabum", "https://www.kabum.com.br/p/1")
+            service.create_job(
+                Principal(owner_id="owner1"),
+                DigestJobSpec(
+                    name="job1", frequency_kind="hourly",
+                    source_ids=(source.source_id,)))
+            state_store.record("owner1", ScrapeRecord(
+                source_id=source.source_id,
+                ts=datetime.now(timezone.utc).isoformat(),
+                status=ScrapeStatus.OK, price_pix_cents=100,
+                price_card_cents=110, currency="BRL",
+                availability=Availability.IN_STOCK, method="http", error=None,
+            ))
+            config_store.close()
+            state_store.close()
+
+            digest_args = cli.build_parser_cli().parse_args([
+                "digest", "--config-db", str(config_db), "--db", str(state_db)])
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.cmd_digest(digest_args)
+
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("scraped_sources=0", out)  # fresh history, no scrape
+        self.assertIn("notified_jobs=1", out)
+        self.assertIn("skipped_jobs=0", out)
+        self.assertIn("errors=0", out)
 
 
 if __name__ == "__main__":

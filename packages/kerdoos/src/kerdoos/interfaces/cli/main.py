@@ -7,6 +7,10 @@ layer (invariant #9: core is a library, CLI stays a thin interface).
 
 Commands:
   run              scrape every configured source for --owner, print the digest
+  digest           run ONE digest-jobs evaluation tick across ALL owners, then
+                    exit (ADR 0003 Decision 8; for external cron when
+                    KERDOOS_WORKERS > 1 -- shares evaluate_tick with the
+                    WebUI's intra-process evaluator, never two implementations)
   config import    upsert sites.yaml (+ products.yaml if --owner given) into config.db
   config export    write config.db back out to sites.yaml/products.yaml
   user bootstrap   create a minimal owner row (no auth in Phase 1 -- Phase 3)
@@ -15,6 +19,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import uuid
 from pathlib import Path
 
@@ -22,7 +27,9 @@ import yaml
 from autolycos.router import StaticRouter
 
 from kerdoos.core.app.services import AppService, Principal, ProductSpec
+from kerdoos.core.evaluator import evaluate_tick
 from kerdoos.digest.render import render_digest
+from kerdoos.digest.sender import LogDigestSender
 from kerdoos.parsers.factory import build_parser
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.ports import SiteConfig
@@ -51,6 +58,33 @@ def cmd_run(args: argparse.Namespace) -> int:
         config_store.close()
         state_store.close()
     print(render_digest(result.records, result.generated_at, result.tier2_labels))
+    return 0
+
+
+def cmd_digest(args: argparse.Namespace) -> int:
+    """Run exactly ONE digest-jobs evaluation tick across ALL owners, then
+    exit (ADR 0003 Decision 8). Shares evaluate_tick with the WebUI's
+    intra-process evaluator (kerdoos.core.evaluator) -- the CLI is the
+    external-cron trigger for KERDOOS_WORKERS > 1 deployments, never a
+    second implementation of the tick logic."""
+    _service, config_store, state_store = _build_app_service(args.config_db, args.db)
+    domain_policy = CatalogueDomainPolicy(config_store)
+    router = StaticRouter(domain_policy)
+    try:
+        summary = asyncio.run(evaluate_tick(
+            config_store=config_store, state_store=state_store,
+            router=router, parser_factory=build_parser,
+            sender=LogDigestSender(),
+        ))
+    finally:
+        config_store.close()
+        state_store.close()
+    print(
+        f"scraped_sources={summary.scraped_sources} "
+        f"notified_jobs={summary.notified_jobs} "
+        f"skipped_jobs={summary.skipped_jobs} "
+        f"errors={summary.errors}"
+    )
     return 0
 
 
@@ -199,6 +233,19 @@ def build_parser_cli() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true", default=True,
                      help="render digest to stdout, do not send mail (default)")
     run.set_defaults(func=cmd_run)
+
+    digest = sub.add_parser(
+        "digest",
+        help="run one digest-jobs evaluation tick across ALL owners, then exit "
+             "(ADR 0003 Decision 8 -- for external cron when KERDOOS_WORKERS > 1)")
+    digest.add_argument("--config-db", default="config.db",
+                        help="SQLite ConfigStore path")
+    digest.add_argument("--db", default="kerdoos.db",
+                        help="SQLite state store path (connection-per-operation; "
+                             "':memory:' is a distinct in-memory DB per connection "
+                             "and loses all data between operations, use a real "
+                             "file path even for ephemeral runs)")
+    digest.set_defaults(func=cmd_digest)
 
     config = sub.add_parser("config", help="manage config.db")
     config_sub = config.add_subparsers(dest="config_command", required=True)

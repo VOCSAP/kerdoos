@@ -17,6 +17,11 @@ import-time state and make per-test app instances impossible.)
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -29,6 +34,9 @@ from autolycos.router import StaticRouter
 from kerdoos.config import get_settings
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import AppService
+from kerdoos.core.evaluator import (
+    run_evaluator_loop, should_start_intra_process_evaluator)
+from kerdoos.digest.sender import LogDigestSender
 from kerdoos.interfaces.web import health
 from kerdoos.interfaces.web.routers import admin, protected, public, web
 from kerdoos.interfaces.web.security import SessionCookie
@@ -40,6 +48,7 @@ from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 _STATIC_DIR = Path(__file__).parent / "static"
+logger = logging.getLogger(__name__)
 
 
 def _wants_html(request: Request) -> bool:
@@ -71,7 +80,40 @@ def create_app() -> FastAPI:
     domain_policy = CatalogueDomainPolicy(config_store)
     router = StaticRouter(domain_policy)
 
-    app = FastAPI(title="Kerdoos")
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # Default OFF (KERDOOS_DIGEST_EVALUATOR_ENABLED unset/false): this
+        # branch is a true no-op, so the 3 pre-existing TestClient(create_app())
+        # test files see zero behavior change (pytest.md rule -- every new
+        # lifespan worker must be gated behind an explicit opt-in).
+        evaluator_task: asyncio.Task | None = None
+        stop_event = asyncio.Event()
+        if settings.digest_evaluator_enabled:
+            if should_start_intra_process_evaluator(settings.workers):
+                evaluator_task = asyncio.create_task(
+                    run_evaluator_loop(
+                        config_store=config_store, state_store=state_store,
+                        router=router, parser_factory=build_parser,
+                        sender=LogDigestSender(), stop_event=stop_event,
+                    )
+                )
+            else:
+                logger.warning(
+                    "digest evaluator: KERDOOS_WORKERS=%d > 1, refusing to "
+                    "start the intra-process evaluator (ADR 0003 Decision 4) "
+                    "-- use external cron calling `kerdoos digest` instead.",
+                    settings.workers,
+                )
+        try:
+            yield
+        finally:
+            if evaluator_task is not None:
+                stop_event.set()
+                evaluator_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await evaluator_task
+
+    app = FastAPI(title="Kerdoos", lifespan=_lifespan)
     app.state.auth_service = AuthService(
         SqliteAuthStore(settings.config_db), Argon2Hasher())
     app.state.app_service = AppService(

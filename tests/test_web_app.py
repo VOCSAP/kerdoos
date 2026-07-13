@@ -49,5 +49,55 @@ class HealthTest(unittest.TestCase):
         self.assertIsNot(app_a, app_b)
 
 
+class DigestEvaluatorLifespanTest(unittest.TestCase):
+    """ADR 0003 Decision 4/8: the intra-process evaluator lifespan task is
+    opt-in (KERDOOS_DIGEST_EVALUATOR_ENABLED, default off) and refuses to
+    start when KERDOOS_WORKERS > 1 (each worker process would double-fire
+    jobs). These tests use `with TestClient(...) as client:` explicitly --
+    unlike HealthTest above -- since the ASGI lifespan only runs inside that
+    context manager (pytest.md rule)."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="kerdoos-web-lifespan-")
+        self.addCleanup(shutil.rmtree, self._dir, ignore_errors=True)
+        self._base_env = {
+            "KERDOOS_SESSION_SECRET": "test-session-secret-padded-to-32chars",
+            "KERDOOS_CONFIG_DB": os.path.join(self._dir, "config.db"),
+            "KERDOOS_STATE_DB": os.path.join(self._dir, "state.db"),
+            "KERDOOS_COOKIE_SECURE": "false",
+        }
+
+    def _patch_env(self, **overrides: str) -> None:
+        patcher = mock.patch.dict(os.environ, {**self._base_env, **overrides})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_default_off_starts_and_stops_cleanly(self) -> None:
+        self._patch_env()  # KERDOOS_DIGEST_EVALUATOR_ENABLED unset -> False
+        with TestClient(create_app()) as client:
+            resp = client.get("/health")
+            self.assertEqual(resp.status_code, 200)
+
+    def test_enabled_with_workers_1_starts_and_stops_cleanly(self) -> None:
+        self._patch_env(
+            KERDOOS_DIGEST_EVALUATOR_ENABLED="true", KERDOOS_WORKERS="1")
+        with TestClient(create_app()) as client:
+            resp = client.get("/health")
+            self.assertEqual(resp.status_code, 200)
+
+    def test_enabled_with_workers_gt_1_refuses_and_warns(self) -> None:
+        self._patch_env(
+            KERDOOS_DIGEST_EVALUATOR_ENABLED="true", KERDOOS_WORKERS="2")
+        with self.assertLogs(
+            "kerdoos.interfaces.web.app", level="WARNING") as cm:
+            with TestClient(create_app()) as client:
+                resp = client.get("/health")
+                self.assertEqual(resp.status_code, 200)
+        self.assertTrue(
+            any("refusing to start" in msg for msg in cm.output),
+            cm.output,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

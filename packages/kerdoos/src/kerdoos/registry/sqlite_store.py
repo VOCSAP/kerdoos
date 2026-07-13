@@ -468,6 +468,25 @@ class SqliteConfigStore:
             ]
         return tuple(jobs)
 
+    def list_all_enabled_jobs(self) -> tuple[DigestJob, ...]:
+        # Scheduler-internal-only (ADR 0003 Phase 6b evaluator): the ONLY
+        # read in this store with no owner_id filter, by design -- the
+        # evaluator sweeps every tenant in one tick. See ports.py docstring
+        # for the "never expose through AppService/HTTP" constraint.
+        with self._op() as conn:
+            rows = conn.execute(
+                "SELECT * FROM digest_jobs WHERE enabled = 1 "
+                "ORDER BY owner_id, name",
+            ).fetchall()
+            jobs = [
+                _row_to_job(
+                    row,
+                    self._load_job_sources(conn, row["owner_id"], row["id"]),
+                )
+                for row in rows
+            ]
+        return tuple(jobs)
+
     def get_job(self, owner: str, job_id: str) -> DigestJob:
         with self._op() as conn:
             row = conn.execute(

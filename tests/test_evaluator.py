@@ -1,0 +1,374 @@
+"""Digest-jobs asyncio evaluator (Phase 6b tranche 2, ADR 0003 Decisions 3/4/8).
+
+Exercises evaluate_tick end-to-end (Plan A scrape-dedup + Plan B per-job
+notify) through the real SqliteConfigStore/SqliteStateStore, with a fake
+Router/Fetcher/Parser (no real network) and a recording DigestSender double.
+A couple of edge cases (dangling job_source link, per-source router failure)
+are exercised directly against the private _run_plan_a helper, since they are
+either impossible to reproduce through the public API (FK ON DELETE CASCADE
+on digest_job_sources) or awkward to trigger end-to-end.
+"""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+from autolycos.ports import FetchResult
+from autolycos.router import StaticRouter
+
+from kerdoos.core.app.services import AppService, DigestJobSpec, Principal, ProductSpec
+from kerdoos.core.domain import Availability, Extract, ScrapeStatus
+from kerdoos.core.evaluator import (
+    _run_plan_a,
+    EvaluationSummary,
+    evaluate_tick,
+    should_start_intra_process_evaluator,
+)
+from kerdoos.core.scheduler import compute_window_start
+from kerdoos.parsers.factory import build_parser
+from kerdoos.parsers.ports import ParserSpec
+from kerdoos.persistence.ports import JobRun, ScrapeRecord
+from kerdoos.persistence.sqlite_store import SqliteStateStore
+from kerdoos.registry.domain_policy import CatalogueDomainPolicy
+from kerdoos.registry.ports import DigestJob, SiteConfig
+from kerdoos.registry.sqlite_store import SqliteConfigStore
+
+_SITE = SiteConfig(
+    name="kabum", fetcher="http", domain="kabum.com.br",
+    parser=ParserSpec(kind="statejson", pix="a", card="b", availability="c"),
+)
+_BROKEN_SITE = SiteConfig(
+    name="brokensite", fetcher="broken", domain="broken.example",
+    parser=ParserSpec(kind="statejson", pix="a", card="b", availability="c"),
+)
+
+
+class _FakeFetcher:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def fetch(self, url: str) -> FetchResult:
+        self.calls.append(url)
+        return FetchResult(html="<html></html>", status=200, method="http",
+                           challenged=False)
+
+
+class _StubRouter:
+    """Router.select keyed by fetcher_name. A mapped BaseException instance
+    is raised instead of returning a Fetcher, to simulate a per-source
+    routing failure."""
+
+    def __init__(self, mapping: dict[str, object]) -> None:
+        self._mapping = mapping
+
+    def select(self, fetcher_name: str, subresource_domains=()):
+        target = self._mapping[fetcher_name]
+        if isinstance(target, BaseException):
+            raise target
+        return target
+
+
+class _FakeParser:
+    def extract(self, html: str) -> Extract:
+        return Extract(
+            price_pix_cents=100, price_card_cents=110, currency="BRL",
+            availability=Availability.IN_STOCK,
+        )
+
+
+def _fake_parser_factory(spec: ParserSpec) -> _FakeParser:
+    return _FakeParser()
+
+
+@dataclass
+class _SendCall:
+    job: DigestJob
+    records: list
+    generated_at: str
+    tier2_labels: dict
+
+
+class _RecordingSender:
+    """DigestSender double: records every successful send(); raises for any
+    job whose name is in fail_for (Plan B per-job error-path tests)."""
+
+    def __init__(self, fail_for: frozenset[str] = frozenset()) -> None:
+        self.calls: list[_SendCall] = []
+        self._fail_for = fail_for
+
+    def send(self, job, records, generated_at, tier2_labels) -> None:
+        if job.name in self._fail_for:
+            raise RuntimeError(f"send failed for job {job.name!r}")
+        self.calls.append(_SendCall(
+            job, list(records), generated_at, dict(tier2_labels)))
+
+
+class _EvaluatorTestBase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        self.config = SqliteConfigStore(d / "config.db")
+        self.state = SqliteStateStore(d / "state.db")
+        domain_policy = CatalogueDomainPolicy(self.config)
+        static_router = StaticRouter(domain_policy)
+        self.service = AppService(
+            self.config, self.state, static_router, domain_policy, build_parser)
+        self.config.add_site(_SITE)
+        self.config.add_site(_BROKEN_SITE)
+        self.fetcher = _FakeFetcher()
+        self.router = _StubRouter({"http": self.fetcher})
+
+    def tearDown(self) -> None:
+        self.config.close()
+        self.state.close()
+        self._tmp.cleanup()
+
+    def _add_source(
+        self, owner: str, product_key: str, url: str, site: str = "kabum",
+    ) -> str:
+        self.service.add_product(owner, ProductSpec(product_key))
+        source = self.service.add_source(owner, product_key, site, url)
+        return source.source_id
+
+    def _seed_history(
+        self, owner: str, source_id: str, ts: datetime,
+        status: ScrapeStatus = ScrapeStatus.OK,
+    ) -> None:
+        self.state.record(owner, ScrapeRecord(
+            source_id=source_id, ts=ts.isoformat(), status=status,
+            price_pix_cents=100, price_card_cents=110, currency="BRL",
+            availability=Availability.IN_STOCK, method="http", error=None,
+        ))
+
+
+class PureFunctionTest(unittest.TestCase):
+    def test_workers_le_1_allows_intra_process_start(self) -> None:
+        self.assertTrue(should_start_intra_process_evaluator(1))
+        self.assertTrue(should_start_intra_process_evaluator(0))
+
+    def test_workers_gt_1_refuses_intra_process_start(self) -> None:
+        self.assertFalse(should_start_intra_process_evaluator(2))
+        self.assertFalse(should_start_intra_process_evaluator(8))
+
+
+class EmptyTickTest(_EvaluatorTestBase):
+    async def test_no_jobs_returns_zero_summary_no_crash(self) -> None:
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=_RecordingSender(),
+        )
+        self.assertEqual(summary, EvaluationSummary())
+
+
+class PlanAScrapeDedupTest(_EvaluatorTestBase):
+    async def test_scrapes_source_with_no_prior_history(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly", source_ids=(sid,)))
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=_RecordingSender(),
+        )
+        self.assertEqual(summary.scraped_sources, 1)
+        self.assertEqual(self.fetcher.calls, ["https://www.kabum.com.br/p/1"])
+
+    async def test_skips_fresh_source_below_its_own_period(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="hourly-job", frequency_kind="daily",
+                          source_ids=(sid,)))  # period ~= 1 day
+        tick_now = datetime(2026, 7, 13, 10, 7, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick_now - _minutes(10))
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=_RecordingSender(), now=tick_now,
+        )
+        self.assertEqual(summary.scraped_sources, 0)
+        self.assertEqual(self.fetcher.calls, [])
+
+    async def test_cadence_union_across_jobs_uses_the_minimum_period(self) -> None:
+        # job A wants this source every 5 minutes, job B only hourly -- Plan
+        # A must scrape using the SHORTER (union) period, not job B's alone.
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="fast-job", frequency_kind="cron",
+                          cron_expr="*/5 * * * *", source_ids=(sid,)))
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="slow-job", frequency_kind="cron",
+                          cron_expr="0 * * * *", source_ids=(sid,)))
+        tick_now = datetime(2026, 7, 13, 10, 7, 0, tzinfo=timezone.utc)
+        # 10 minutes stale: stale for the 5-minute union period, fresh for
+        # the hourly period alone.
+        self._seed_history("owner1", sid, tick_now - _minutes(10))
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=_RecordingSender(), now=tick_now,
+        )
+        self.assertEqual(summary.scraped_sources, 1)
+        # Dedup: exactly ONE scrape serves both referencing jobs.
+        self.assertEqual(len(self.fetcher.calls), 1)
+
+    async def test_per_source_router_failure_does_not_abort_the_tick(self) -> None:
+        good_sid = self._add_source(
+            "owner1", "p1", "https://www.kabum.com.br/p/1", site="kabum")
+        bad_sid = self._add_source(
+            "owner1", "p2", "https://broken.example/p/2", site="brokensite")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(good_sid, bad_sid)))
+        router = _StubRouter({
+            "http": self.fetcher,
+            "broken": RuntimeError("router blew up"),
+        })
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=router, parser_factory=_fake_parser_factory,
+            sender=_RecordingSender(),
+        )
+        self.assertEqual(summary.scraped_sources, 1)
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(self.fetcher.calls, ["https://www.kabum.com.br/p/1"])
+
+
+class PlanADanglingLinkTest(_EvaluatorTestBase):
+    async def test_dangling_job_source_is_skipped_silently(self) -> None:
+        # White-box: a source_id present on the job but ABSENT from the
+        # owner's source_index (the "config drifted after the job linked
+        # it" case) must be skipped without incrementing errors.
+        job = DigestJob(
+            id="job1", owner_id="owner1", name="job1",
+            frequency_kind="hourly", schedule_cron="0 * * * *",
+            source_ids=("dangling-source",),
+        )
+        summary = EvaluationSummary()
+        await _run_plan_a(
+            jobs=(job,), source_index={"owner1": {}}, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            tick_now=datetime(2026, 7, 13, 10, 0, 0, tzinfo=timezone.utc),
+            now_iso="2026-07-13T10:00:00+00:00", summary=summary,
+        )
+        self.assertEqual(summary.scraped_sources, 0)
+        self.assertEqual(summary.errors, 0)
+
+
+class PlanBNotifyTest(_EvaluatorTestBase):
+    async def test_notifies_job_and_marks_job_run_sent(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick_now - _minutes(1))
+        sender = _RecordingSender()
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+        self.assertEqual(summary.notified_jobs, 1)
+        self.assertEqual(len(sender.calls), 1)
+        self.assertEqual(sender.calls[0].job.id, job.id)
+        self.assertEqual(len(sender.calls[0].records), 1)
+        window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
+        self.assertTrue(self.state.has_active_job_run("owner1", job.id) is False)
+        # sent is terminal -- confirmed indirectly via the idempotence tests
+        # below (a second tick in the SAME window must be a no-op).
+        self.assertIsNotNone(window_start)
+
+    async def test_coalescing_skips_a_still_active_job_run(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick_now - _minutes(1))
+        window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
+        self.state.record_job_run(JobRun(
+            job_id=job.id, owner_id="owner1", window_start=window_start,
+            fired_at=tick_now.isoformat(), status="running",
+        ))
+        sender = _RecordingSender()
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+        self.assertEqual(summary.skipped_jobs, 1)
+        self.assertEqual(summary.notified_jobs, 0)
+        self.assertEqual(sender.calls, [])
+
+    async def test_idempotent_across_ticks_within_the_same_window(self) -> None:
+        # Two DIFFERENT tick timestamps that fall in the SAME hourly cron
+        # window must resolve to the SAME window_start (quantized, never the
+        # raw tick) -- the second tick must be a no-op, not a re-send.
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        tick1 = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        tick2 = datetime(2026, 7, 13, 10, 55, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick1 - _minutes(1))
+        sender = _RecordingSender()
+        summary1 = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick1,
+        )
+        summary2 = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick2,
+        )
+        self.assertEqual(summary1.notified_jobs, 1)
+        self.assertEqual(summary2.notified_jobs, 0)
+        self.assertEqual(summary2.skipped_jobs, 1)
+        self.assertEqual(len(sender.calls), 1)
+
+    async def test_sender_error_transitions_job_run_to_error_and_continues(self) -> None:
+        sid1 = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        sid2 = self._add_source("owner1", "p2", "https://www.kabum.com.br/p/2")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="failing-job", frequency_kind="hourly",
+                          source_ids=(sid1,)))
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="ok-job", frequency_kind="hourly",
+                          source_ids=(sid2,)))
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid1, tick_now - _minutes(1))
+        self._seed_history("owner1", sid2, tick_now - _minutes(1))
+        sender = _RecordingSender(fail_for=frozenset({"failing-job"}))
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(summary.notified_jobs, 1)
+        self.assertEqual([c.job.name for c in sender.calls], ["ok-job"])
+
+
+def _minutes(n: int):
+    from datetime import timedelta
+    return timedelta(minutes=n)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -254,6 +254,18 @@ class ConfigStore(Protocol):
         between 'does not exist' and 'belongs to another owner')."""
         ...
 
+    def list_all_enabled_jobs(self) -> tuple[DigestJob, ...]:
+        """Every enabled digest job across ALL owners, unscoped.
+
+        SCHEDULER-INTERNAL-ONLY (ADR 0003 Phase 6b evaluator): the
+        intra-process/CLI evaluator sweeps all tenants in one tick, so this
+        is the one method in this Protocol with no owner parameter. Never
+        expose this through AppService or any HTTP/CLI route reachable by a
+        tenant -- doing so would create a cross-tenant job-existence oracle
+        (same discipline as the double-scoping IDOR defense elsewhere in
+        this store, ADR 0003 finding S2)."""
+        ...
+
 
 @runtime_checkable
 class MutableConfigStore(ConfigStore, Protocol):
