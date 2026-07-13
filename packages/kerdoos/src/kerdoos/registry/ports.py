@@ -95,6 +95,15 @@ _ALLOWED_OPTION_KEYS = frozenset(
 
 _VALID_FREQUENCY_KINDS = frozenset({"hourly", "daily", "cron"})
 
+# Server-side template_id whitelist (ADR 0003 Phase 6b tranche 4, security
+# finding S5 CWE-22/1336): template_id is NEVER interpolated into a
+# filesystem path. digest/templates.py's TEMPLATE_FILES dict must have the
+# exact same key set as this whitelist (enforced by a dedicated test) so the
+# write-time gate (validate_template_id, below) and the render-time lookup
+# (digest/templates.py's render_digest_html) can never drift out of sync --
+# closing the authoring/render TOCTOU.
+VALID_TEMPLATE_IDS = frozenset({"default"})
+
 
 @dataclass(frozen=True, slots=True)
 class JobOptions:
@@ -182,6 +191,21 @@ def validate_timezone(timezone: str) -> None:
     """
     if timezone not in available_timezones():
         raise ValueError(f"unknown IANA timezone {timezone!r}")
+
+
+def validate_template_id(template_id: str) -> None:
+    """Reject an unknown template_id at authoring time (ADR 0003 Phase 6b
+    tranche 4, security finding S5 CWE-22/1336).
+
+    Mirrors validate_timezone above: template_id must never reach storage
+    unless it is a member of VALID_TEMPLATE_IDS. This is HALF of the S5
+    defense -- digest/templates.py's render_digest_html applies the same
+    whitelist again at render time (defense in depth against a template_id
+    that reached storage before this validator existed, or any future write
+    path that forgets to call it).
+    """
+    if template_id not in VALID_TEMPLATE_IDS:
+        raise ValueError(f"unknown template_id {template_id!r}")
 
 
 @dataclass(frozen=True, slots=True)

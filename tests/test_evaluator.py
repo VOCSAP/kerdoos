@@ -11,7 +11,10 @@ on digest_job_sources) or awkward to trigger end-to-end.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -363,6 +366,126 @@ class PlanBNotifyTest(_EvaluatorTestBase):
         self.assertEqual(summary.errors, 1)
         self.assertEqual(summary.notified_jobs, 1)
         self.assertEqual([c.job.name for c in sender.calls], ["ok-job"])
+
+
+class _SlowRecordingSender:
+    """DigestSender double whose send() blocks briefly on a real thread
+    (matching evaluate_tick's asyncio.to_thread dispatch) and tracks the
+    peak number of CONCURRENTLY active send() calls -- the S4 acceptance
+    signal (ADR 0003 Phase 6b tranche 4, finding S4)."""
+
+    def __init__(self, delay: float = 0.05) -> None:
+        self._delay = delay
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.calls: list[str] = []
+
+    def send(self, job, records, generated_at, tier2_labels) -> None:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(self._delay)
+        with self._lock:
+            self.calls.append(job.name)
+            self.active -= 1
+
+
+class PlanBConcurrencyCeilingTest(unittest.IsolatedAsyncioTestCase):
+    """S4: a global concurrent-sends ceiling, on top of the per-job
+    singleton (has_active_job_run). Two INDEPENDENT evaluate_tick calls
+    (simulating two overlapping ticks/workers) share ONE explicitly
+    constructed asyncio.Semaphore via send_semaphore= -- the only way the
+    ceiling can hold ACROSS separate evaluate_tick invocations, per
+    evaluate_tick's own docstring."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._stores: list[tuple] = []
+
+    def tearDown(self) -> None:
+        for config, state in self._stores:
+            config.close()
+            state.close()
+        self._tmp.cleanup()
+
+    def _make_owner_job(self, owner: str, tick_now: datetime) -> tuple:
+        d = Path(self._tmp.name) / owner
+        d.mkdir()
+        config = SqliteConfigStore(d / "config.db")
+        state = SqliteStateStore(d / "state.db")
+        self._stores.append((config, state))
+        domain_policy = CatalogueDomainPolicy(config)
+        static_router = StaticRouter(domain_policy)
+        service = AppService(config, state, static_router, domain_policy, build_parser)
+        config.add_site(_SITE)
+        service.add_product(owner, ProductSpec("p1"))
+        source = service.add_source(
+            owner, "p1", "kabum", f"https://www.kabum.com.br/p/{owner}")
+        job = service.create_job(
+            Principal(owner_id=owner),
+            DigestJobSpec(name=f"job-{owner}", frequency_kind="hourly",
+                          source_ids=(source.source_id,)))
+        state.record(owner, ScrapeRecord(
+            source_id=source.source_id, ts=(tick_now - _minutes(1)).isoformat(),
+            status=ScrapeStatus.OK, price_pix_cents=100, price_card_cents=110,
+            currency="BRL", availability=Availability.IN_STOCK, method="http",
+            error=None,
+        ))
+        return config, state, job
+
+    async def test_ceiling_of_one_serializes_two_concurrent_ticks(self) -> None:
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        config_a, state_a, _job_a = self._make_owner_job("ownera", tick_now)
+        config_b, state_b, _job_b = self._make_owner_job("ownerb", tick_now)
+        router = _StubRouter({"http": _FakeFetcher()})
+        sender = _SlowRecordingSender(delay=0.05)
+        semaphore = asyncio.Semaphore(1)
+
+        summary_a, summary_b = await asyncio.gather(
+            evaluate_tick(
+                config_store=config_a, state_store=state_a, router=router,
+                parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+                max_concurrent_sends=1, send_semaphore=semaphore,
+            ),
+            evaluate_tick(
+                config_store=config_b, state_store=state_b, router=router,
+                parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+                max_concurrent_sends=1, send_semaphore=semaphore,
+            ),
+        )
+        self.assertEqual(summary_a.notified_jobs, 1)
+        self.assertEqual(summary_b.notified_jobs, 1)
+        self.assertEqual(len(sender.calls), 2)
+        # The ceiling of 1 must hold ACROSS both evaluate_tick calls: never
+        # more than one send() in flight at the same instant.
+        self.assertEqual(sender.max_active, 1)
+
+    async def test_higher_ceiling_actually_allows_overlap_control_case(self) -> None:
+        # Proves the harness itself detects overlap (i.e. test 1 above is
+        # not vacuously passing): with a ceiling >= 2 shared across the
+        # same two concurrent ticks, both sends legitimately overlap.
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        config_a, state_a, _job_a = self._make_owner_job("ownera", tick_now)
+        config_b, state_b, _job_b = self._make_owner_job("ownerb", tick_now)
+        router = _StubRouter({"http": _FakeFetcher()})
+        sender = _SlowRecordingSender(delay=0.05)
+        semaphore = asyncio.Semaphore(2)
+
+        await asyncio.gather(
+            evaluate_tick(
+                config_store=config_a, state_store=state_a, router=router,
+                parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+                max_concurrent_sends=2, send_semaphore=semaphore,
+            ),
+            evaluate_tick(
+                config_store=config_b, state_store=state_b, router=router,
+                parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+                max_concurrent_sends=2, send_semaphore=semaphore,
+            ),
+        )
+        self.assertEqual(len(sender.calls), 2)
+        self.assertEqual(sender.max_active, 2)
 
 
 def _minutes(n: int):

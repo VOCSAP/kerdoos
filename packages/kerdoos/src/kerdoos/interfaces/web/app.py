@@ -36,7 +36,7 @@ from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import AppService
 from kerdoos.core.evaluator import (
     run_evaluator_loop, should_start_intra_process_evaluator)
-from kerdoos.digest.sender import LogDigestSender
+from kerdoos.digest.factory import build_sender
 from kerdoos.interfaces.web import health
 from kerdoos.interfaces.web.routers import admin, protected, public, web
 from kerdoos.interfaces.web.security import SessionCookie
@@ -90,11 +90,12 @@ def create_app() -> FastAPI:
         stop_event = asyncio.Event()
         if settings.digest_evaluator_enabled:
             if should_start_intra_process_evaluator(settings.workers):
+                sender = build_sender(settings, config_store, domain_policy)
                 evaluator_task = asyncio.create_task(
                     run_evaluator_loop(
                         config_store=config_store, state_store=state_store,
                         router=router, parser_factory=build_parser,
-                        sender=LogDigestSender(), stop_event=stop_event,
+                        sender=sender, stop_event=stop_event,
                     )
                 )
             else:

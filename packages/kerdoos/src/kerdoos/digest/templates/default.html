@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>Kerdoos digest</title>
+</head>
+<body>
+<h1>Kerdoos daily digest -- {{ view.job_name }}</h1>
+<p>generated_at: {{ view.generated_at }}</p>
+<table border="1" cellpadding="6" cellspacing="0">
+<thead>
+<tr>
+<th>Source</th>
+<th>Status</th>
+<th>Price</th>
+<th>Availability</th>
+<th>Error</th>
+</tr>
+</thead>
+<tbody>
+{% for line in view.lines %}
+<tr>
+<td>
+{% if line.href %}
+<a href="{{ line.href }}">{{ line.source_label }}</a>
+{% else %}
+{{ line.source_label }}
+{% endif %}
+</td>
+<td>{{ line.status_label }}</td>
+<td>{{ line.price_line }}</td>
+<td>{{ line.availability_label }}</td>
+<td>{{ line.error or "" }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</body>
+</html>

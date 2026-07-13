@@ -12,6 +12,14 @@ existing deployments/tests see zero behavior change until explicitly enabled).
 
 get_settings() reads them lazily; create_app fails fast if the session secret is
 absent (no silent insecure default).
+
+SMTP (ADR 0003 Phase 6b tranche 4): KERDOOS_SMTP_HOST/PORT/FROM/USERNAME/
+PASSWORD/USE_TLS configure the digest email adapter (digest.factory.
+build_sender). No hardcoded infra defaults -- smtp_host is None unless set,
+which is exactly what makes create_app()/cmd_digest fall back to
+LogDigestSender (security policy: never bake a mail relay into the code).
+smtp_port defaults to 587 (STARTTLS submission), but that default only
+matters once an operator has already set KERDOOS_SMTP_HOST.
 """
 
 from __future__ import annotations
@@ -24,6 +32,10 @@ from dataclasses import dataclass
 # but is brute-forceable -- require a real minimum, not just "set".
 MIN_SESSION_SECRET_LENGTH = 32
 
+# Sane STARTTLS submission port default -- only applied once KERDOOS_SMTP_HOST
+# is set (never used to invent an SMTP relay when SMTP is unconfigured).
+DEFAULT_SMTP_PORT = 587
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -33,6 +45,12 @@ class Settings:
     cookie_secure: bool
     workers: int
     digest_evaluator_enabled: bool
+    smtp_host: str | None
+    smtp_port: int
+    smtp_from: str | None
+    smtp_username: str | None
+    smtp_password: str | None
+    smtp_use_tls: bool
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -61,4 +79,11 @@ def get_settings() -> Settings:
         digest_evaluator_enabled=(
             os.environ.get("KERDOOS_DIGEST_EVALUATOR_ENABLED", "false").lower()
             == "true"),
+        smtp_host=os.environ.get("KERDOOS_SMTP_HOST") or None,
+        smtp_port=int(os.environ.get("KERDOOS_SMTP_PORT", str(DEFAULT_SMTP_PORT))),
+        smtp_from=os.environ.get("KERDOOS_SMTP_FROM") or None,
+        smtp_username=os.environ.get("KERDOOS_SMTP_USERNAME") or None,
+        smtp_password=os.environ.get("KERDOOS_SMTP_PASSWORD") or None,
+        smtp_use_tls=(
+            os.environ.get("KERDOOS_SMTP_USE_TLS", "true").lower() != "false"),
     )

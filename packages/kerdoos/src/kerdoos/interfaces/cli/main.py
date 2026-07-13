@@ -28,8 +28,9 @@ from autolycos.router import StaticRouter
 
 from kerdoos.core.app.services import AppService, Principal, ProductSpec
 from kerdoos.core.evaluator import evaluate_tick
+from kerdoos.config import get_settings
+from kerdoos.digest.factory import build_sender
 from kerdoos.digest.render import render_digest
-from kerdoos.digest.sender import LogDigestSender
 from kerdoos.parsers.factory import build_parser
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.ports import SiteConfig
@@ -70,11 +71,14 @@ def cmd_digest(args: argparse.Namespace) -> int:
     _service, config_store, state_store = _build_app_service(args.config_db, args.db)
     domain_policy = CatalogueDomainPolicy(config_store)
     router = StaticRouter(domain_policy)
+    settings = get_settings()
+    sender = build_sender(
+        settings, config_store, domain_policy, config_db_path=args.config_db)
     try:
         summary = asyncio.run(evaluate_tick(
             config_store=config_store, state_store=state_store,
             router=router, parser_factory=build_parser,
-            sender=LogDigestSender(),
+            sender=sender,
         ))
     finally:
         config_store.close()

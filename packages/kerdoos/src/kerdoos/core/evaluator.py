@@ -195,6 +195,7 @@ async def _run_plan_b(
     now_iso: str,
     tick_now: datetime,
     summary: EvaluationSummary,
+    send_semaphore: asyncio.Semaphore,
 ) -> None:
     for job in jobs:
         try:
@@ -217,7 +218,14 @@ async def _run_plan_b(
                     source_index=source_index.get(job.owner_id, {}),
                     state_store=state_store,
                 )
-                sender.send(job, records, now_iso, tier2_labels)
+                # S4 (ADR 0003 Phase 6b tranche 4): an EXPLICIT ceiling on
+                # simultaneously in-flight sender.send calls, on top of the
+                # per-job DB singleton above (has_active_job_run). Dispatched
+                # via asyncio.to_thread so a real blocking SMTP call cannot
+                # stall the event loop while holding the semaphore slot.
+                async with send_semaphore:
+                    await asyncio.to_thread(
+                        sender.send, job, records, now_iso, tier2_labels)
             except Exception as exc:  # noqa: BLE001 -- one job must not kill the tick
                 state_store.update_job_run(
                     job.id, window_start, status="error",
@@ -241,13 +249,30 @@ async def evaluate_tick(
     parser_factory: ParserFactory,
     sender: DigestSender,
     now: datetime | None = None,
+    max_concurrent_sends: int = 1,
+    send_semaphore: asyncio.Semaphore | None = None,
 ) -> EvaluationSummary:
     """Run exactly ONE evaluation tick: Plan A (scrape dedup) then Plan B
     (per-job notify). Shared by the intra-process timer (run_evaluator_loop)
     and the `kerdoos digest` CLI (ADR 0003 Decision 8: two triggers, one
     logic). Never raises -- a total failure to even list jobs is caught and
     reported via EvaluationSummary.errors so a single bad tick can never
-    kill the outer loop."""
+    kill the outer loop.
+
+    send_semaphore (S4, ADR 0003 Phase 6b tranche 4): the ceiling on
+    simultaneously in-flight sender.send calls. By default a FRESH
+    Semaphore(max_concurrent_sends) is built per call -- correct for the
+    common case (one evaluate_tick at a time, e.g. `kerdoos digest`).
+    run_evaluator_loop builds ONE semaphore and reuses it across every tick
+    of its loop. A caller that genuinely drives multiple evaluate_tick
+    invocations CONCURRENTLY (e.g. an overlapping intra-process loop tick
+    plus an external `kerdoos digest` against the same process) must pass
+    the SAME send_semaphore instance to each call for the ceiling to hold
+    across them -- an in-process asyncio.Semaphore can only cap concurrency
+    among callers that share the object, never across separate processes
+    (that boundary is covered by should_start_intra_process_evaluator's
+    workers<=1 guard-rail plus the per-job DB-level has_active_job_run
+    singleton, which IS cross-process)."""
     tick_now = now if now is not None else datetime.now(timezone.utc)
     if tick_now.tzinfo is None:
         tick_now = tick_now.replace(tzinfo=timezone.utc)
@@ -282,9 +307,13 @@ async def evaluate_tick(
         router=router, parser_factory=parser_factory, tick_now=tick_now,
         now_iso=now_iso, summary=summary,
     )
+    semaphore = (
+        send_semaphore if send_semaphore is not None
+        else asyncio.Semaphore(max_concurrent_sends))
     await _run_plan_b(
         jobs=jobs, source_index=source_index, state_store=state_store,
         sender=sender, now_iso=now_iso, tick_now=tick_now, summary=summary,
+        send_semaphore=semaphore,
     )
     return summary
 
@@ -298,17 +327,26 @@ async def run_evaluator_loop(
     sender: DigestSender,
     tick_seconds: int = 60,
     stop_event: asyncio.Event | None = None,
+    max_concurrent_sends: int = 1,
 ) -> None:
     """Intra-process timer: evaluate_tick every tick_seconds until
     stop_event is set. A crashing tick is caught and logged so it never
     kills the loop (the same per-item resilience discipline as Plan A/B,
-    applied one level up)."""
+    applied one level up).
+
+    Builds ONE send_semaphore (S4) here and reuses it across every tick of
+    this loop -- ticks of the SAME loop never overlap (each await blocks the
+    next), but sharing one instance is simpler than rebuilding it every
+    iteration and matches run_evaluator_loop's role as a single persistent
+    evaluator."""
     event = stop_event if stop_event is not None else asyncio.Event()
+    send_semaphore = asyncio.Semaphore(max_concurrent_sends)
     while not event.is_set():
         try:
             await evaluate_tick(
                 config_store=config_store, state_store=state_store,
                 router=router, parser_factory=parser_factory, sender=sender,
+                send_semaphore=send_semaphore,
             )
         except Exception:  # noqa: BLE001 -- one crashed tick must not kill the loop
             logger.exception("evaluator: tick failed unexpectedly")

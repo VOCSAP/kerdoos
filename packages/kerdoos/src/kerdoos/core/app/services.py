@@ -35,6 +35,7 @@ from kerdoos.registry.ports import (
     normalize_schedule,
     parse_job_options,
     validate_product_key,
+    validate_template_id,
     validate_timezone,
 )
 from kerdoos.registry.url_validation import validate_source_url
@@ -207,6 +208,7 @@ class AppService:
         # storage, since the evaluator (core/scheduler.py) needs a valid
         # zoneinfo.ZoneInfo to compute window_start for this job.
         validate_timezone(spec.timezone)
+        validate_template_id(spec.template_id)
         options = parse_job_options(spec.options)
         job = DigestJob(
             id=str(uuid.uuid4()), owner_id=principal.owner_id, name=spec.name,
@@ -240,6 +242,7 @@ class AppService:
             cron_expr=spec.cron_expr,
         )
         validate_timezone(spec.timezone)
+        validate_template_id(spec.template_id)
         options = parse_job_options(spec.options)
         job = DigestJob(
             id=job_id, owner_id=owner, name=spec.name,
