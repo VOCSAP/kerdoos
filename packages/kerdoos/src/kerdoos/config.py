@@ -24,11 +24,16 @@ matters once an operator has already set KERDOOS_SMTP_HOST.
 KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS (ADR 0003 Phase 6b fast-follow): the
 explicit max-send-timeout bound (default 300s / 5 min) core.evaluator's
 reaper sweep uses to reclaim a job_runs row stranded in 'queued'/'running'
-(e.g. the process crashed mid-send). Only wired into `kerdoos digest`
-(interfaces/cli/main.py's cmd_digest, the external-cron trigger) -- the
-WebUI's intra-process evaluator (interfaces/web/app.py) always uses
-core.evaluator.evaluate_tick's own 300s function default instead of reading
-this setting.
+(e.g. the process crashed mid-send). Wired into both `kerdoos digest`
+(interfaces/cli/main.py's cmd_digest) and the WebUI's intra-process
+evaluator lifespan (interfaces/web/app.py).
+
+KERDOOS_SMTP_TIMEOUT_SECONDS (Phase 7a fast-follow, roadmap 58d88fe0): the
+socket timeout smtplib.SMTP() is opened with (digest.smtp_sender). Must
+stay strictly below digest_reaper_timeout_seconds -- digest.factory.
+build_sender enforces this at construction -- so a server that accepts the
+connection then never responds unblocks the send before the reaper's own
+staleness window would need to reclaim the stranded job_runs row.
 """
 
 from __future__ import annotations
@@ -50,6 +55,11 @@ DEFAULT_SMTP_PORT = 587
 # unrelated timer to a correctness-affecting staleness window).
 DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS = 300
 
+# SMTP socket timeout default (Phase 7a fast-follow, roadmap 58d88fe0) --
+# must stay strictly below DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS so a wedged
+# send always unblocks before the reaper would need to reclaim the row.
+DEFAULT_SMTP_TIMEOUT_SECONDS = 30
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -65,6 +75,7 @@ class Settings:
     smtp_username: str | None
     smtp_password: str | None
     smtp_use_tls: bool
+    smtp_timeout_seconds: float
     digest_reaper_timeout_seconds: int
 
     def require_session_secret(self) -> str:
@@ -101,6 +112,8 @@ def get_settings() -> Settings:
         smtp_password=os.environ.get("KERDOOS_SMTP_PASSWORD") or None,
         smtp_use_tls=(
             os.environ.get("KERDOOS_SMTP_USE_TLS", "true").lower() != "false"),
+        smtp_timeout_seconds=float(os.environ.get(
+            "KERDOOS_SMTP_TIMEOUT_SECONDS", str(DEFAULT_SMTP_TIMEOUT_SECONDS))),
         digest_reaper_timeout_seconds=int(os.environ.get(
             "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
             str(DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS))),

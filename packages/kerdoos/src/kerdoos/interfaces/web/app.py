@@ -96,6 +96,7 @@ def create_app() -> FastAPI:
                         config_store=config_store, state_store=state_store,
                         router=router, parser_factory=build_parser,
                         sender=sender, stop_event=stop_event,
+                        reaper_timeout_seconds=settings.digest_reaper_timeout_seconds,
                     )
                 )
             else:

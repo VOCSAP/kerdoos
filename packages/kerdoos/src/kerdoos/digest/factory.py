@@ -45,6 +45,20 @@ def build_sender(
         )
         return LogDigestSender()
 
+    # Phase 7a fast-follow (roadmap 58d88fe0): the SMTP socket timeout must
+    # stay strictly below the reaper's staleness window, or a wedged send
+    # could still outlive what the reaper considers "stale enough to reap" --
+    # enforced here (construction time) rather than left as a coincidence of
+    # the two defaults.
+    if settings.smtp_timeout_seconds >= settings.digest_reaper_timeout_seconds:
+        raise ValueError(
+            "KERDOOS_SMTP_TIMEOUT_SECONDS "
+            f"({settings.smtp_timeout_seconds}) must be strictly less than "
+            "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS "
+            f"({settings.digest_reaper_timeout_seconds}), otherwise a wedged "
+            "SMTP send could still outlive the reaper's staleness window."
+        )
+
     email_lookup = SqliteAuthStore(config_db_path or settings.config_db).get_email
     smtp_settings = SmtpSettings(
         host=settings.smtp_host,
@@ -53,5 +67,6 @@ def build_sender(
         username=settings.smtp_username,
         password=settings.smtp_password,
         use_tls=settings.smtp_use_tls,
+        timeout_seconds=settings.smtp_timeout_seconds,
     )
     return SmtpDigestSender(config_store, domain_policy, email_lookup, smtp_settings)

@@ -11,6 +11,7 @@ Phase 0 structural checks keep exercising the real factory, not a stub.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import tempfile
@@ -19,6 +20,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from kerdoos.interfaces.web import app as app_module
 from kerdoos.interfaces.web.app import create_app
 
 
@@ -97,6 +99,32 @@ class DigestEvaluatorLifespanTest(unittest.TestCase):
             any("refusing to start" in msg for msg in cm.output),
             cm.output,
         )
+
+    def test_reaper_timeout_env_var_reaches_run_evaluator_loop(self) -> None:
+        """Phase 7a fast-follow (roadmap 58d88fe0): the WebUI lifespan must
+        forward Settings.digest_reaper_timeout_seconds into run_evaluator_loop
+        -- asserted against the EFFECTIVE value the env var sets (17s), not
+        the 300s function default, so a stale wiring gap (silently ignoring
+        the env var) would fail this test."""
+        captured: dict[str, object] = {}
+
+        async def _fake_run_evaluator_loop(**kwargs: object) -> None:
+            captured.update(kwargs)
+            await asyncio.Event().wait()
+
+        self._patch_env(
+            KERDOOS_DIGEST_EVALUATOR_ENABLED="true", KERDOOS_WORKERS="1",
+            KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS="17",
+        )
+        with mock.patch.object(
+            app_module, "run_evaluator_loop", _fake_run_evaluator_loop,
+        ):
+            with TestClient(create_app()) as client:
+                resp = client.get("/health")
+                self.assertEqual(resp.status_code, 200)
+
+        self.assertEqual(captured.get("reaper_timeout_seconds"), 17)
+        self.assertNotEqual(captured.get("reaper_timeout_seconds"), 300)
 
 
 if __name__ == "__main__":

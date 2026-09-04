@@ -54,9 +54,10 @@ class _FakeSMTP:
 
     instances: list["_FakeSMTP"] = []
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
         self.host = host
         self.port = port
+        self.timeout = timeout
         self.started_tls = False
         self.starttls_context: object | None = None
         self.logged_in: tuple[str, str] | None = None
@@ -328,6 +329,33 @@ class StarttlsSslContextTest(_SmtpSenderTestBase):
 
         self.assertEqual(len(_BadCertSMTP.instances), 1)
         self.assertIsNone(_BadCertSMTP.instances[0].sent_message)
+
+
+class SmtpSocketTimeoutTest(_SmtpSenderTestBase):
+    """Phase 7a fast-follow (roadmap 58d88fe0): smtplib.SMTP() must be opened
+    with an explicit socket timeout, so a server that accepts the connection
+    then never responds cannot hang the send indefinitely."""
+
+    def test_smtp_is_opened_with_the_configured_timeout(self) -> None:
+        settings = SmtpSettings(
+            host="smtp.example.com", port=587, from_addr="digest@example.com",
+            timeout_seconds=12.5,
+        )
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "user@example.com", settings)
+
+        sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertEqual(len(_FakeSMTP.instances), 1)
+        self.assertEqual(_FakeSMTP.instances[0].timeout, 12.5)
+
+    def test_default_timeout_is_a_finite_positive_number(self) -> None:
+        # A missing/None/zero default would silently reopen the hang this
+        # bundle closes -- SmtpSettings' own default must be a real timeout.
+        self.assertGreater(_SMTP_SETTINGS.timeout_seconds, 0)
+        self.assertLess(_SMTP_SETTINGS.timeout_seconds, float("inf"))
 
 
 if __name__ == "__main__":

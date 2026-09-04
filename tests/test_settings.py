@@ -15,11 +15,15 @@ from __future__ import annotations
 import os
 import unittest
 
-from kerdoos.config import DEFAULT_SMTP_PORT, get_settings
+from kerdoos.config import (
+    DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_SMTP_PORT,
+    DEFAULT_SMTP_TIMEOUT_SECONDS, get_settings,
+)
 
 _SMTP_ENV_VARS = (
     "KERDOOS_SMTP_HOST", "KERDOOS_SMTP_PORT", "KERDOOS_SMTP_FROM",
     "KERDOOS_SMTP_USERNAME", "KERDOOS_SMTP_PASSWORD", "KERDOOS_SMTP_USE_TLS",
+    "KERDOOS_SMTP_TIMEOUT_SECONDS", "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
 )
 
 
@@ -55,6 +59,15 @@ class SmtpUnsetDefaultsTest(_SettingsTestBase):
         settings = get_settings()
         self.assertTrue(settings.smtp_use_tls)
 
+    def test_smtp_timeout_defaults_below_reaper_timeout(self) -> None:
+        # The Phase 7a fast-follow invariant (roadmap 58d88fe0) must hold
+        # even between the two DEFAULTS, not just when an operator sets both
+        # explicitly -- otherwise a fresh deployment starts already wedged.
+        settings = get_settings()
+        self.assertEqual(settings.smtp_timeout_seconds, DEFAULT_SMTP_TIMEOUT_SECONDS)
+        self.assertLess(
+            settings.smtp_timeout_seconds, DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS)
+
 
 class SmtpSetFromEnvTest(_SettingsTestBase):
     def test_all_smtp_fields_read_from_env(self) -> None:
@@ -64,6 +77,7 @@ class SmtpSetFromEnvTest(_SettingsTestBase):
         os.environ["KERDOOS_SMTP_USERNAME"] = "digestuser"
         os.environ["KERDOOS_SMTP_PASSWORD"] = "s3cret"
         os.environ["KERDOOS_SMTP_USE_TLS"] = "false"
+        os.environ["KERDOOS_SMTP_TIMEOUT_SECONDS"] = "45"
 
         settings = get_settings()
 
@@ -73,6 +87,7 @@ class SmtpSetFromEnvTest(_SettingsTestBase):
         self.assertEqual(settings.smtp_username, "digestuser")
         self.assertEqual(settings.smtp_password, "s3cret")
         self.assertFalse(settings.smtp_use_tls)
+        self.assertEqual(settings.smtp_timeout_seconds, 45.0)
 
     def test_empty_string_host_is_treated_as_unset(self) -> None:
         # KERDOOS_SMTP_HOST="" (e.g. an env template with a blank default)

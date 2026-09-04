@@ -36,6 +36,16 @@ leave certificate/hostname verification to whatever default smtplib/ssl
 happen to apply. Fail-closed is preserved unchanged: if use_tls=True and the
 server does not advertise STARTTLS support, smtplib.SMTPNotSupportedError
 propagates uncaught -- there is no plaintext fallback path.
+
+S7 (Phase 7a fast-follow, roadmap 58d88fe0): smtplib.SMTP() is opened with
+an explicit socket timeout (SmtpSettings.timeout_seconds). A server that
+accepts the TCP connection then never responds would otherwise hang the
+send indefinitely and wedge the evaluator loop -- core.evaluator's reaper
+only reclaims a stranded job_runs row on a LATER tick by wall-clock
+comparison, it cannot unblock an in-flight call. digest.factory.build_sender
+enforces timeout_seconds < Settings.digest_reaper_timeout_seconds at
+construction, so the SMTP call always times out before the reaper's own
+staleness window would need to reclaim the same row.
 """
 
 from __future__ import annotations
@@ -69,6 +79,7 @@ class SmtpSettings:
     username: str | None = None
     password: str | None = None
     use_tls: bool = True
+    timeout_seconds: float = 30.0
 
 
 def _clean_header(value: str) -> str:
@@ -130,7 +141,9 @@ class SmtpDigestSender:
         message.set_content(text_body)
         message.add_alternative(html_body, subtype="html")
 
-        with smtplib.SMTP(self._smtp.host, self._smtp.port) as client:
+        with smtplib.SMTP(
+            self._smtp.host, self._smtp.port, timeout=self._smtp.timeout_seconds,
+        ) as client:
             if self._smtp.use_tls:
                 # S6 (CWE-295): explicit context -- check_hostname=True,
                 # verify_mode=CERT_REQUIRED. No STARTTLS support on the

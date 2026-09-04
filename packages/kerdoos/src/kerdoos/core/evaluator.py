@@ -399,9 +399,10 @@ async def run_evaluator_loop(
     applied one level up).
 
     reaper_timeout_seconds is forwarded to every evaluate_tick call as-is
-    (see evaluate_tick's docstring) -- interfaces/web/app.py's lifespan does
-    not pass this explicitly, so the intra-process evaluator always uses the
-    300s function default.
+    (see evaluate_tick's docstring). interfaces/web/app.py's lifespan passes
+    Settings.digest_reaper_timeout_seconds explicitly (Phase 7a fast-follow,
+    roadmap 58d88fe0); callers that omit it fall back to the 300s function
+    default.
 
     Builds ONE send_semaphore (S4) here and reuses it across every tick of
     this loop -- ticks of the SAME loop never overlap (each await blocks the
