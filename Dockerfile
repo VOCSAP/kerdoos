@@ -50,7 +50,8 @@ RUN useradd -u 10001 -m kerdoos \
     && chown 10001:10001 /data
 VOLUME ["/data"]
 ENV KERDOOS_CONFIG_DB=/data/config.db \
-    KERDOOS_STATE_DB=/data/state.db
+    KERDOOS_STATE_DB=/data/state.db \
+    KERDOOS_DIGEST_EVALUATOR_ENABLED=true
 
 EXPOSE 8000
 # Shell form + exec: KERDOOS_WORKERS drives the REAL uvicorn worker count
@@ -59,12 +60,13 @@ EXPOSE 8000
 # raising KERDOOS_WORKERS also raises the actual process count, and every
 # one of those processes reads the same env var and refuses the evaluator.
 # `exec` keeps uvicorn as PID 1 for correct SIGTERM handling. The value is
-# validated (falls back to 1 on empty/non-numeric input) rather than
-# interpolated raw, since an unquoted `${VAR:-1}` word-splits on whitespace.
+# validated (falls back to 1 on empty/non-numeric input, clamped to 32) --
+# an unquoted `${VAR:-1}` word-splits on whitespace, and an unclamped huge
+# value forks enough processes to take the host down, typo or not.
 # Both targets inherit this CMD unchanged; do not duplicate it per stage.
 CMD case "$KERDOOS_WORKERS" in \
       ''|*[!0-9]*) W=1 ;; \
-      *) W="$KERDOOS_WORKERS" ;; \
+      *) W="$KERDOOS_WORKERS"; [ "$W" -gt 32 ] && W=32 ;; \
     esac; \
     exec uvicorn kerdoos.interfaces.web.app:create_app --factory \
       --host 0.0.0.0 --port 8000 --workers "$W"
