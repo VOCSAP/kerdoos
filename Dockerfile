@@ -10,26 +10,27 @@
 #   docker build --target slim       -t kerdoos:slim .
 #   docker build --target autonomous -t kerdoos:autonomous .
 #
-# Phase 7b (ADR 0002 Decision 5): both targets serve the WebUI via the
-# create_app() factory. Persistence (config.db/state.db), auth, digest SMTP
-# and the egress-proxy are all runtime concerns configured through env vars
-# and the /data volume (see the base stage below) -- nothing here is
+# ADR 0002 Decision 5: both targets serve the WebUI via the create_app()
+# factory. Persistence (config.db/state.db), auth, digest SMTP and the
+# egress-proxy are all runtime concerns configured through env vars and the
+# /data volume (see the base stage below) -- nothing here is
 # deployment-specific.
 
-# Pinned by digest (not just the "3.12-slim" tag) for a reproducible build
-# and a closed supply-chain window -- re-resolve with `docker pull
-# python:3.12-slim` when bumping.
-FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS base
+# Pinned by digest AND platform (a digest alone still resolves a multi-arch
+# index, not one architecture) for a reproducible build and a closed
+# supply-chain window -- re-resolve with `docker pull python:3.12-slim` when
+# bumping.
+FROM --platform=linux/amd64 python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS base
 
 RUN pip install --no-cache-dir uv==0.10.4
 
 WORKDIR /app
 
+# Manifests only in this layer (no src/ yet) so the dependency-download layer
+# each child stage builds below stays cached across source-code edits.
 COPY pyproject.toml uv.lock ./
 COPY packages/autolycos/pyproject.toml packages/autolycos/pyproject.toml
 COPY packages/kerdoos/pyproject.toml packages/kerdoos/pyproject.toml
-COPY packages/autolycos/src packages/autolycos/src
-COPY packages/kerdoos/src packages/kerdoos/src
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
@@ -42,24 +43,14 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # /data so an operator who only mounts a volume at /data gets a working
 # deployment out of the box, still fully overridable via compose/env.
 # Non-root user for the slim stage (see USER below) -- created here so a
-# named volume mounted at /data inherits this ownership on first init.
+# named volume mounted at /data inherits this ownership on first init. Only
+# /data is chowned: nothing else in the image needs to be writable by it.
 RUN useradd -u 10001 -m kerdoos \
     && mkdir -p /data \
-    && chown 10001:10001 /data /app
+    && chown 10001:10001 /data
 VOLUME ["/data"]
 ENV KERDOOS_CONFIG_DB=/data/config.db \
     KERDOOS_STATE_DB=/data/state.db
-
-# --- slim: http + tls tiers, web extra (uvicorn) -----------------------
-FROM base AS slim
-
-RUN uv sync --frozen --no-dev --extra web --extra tls
-
-# No browser in this target (escalation stops at tls), so dropping root here
-# costs nothing and denies a compromised request handler write access to
-# anything but /data. autonomous stays root in this pass (Chromium's own
-# sandbox already refuses to run as root, see the `autonomous` stage).
-USER 10001
 
 EXPOSE 8000
 # Shell form + exec: KERDOOS_WORKERS drives the REAL uvicorn worker count
@@ -67,14 +58,44 @@ EXPOSE 8000
 # the intra-process evaluator both on" is unreachable by construction --
 # raising KERDOOS_WORKERS also raises the actual process count, and every
 # one of those processes reads the same env var and refuses the evaluator.
-CMD exec uvicorn kerdoos.interfaces.web.app:create_app --factory \
-    --host 0.0.0.0 --port 8000 --workers ${KERDOOS_WORKERS:-1}
+# `exec` keeps uvicorn as PID 1 for correct SIGTERM handling. The value is
+# validated (falls back to 1 on empty/non-numeric input) rather than
+# interpolated raw, since an unquoted `${VAR:-1}` word-splits on whitespace.
+# Both targets inherit this CMD unchanged; do not duplicate it per stage.
+CMD case "$KERDOOS_WORKERS" in \
+      ''|*[!0-9]*) W=1 ;; \
+      *) W="$KERDOOS_WORKERS" ;; \
+    esac; \
+    exec uvicorn kerdoos.interfaces.web.app:create_app --factory \
+      --host 0.0.0.0 --port 8000 --workers "$W"
+
+# --- slim: http + tls tiers, web extra (uvicorn) -----------------------
+FROM base AS slim
+
+RUN uv sync --frozen --no-dev --no-install-project --extra web --extra tls
+COPY packages/autolycos/src packages/autolycos/src
+COPY packages/kerdoos/src packages/kerdoos/src
+RUN uv sync --frozen --no-dev --extra web --extra tls
+
+# No browser in this target (escalation stops at tls), so dropping root here
+# costs nothing. autonomous stays root: MEASURED that patchright's Chromium
+# launches fine as root without --no-sandbox in this image (no evidence it
+# requires non-root), so dropping root there is a separate, untested change
+# (Chromium cache dirs, seleniumbase's driver-patching, Xvfb) deferred to its
+# own pass rather than bundled in here.
+USER 10001
 
 # --- autonomous: + browser + uc_selenium tiers --------------------------
 FROM base AS autonomous
 
-RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc
+RUN uv sync --frozen --no-dev --no-install-project --extra web --extra tls --extra browser --extra uc
 
+# Both of these are pure tool/environment setup with zero dependency on our
+# source code -- placed BEFORE the src COPY (unlike the plain deps sync
+# above, Docker layer caching is strictly sequential, so a step placed AFTER
+# a source copy re-runs on every source edit regardless of what it actually
+# depends on) so a code change never re-downloads Chromium or the driver.
+#
 # Chromium runtime deps for the browser tier. The browser tier is launched by
 # patchright (undetected fork), so install patchright's Chromium (NOT vanilla
 # playwright's) here.
@@ -86,12 +107,21 @@ RUN uv run patchright install --with-deps chromium
 # runtime (browser_launcher.get_local_driver only re-fetches on a missing
 # file or an explicit version mismatch, neither of which applies once this
 # exact pinned binary is already on disk).
+#
+# TOFU, not provenance: Chrome for Testing publishes no signature or
+# checksum manifest for these artifacts (checked against their official
+# JSON feed), so this hash is trust-on-first-use, captured by us, not
+# verified against a third party. To let a future maintainer replay the
+# capture: fetched from
+# https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.155/linux64/chromedriver-linux64.zip
+# on linux/amd64 -- capture context is in the commit that introduced this
+# hash, not repeated here (would drift out of sync with a future re-pin).
 ARG UC_DRIVER_VERSION=149.0.7827.155
 ARG UC_DRIVER_SHA256=5ab28c2e806725ecad5a92cf000988a697c6163eb8d4672bd25d6f37a8e5b7e8
 RUN sbase get uc_driver ${UC_DRIVER_VERSION} \
     && echo "${UC_DRIVER_SHA256}  /app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/uc_driver" \
        | sha256sum -c -
 
-EXPOSE 8000
-CMD exec uvicorn kerdoos.interfaces.web.app:create_app --factory \
-    --host 0.0.0.0 --port 8000 --workers ${KERDOOS_WORKERS:-1}
+COPY packages/autolycos/src packages/autolycos/src
+COPY packages/kerdoos/src packages/kerdoos/src
+RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc

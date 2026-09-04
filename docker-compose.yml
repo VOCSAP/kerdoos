@@ -10,6 +10,11 @@
 # guard then refuses in every one of those processes -- pair that change
 # with KERDOOS_DIGEST_EVALUATOR_ENABLED=false and an external cron instead,
 # never both on at once (breaks the scheduler's exactly-once guarantee).
+# Every KERDOOS_* value below comes ONLY from `.env` (no `environment:`
+# block here) so this coupling cannot be silently defeated by compose
+# precedence -- the one thing that CAN still defeat it is an operator
+# overriding `command:` on a service, which bypasses the Dockerfile CMD
+# entirely; don't.
 #
 # Port 9222 (Chromium CDP) is never mapped and must stay that way. Port 8000
 # is bound to loopback only -- put a reverse proxy in front for LAN access,
@@ -23,11 +28,9 @@ services:
       context: .
       target: slim
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file:
       - .env
-    environment:
-      KERDOOS_WORKERS: "1"
-      KERDOOS_DIGEST_EVALUATOR_ENABLED: "true"
     volumes:
       - kerdoos-data:/data
     ports:
@@ -39,11 +42,9 @@ services:
       context: .
       target: autonomous
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file:
       - .env
-    environment:
-      KERDOOS_WORKERS: "1"
-      KERDOOS_DIGEST_EVALUATOR_ENABLED: "true"
     volumes:
       - kerdoos-data:/data
     ports:
