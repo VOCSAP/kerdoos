@@ -4,13 +4,17 @@
 #
 # Secrets (session secret, SMTP) come from a local `.env` (gitignored, copy
 # `env.example`). Default topology is ADR 0002's self-contained S-B: one
-# uvicorn worker (no --workers flag) running the intra-process digest
-# evaluator. The evaluator's own workers>1 guard refuses to start if
-# KERDOOS_WORKERS is ever raised above 1 here -- pair that change with
-# KERDOOS_DIGEST_EVALUATOR_ENABLED=false and an external cron instead, never
-# both on at once (breaks the scheduler's exactly-once guarantee).
+# uvicorn worker (--workers reads KERDOOS_WORKERS, see the Dockerfile CMD)
+# running the intra-process digest evaluator. Raising KERDOOS_WORKERS also
+# raises the real uvicorn worker count, and the evaluator's own workers>1
+# guard then refuses in every one of those processes -- pair that change
+# with KERDOOS_DIGEST_EVALUATOR_ENABLED=false and an external cron instead,
+# never both on at once (breaks the scheduler's exactly-once guarantee).
 #
-# Port 9222 (Chromium CDP) is never mapped and must stay that way.
+# Port 9222 (Chromium CDP) is never mapped and must stay that way. Port 8000
+# is bound to loopback only -- put a reverse proxy in front for LAN access,
+# do not widen this to "8000:8000" (that publishes on every interface,
+# including any WAN/VPN one the host may have).
 
 services:
   kerdoos-slim:
@@ -24,11 +28,10 @@ services:
     environment:
       KERDOOS_WORKERS: "1"
       KERDOOS_DIGEST_EVALUATOR_ENABLED: "true"
-      KERDOOS_COOKIE_SECURE: "true"
     volumes:
       - kerdoos-data:/data
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   kerdoos-autonomous:
     profiles: ["autonomous"]
@@ -41,11 +44,10 @@ services:
     environment:
       KERDOOS_WORKERS: "1"
       KERDOOS_DIGEST_EVALUATOR_ENABLED: "true"
-      KERDOOS_COOKIE_SECURE: "true"
     volumes:
       - kerdoos-data:/data
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
 volumes:
   kerdoos-data:
