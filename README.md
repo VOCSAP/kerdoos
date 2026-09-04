@@ -61,7 +61,7 @@ kerdoos/
   packages/autolycos/  anti-bot subsystem (workspace member, being extracted)
   config/              sites and products
   docs/adr/            architecture decision records (source of truth)
-  DESIGN.md            full design
+  DESIGN.md            WebUI design guide (tokens, states, layout)
 ```
 
 ## Development
@@ -74,8 +74,8 @@ uv run pytest           # run the test suite
 ```
 
 Tooling is `uv` (dependencies) plus `ruff` (lint and format) plus `pytest`
-(tests). See `AGENTS.md` for conventions and invariants, and `DESIGN.md` plus
-`docs/adr/` for the design rationale.
+(tests). See `AGENTS.md` for conventions and invariants, `docs/adr/` for the
+architecture rationale, and `DESIGN.md` for the WebUI design guide.
 
 ## Deployment
 

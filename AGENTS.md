@@ -2,7 +2,8 @@
 
 Guidance for AI coding agents working in this repository. Think of it as a README
 for agents: read it before making changes. For the product overview see
-`README.md`; for the full design and rationale see `DESIGN.md` and `docs/adr/`.
+`README.md`; for the architecture rationale see `docs/adr/`; for the WebUI
+design guide see `DESIGN.md`.
 
 ## What this project is
 
@@ -84,8 +85,11 @@ the request body, and scoping is enforced in SQL as the last line of defense.
 
 ## Where the truth lives
 
-- `DESIGN.md` -- complete design.
+- `docs/adr/0000` -- founding decisions (monorepo vs submodule, no
+  changedetection.io fork, SQLite over flat files).
 - `docs/adr/0001` -- post-MVP platform (WebUI, MCP, multi-tenant).
 - `docs/adr/0002` -- productionisation (scheduler, packaging, tooling).
 - `docs/adr/0003` -- digest jobs and notification rules.
+- `DESIGN.md` -- WebUI design guide (tokens, typography, state matrix,
+  layout), not an architecture document.
 When code and a document disagree, trust the code and flag the drift.

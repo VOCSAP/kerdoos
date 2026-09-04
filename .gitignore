@@ -18,9 +18,8 @@ venv/
 *.egg-info/
 
 # Phase-implementation docs / dev-local config -- not part of the public slice
-CLAUDE.md
-DESIGN.md
 RECON.md
+CLAUDE.local.md
 
 # Spike scratch tooling (kept in a separate spike repo/conversation)
 recon.py
@@ -32,10 +31,9 @@ spike/
 # audit) -- consulted, never part of our deliverable/build.
 crawl4ai/
 
-# Design docs with deployment/infra detail (LXC, private IPs, topology) -- same
-# class as DESIGN.md/RECON.md above; kept local, not versioned (assume the repo
-# may become public).
-docs/
+# Phase-development artifacts (progress notes, WIP patches) -- not part of the
+# public slice, distinct from docs/adr/ and DESIGN.md which are versioned.
+/docs/internal/
 
 # Agent tooling local state (peers, memory, hooks) -- operator decision, not versioned
 .claude/
