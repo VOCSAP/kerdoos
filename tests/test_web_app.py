@@ -101,8 +101,8 @@ class DigestEvaluatorLifespanTest(unittest.TestCase):
         )
 
     def test_reaper_timeout_env_var_reaches_run_evaluator_loop(self) -> None:
-        """Phase 7a fast-follow (roadmap 58d88fe0): the WebUI lifespan must
-        forward Settings.digest_reaper_timeout_seconds into run_evaluator_loop
+        """roadmap 58d88fe0: the WebUI lifespan must forward
+        Settings.digest_reaper_timeout_seconds into run_evaluator_loop
         -- asserted against the EFFECTIVE value the env var sets (17s), not
         the 300s function default, so a stale wiring gap (silently ignoring
         the env var) would fail this test."""
@@ -125,6 +125,26 @@ class DigestEvaluatorLifespanTest(unittest.TestCase):
 
         self.assertEqual(captured.get("reaper_timeout_seconds"), 17)
         self.assertNotEqual(captured.get("reaper_timeout_seconds"), 300)
+
+    def test_smtp_timeout_gte_reaper_timeout_does_not_crash_webui_startup(
+        self,
+    ) -> None:
+        """roadmap 58d88fe0 gate fix (MAJOR): build_sender() runs inside the
+        ASGI lifespan (app.py -> digest.factory.build_sender). Raising there
+        used to fail ASGI startup entirely -- no /health, no login -- from a
+        misconfiguration as mundane as lowering the reaper timeout below the
+        default SMTP timeout. It must now degrade (clamp + warn), not crash."""
+        self._patch_env(
+            KERDOOS_DIGEST_EVALUATOR_ENABLED="true", KERDOOS_WORKERS="1",
+            KERDOOS_SMTP_HOST="smtp.example.com", KERDOOS_SMTP_FROM="digest@example.com",
+            KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS="10",
+            # KERDOOS_SMTP_TIMEOUT_SECONDS left unset -> default 30s, which is
+            # >= this reaper_timeout_seconds=10 -- the exact case that used
+            # to raise ValueError out of the lifespan's build_sender() call.
+        )
+        with TestClient(create_app()) as client:
+            resp = client.get("/health")
+            self.assertEqual(resp.status_code, 200)
 
 
 if __name__ == "__main__":

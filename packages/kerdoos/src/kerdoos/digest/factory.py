@@ -45,20 +45,6 @@ def build_sender(
         )
         return LogDigestSender()
 
-    # Phase 7a fast-follow (roadmap 58d88fe0): the SMTP socket timeout must
-    # stay strictly below the reaper's staleness window, or a wedged send
-    # could still outlive what the reaper considers "stale enough to reap" --
-    # enforced here (construction time) rather than left as a coincidence of
-    # the two defaults.
-    if settings.smtp_timeout_seconds >= settings.digest_reaper_timeout_seconds:
-        raise ValueError(
-            "KERDOOS_SMTP_TIMEOUT_SECONDS "
-            f"({settings.smtp_timeout_seconds}) must be strictly less than "
-            "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS "
-            f"({settings.digest_reaper_timeout_seconds}), otherwise a wedged "
-            "SMTP send could still outlive the reaper's staleness window."
-        )
-
     email_lookup = SqliteAuthStore(config_db_path or settings.config_db).get_email
     smtp_settings = SmtpSettings(
         host=settings.smtp_host,
@@ -67,6 +53,31 @@ def build_sender(
         username=settings.smtp_username,
         password=settings.smtp_password,
         use_tls=settings.smtp_use_tls,
-        timeout_seconds=settings.smtp_timeout_seconds,
+        timeout_seconds=_safe_smtp_timeout(
+            settings.smtp_timeout_seconds, settings.digest_reaper_timeout_seconds),
     )
     return SmtpDigestSender(config_store, domain_policy, email_lookup, smtp_settings)
+
+
+def _safe_smtp_timeout(smtp_timeout: float, reaper_timeout: int) -> float:
+    """roadmap 58d88fe0: the SMTP socket timeout must stay strictly between 0
+    and the reaper's staleness window, or a wedged send could outlive what
+    the reaper considers "stale enough to reap". A misconfigured value (>=
+    reaper_timeout, zero, negative, or NaN -- `0 < t < reaper` rejects all
+    four, since any comparison against NaN is False) degrades to a clamped
+    safe value with a warning instead of raising: build_sender runs inside
+    interfaces/web/app.py's ASGI lifespan, where an uncaught exception fails
+    the entire WebUI startup (no /health, no login), not just the digest
+    path -- mirrors this module's existing degrade-not-crash policy for a
+    missing SMTP host/from."""
+    if 0 < smtp_timeout < reaper_timeout:
+        return smtp_timeout
+    clamped = max(1.0, float(reaper_timeout) - 1.0)
+    logger.warning(
+        "KERDOOS_SMTP_TIMEOUT_SECONDS=%r is not a valid value strictly "
+        "between 0 and KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS=%s: clamping "
+        "the SMTP socket timeout to %ss so a wedged send still unblocks "
+        "before the reaper's staleness window.",
+        smtp_timeout, reaper_timeout, clamped,
+    )
+    return clamped

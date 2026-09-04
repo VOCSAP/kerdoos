@@ -72,9 +72,9 @@ def cmd_digest(args: argparse.Namespace) -> int:
     domain_policy = CatalogueDomainPolicy(config_store)
     router = StaticRouter(domain_policy)
     settings = get_settings()
-    sender = build_sender(
-        settings, config_store, domain_policy, config_db_path=args.config_db)
     try:
+        sender = build_sender(
+            settings, config_store, domain_policy, config_db_path=args.config_db)
         summary = asyncio.run(evaluate_tick(
             config_store=config_store, state_store=state_store,
             router=router, parser_factory=build_parser,

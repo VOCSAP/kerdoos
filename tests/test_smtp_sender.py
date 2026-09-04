@@ -332,8 +332,8 @@ class StarttlsSslContextTest(_SmtpSenderTestBase):
 
 
 class SmtpSocketTimeoutTest(_SmtpSenderTestBase):
-    """Phase 7a fast-follow (roadmap 58d88fe0): smtplib.SMTP() must be opened
-    with an explicit socket timeout, so a server that accepts the connection
+    """roadmap 58d88fe0: smtplib.SMTP() must be opened with an explicit
+    per-operation socket timeout, so a server that accepts the connection
     then never responds cannot hang the send indefinitely."""
 
     def test_smtp_is_opened_with_the_configured_timeout(self) -> None:

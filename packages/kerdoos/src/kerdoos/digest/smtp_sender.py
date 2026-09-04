@@ -37,15 +37,19 @@ happen to apply. Fail-closed is preserved unchanged: if use_tls=True and the
 server does not advertise STARTTLS support, smtplib.SMTPNotSupportedError
 propagates uncaught -- there is no plaintext fallback path.
 
-S7 (Phase 7a fast-follow, roadmap 58d88fe0): smtplib.SMTP() is opened with
-an explicit socket timeout (SmtpSettings.timeout_seconds). A server that
-accepts the TCP connection then never responds would otherwise hang the
-send indefinitely and wedge the evaluator loop -- core.evaluator's reaper
-only reclaims a stranded job_runs row on a LATER tick by wall-clock
-comparison, it cannot unblock an in-flight call. digest.factory.build_sender
-enforces timeout_seconds < Settings.digest_reaper_timeout_seconds at
-construction, so the SMTP call always times out before the reaper's own
-staleness window would need to reclaim the same row.
+S7 (roadmap 58d88fe0): smtplib.SMTP() is opened with an explicit socket
+timeout (SmtpSettings.timeout_seconds). This is a PER-OPERATION timeout
+(stdlib smtplib passes it to socket.create_connection, inherited by
+starttls' SSL wrap) -- it bounds connect/EHLO/STARTTLS/login/sendmail
+INDIVIDUALLY, so a server that accepts the TCP connection then never
+responds at all is closed: that read unblocks. It is NOT a total deadline:
+a relay that stays alive and answers one line just under the timeout on
+every operation can still hold the session for a multiple of
+timeout_seconds, longer than the reaper's staleness window. The total-
+duration case is closed one layer up, in core.evaluator._run_plan_b, which
+wraps the blocking send in asyncio.wait_for(..., timeout=reaper_timeout_seconds)
+so the evaluator loop reclaims its send_semaphore slot even if the
+underlying thread lingers (Python cannot forcibly kill a thread).
 """
 
 from __future__ import annotations

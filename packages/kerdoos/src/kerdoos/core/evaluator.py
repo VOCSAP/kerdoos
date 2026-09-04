@@ -200,6 +200,7 @@ async def _run_plan_b(
     tick_now: datetime,
     summary: EvaluationSummary,
     send_semaphore: asyncio.Semaphore,
+    send_timeout_seconds: int,
 ) -> None:
     for job in jobs:
         try:
@@ -227,9 +228,22 @@ async def _run_plan_b(
                 # per-job DB singleton above (has_active_job_run). Dispatched
                 # via asyncio.to_thread so a real blocking SMTP call cannot
                 # stall the event loop while holding the semaphore slot.
+                #
+                # roadmap 58d88fe0: wrapped in wait_for with a TOTAL deadline
+                # -- SmtpSettings.timeout_seconds only bounds each individual
+                # smtplib operation, not the whole send, so a relay that
+                # stays alive and trickles a response just under that
+                # per-operation timeout could otherwise hold the semaphore
+                # slot far longer than send_timeout_seconds. On timeout the
+                # `await` raises and the send_semaphore slot is released,
+                # unblocking the loop even though the underlying to_thread
+                # thread cannot itself be cancelled and may linger.
                 async with send_semaphore:
-                    sent = await asyncio.to_thread(
-                        sender.send, job, records, now_iso, tier2_labels)
+                    sent = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            sender.send, job, records, now_iso, tier2_labels),
+                        timeout=send_timeout_seconds,
+                    )
             except Exception as exc:  # noqa: BLE001 -- one job must not kill the tick
                 state_store.update_job_run(
                     job.id, window_start, status="error",
@@ -315,7 +329,11 @@ async def evaluate_tick(
     max-send-timeout bound _reap_stale_job_runs uses to decide a job_runs
     row is stranded (fired_at older than this many seconds ago). Default
     300s (5 minutes). A plain function default, not threaded through
-    Settings -- mirrors max_concurrent_sends's precedent.
+    Settings -- mirrors max_concurrent_sends's precedent. Also reused
+    (roadmap 58d88fe0) as Plan B's send_timeout_seconds -- the TOTAL
+    wall-clock deadline asyncio.wait_for gives a single sender.send call,
+    so a job stuck longer than this window releases the send_semaphore
+    slot on the same schedule the reaper would consider its row stale.
 
     send_semaphore (S4, ADR 0003 Phase 6b tranche 4): the ceiling on
     simultaneously in-flight sender.send calls. By default a FRESH
@@ -376,7 +394,7 @@ async def evaluate_tick(
     await _run_plan_b(
         jobs=jobs, source_index=source_index, state_store=state_store,
         sender=sender, now_iso=now_iso, tick_now=tick_now, summary=summary,
-        send_semaphore=semaphore,
+        send_semaphore=semaphore, send_timeout_seconds=reaper_timeout_seconds,
     )
     return summary
 
@@ -400,9 +418,8 @@ async def run_evaluator_loop(
 
     reaper_timeout_seconds is forwarded to every evaluate_tick call as-is
     (see evaluate_tick's docstring). interfaces/web/app.py's lifespan passes
-    Settings.digest_reaper_timeout_seconds explicitly (Phase 7a fast-follow,
-    roadmap 58d88fe0); callers that omit it fall back to the 300s function
-    default.
+    Settings.digest_reaper_timeout_seconds explicitly (roadmap 58d88fe0);
+    callers that omit it fall back to the 300s function default.
 
     Builds ONE send_semaphore (S4) here and reuses it across every tick of
     this loop -- ticks of the SAME loop never overlap (each await blocks the

@@ -60,9 +60,9 @@ class SmtpUnsetDefaultsTest(_SettingsTestBase):
         self.assertTrue(settings.smtp_use_tls)
 
     def test_smtp_timeout_defaults_below_reaper_timeout(self) -> None:
-        # The Phase 7a fast-follow invariant (roadmap 58d88fe0) must hold
-        # even between the two DEFAULTS, not just when an operator sets both
-        # explicitly -- otherwise a fresh deployment starts already wedged.
+        # The ordering invariant (roadmap 58d88fe0) must hold even between
+        # the two DEFAULTS, not just when an operator sets both explicitly --
+        # otherwise a fresh deployment starts already wedged.
         settings = get_settings()
         self.assertEqual(settings.smtp_timeout_seconds, DEFAULT_SMTP_TIMEOUT_SECONDS)
         self.assertLess(

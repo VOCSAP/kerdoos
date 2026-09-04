@@ -715,5 +715,76 @@ def _minutes(n: int):
     return timedelta(minutes=n)
 
 
+class _PerJobDelaySender:
+    """DigestSender double whose send() delay is keyed by job.name -- lets a
+    single evaluate_tick call exercise one job that overruns the total send
+    deadline and one that completes well within it, in the SAME tick."""
+
+    def __init__(self, delays: dict[str, float]) -> None:
+        self._delays = delays
+        self.calls: list[str] = []
+
+    def send(self, job, records, generated_at, tier2_labels) -> bool:
+        time.sleep(self._delays.get(job.name, 0.0))
+        self.calls.append(job.name)
+        return True
+
+
+class PlanBSendTotalDeadlineTest(unittest.IsolatedAsyncioTestCase):
+    """roadmap 58d88fe0: SmtpSettings.timeout_seconds only bounds a SINGLE
+    smtplib operation, not the whole send -- a slow-but-alive relay could
+    hold the send_semaphore slot far longer than reaper_timeout_seconds
+    without a TOTAL deadline. evaluate_tick wraps sender.send in
+    asyncio.wait_for(..., timeout=reaper_timeout_seconds) so one stuck job
+    cannot block the rest of the SAME tick."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    async def test_one_job_overrunning_the_deadline_does_not_block_the_next(
+        self,
+    ) -> None:
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        config = SqliteConfigStore(Path(self._tmp.name) / "config.db")
+        state = SqliteStateStore(Path(self._tmp.name) / "state.db")
+        self.addCleanup(config.close)
+        self.addCleanup(state.close)
+        domain_policy = CatalogueDomainPolicy(config)
+        router = _StubRouter({"http": _FakeFetcher()})
+        service = AppService(config, state, router, domain_policy, build_parser)
+        config.add_site(_SITE)
+
+        for owner in ("slow-owner", "fast-owner"):
+            service.add_product(owner, ProductSpec("p1"))
+            source = service.add_source(
+                owner, "p1", "kabum", f"https://www.kabum.com.br/p/{owner}")
+            service.create_job(
+                Principal(owner_id=owner),
+                DigestJobSpec(name=f"job-{owner}", frequency_kind="hourly",
+                              source_ids=(source.source_id,)))
+            state.record(owner, ScrapeRecord(
+                source_id=source.source_id, ts=(tick_now - _minutes(1)).isoformat(),
+                status=ScrapeStatus.OK, price_pix_cents=100, price_card_cents=110,
+                currency="BRL", availability=Availability.IN_STOCK, method="http",
+                error=None,
+            ))
+
+        sender = _PerJobDelaySender({"job-slow-owner": 0.3, "job-fast-owner": 0.0})
+
+        summary = await evaluate_tick(
+            config_store=config, state_store=state, router=router,
+            parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+            max_concurrent_sends=1, reaper_timeout_seconds=0.05,
+        )
+
+        # Without the total deadline, job-slow-owner's send() would still be
+        # blocking the loop when this assertion runs -- job-fast-owner would
+        # never have been attempted in the SAME tick.
+        self.assertIn("job-fast-owner", sender.calls)
+        self.assertEqual(summary.notified_jobs, 1)
+        self.assertEqual(summary.errors, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

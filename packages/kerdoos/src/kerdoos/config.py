@@ -28,12 +28,14 @@ reaper sweep uses to reclaim a job_runs row stranded in 'queued'/'running'
 (interfaces/cli/main.py's cmd_digest) and the WebUI's intra-process
 evaluator lifespan (interfaces/web/app.py).
 
-KERDOOS_SMTP_TIMEOUT_SECONDS (Phase 7a fast-follow, roadmap 58d88fe0): the
-socket timeout smtplib.SMTP() is opened with (digest.smtp_sender). Must
-stay strictly below digest_reaper_timeout_seconds -- digest.factory.
-build_sender enforces this at construction -- so a server that accepts the
-connection then never responds unblocks the send before the reaper's own
-staleness window would need to reclaim the stranded job_runs row.
+KERDOOS_SMTP_TIMEOUT_SECONDS (roadmap 58d88fe0): the per-operation socket
+timeout smtplib.SMTP() is opened with (digest.smtp_sender). Should stay
+strictly below digest_reaper_timeout_seconds -- digest.factory.build_sender
+clamps it (with a warning) if it is not, rather than raising, since it runs
+inside interfaces/web/app.py's ASGI lifespan where an uncaught exception
+would fail the whole WebUI startup, not just the digest path. The TOTAL
+send deadline (beyond a single smtplib operation) is enforced separately in
+core.evaluator._run_plan_b via asyncio.wait_for(..., timeout=digest_reaper_timeout_seconds).
 """
 
 from __future__ import annotations
@@ -55,9 +57,8 @@ DEFAULT_SMTP_PORT = 587
 # unrelated timer to a correctness-affecting staleness window).
 DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS = 300
 
-# SMTP socket timeout default (Phase 7a fast-follow, roadmap 58d88fe0) --
-# must stay strictly below DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS so a wedged
-# send always unblocks before the reaper would need to reclaim the row.
+# SMTP per-operation socket timeout default (roadmap 58d88fe0) -- must stay
+# strictly below DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS.
 DEFAULT_SMTP_TIMEOUT_SECONDS = 30
 
 
