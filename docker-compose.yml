@@ -1,9 +1,16 @@
-# Structural skeleton (Phase 0, ADR 0001 §7): two profiles selecting the
-# Docker build target. No SMTP relay, no ConfigStore volume, no egress-proxy
-# wiring here -- those land with their respective ADR-scoped phases.
+# Pick ONE profile per deployment (not meant to run side by side):
+#   docker compose --profile slim up -d        # http + tls tiers only
+#   docker compose --profile autonomous up -d  # + browser + uc_selenium tiers
 #
-#   docker compose --profile slim up        # http + tls tiers only
-#   docker compose --profile autonomous up  # + browser + uc_selenium tiers
+# Secrets (session secret, SMTP) come from a local `.env` (gitignored, copy
+# `env.example`). Default topology is ADR 0002's self-contained S-B: one
+# uvicorn worker (no --workers flag) running the intra-process digest
+# evaluator. The evaluator's own workers>1 guard refuses to start if
+# KERDOOS_WORKERS is ever raised above 1 here -- pair that change with
+# KERDOOS_DIGEST_EVALUATOR_ENABLED=false and an external cron instead, never
+# both on at once (breaks the scheduler's exactly-once guarantee).
+#
+# Port 9222 (Chromium CDP) is never mapped and must stay that way.
 
 services:
   kerdoos-slim:
@@ -11,6 +18,15 @@ services:
     build:
       context: .
       target: slim
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      KERDOOS_WORKERS: "1"
+      KERDOOS_DIGEST_EVALUATOR_ENABLED: "true"
+      KERDOOS_COOKIE_SECURE: "true"
+    volumes:
+      - kerdoos-data:/data
     ports:
       - "8000:8000"
 
@@ -19,5 +35,17 @@ services:
     build:
       context: .
       target: autonomous
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      KERDOOS_WORKERS: "1"
+      KERDOOS_DIGEST_EVALUATOR_ENABLED: "true"
+      KERDOOS_COOKIE_SECURE: "true"
+    volumes:
+      - kerdoos-data:/data
     ports:
       - "8000:8000"
+
+volumes:
+  kerdoos-data:

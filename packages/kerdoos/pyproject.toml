@@ -28,6 +28,14 @@ web = ["uvicorn[standard]>=0.30"]
 [dependency-groups]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 
+# Makes `kerdoos digest` / `kerdoos run` / `kerdoos config ...` resolve to a
+# real executable (uv/pip install puts it on PATH) instead of only being
+# reachable via `python -m kerdoos.interfaces.cli.main`. Required for the
+# workers>1 + external-cron topology (ADR 0002 Decision 1) to actually be
+# runnable as documented.
+[project.scripts]
+kerdoos = "kerdoos.interfaces.cli.main:main"
+
 [tool.uv.sources]
 autolycos = { workspace = true }
 

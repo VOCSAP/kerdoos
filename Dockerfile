@@ -10,9 +10,11 @@
 #   docker build --target slim       -t kerdoos:slim .
 #   docker build --target autonomous -t kerdoos:autonomous .
 #
-# Structural skeleton only (Phase 0, ADR 0001 §7): no auth, no digest SMTP
-# wiring, no SQLite ConfigStore, no egress-proxy. Runs the WebUI /health
-# endpoint via the create_app() factory.
+# Phase 7b (ADR 0002 Decision 5): both targets serve the WebUI via the
+# create_app() factory. Persistence (config.db/state.db), auth, digest SMTP
+# and the egress-proxy are all runtime concerns configured through env vars
+# and the /data volume (see the base stage below) -- nothing here is
+# deployment-specific.
 
 FROM python:3.12-slim AS base
 
@@ -28,6 +30,18 @@ COPY packages/kerdoos/src packages/kerdoos/src
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
+
+# ADR 0002 Decision 6: config.db and state.db are two PHYSICALLY separate
+# SQLite files behind two abstractions (ConfigStore vs StateStore, invariant
+# #7) but share ONE named volume -- the separation is logical (two files),
+# not a requirement for two devices. Paths are read from KERDOOS_CONFIG_DB /
+# KERDOOS_STATE_DB (kerdoos/config.py); these ENV defaults just point both at
+# /data so an operator who only mounts a volume at /data gets a working
+# deployment out of the box, still fully overridable via compose/env.
+RUN mkdir -p /data
+VOLUME ["/data"]
+ENV KERDOOS_CONFIG_DB=/data/config.db \
+    KERDOOS_STATE_DB=/data/state.db
 
 # --- slim: http + tls tiers, web extra (uvicorn) -----------------------
 FROM base AS slim
