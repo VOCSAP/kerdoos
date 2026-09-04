@@ -26,7 +26,11 @@ explicit max-send-timeout bound (default 300s / 5 min) core.evaluator's
 reaper sweep uses to reclaim a job_runs row stranded in 'queued'/'running'
 (e.g. the process crashed mid-send). Wired into both `kerdoos digest`
 (interfaces/cli/main.py's cmd_digest) and the WebUI's intra-process
-evaluator lifespan (interfaces/web/app.py).
+evaluator lifespan (interfaces/web/app.py). Also the TOTAL send deadline
+core.evaluator._run_plan_b passes to asyncio.wait_for -- a non-positive
+value would make that wait_for(timeout=<=0) fail every send instantly, so
+get_settings() floors it to the default (with a warning) rather than
+passing a broken value through (roadmap 58d88fe0).
 
 KERDOOS_SMTP_TIMEOUT_SECONDS (roadmap 58d88fe0): the per-operation socket
 timeout smtplib.SMTP() is opened with (digest.smtp_sender). Should stay
@@ -40,8 +44,11 @@ core.evaluator._run_plan_b via asyncio.wait_for(..., timeout=digest_reaper_timeo
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 # Fast-follow from the Phase 4a gate (architect MEDIUM finding): a non-empty
 # but short secret (e.g. a single character) still passes the HMAC key API,
@@ -95,6 +102,23 @@ class Settings:
         return self.session_secret
 
 
+def _safe_reaper_timeout(raw: int) -> int:
+    """roadmap 58d88fe0 gate fix: digest_reaper_timeout_seconds feeds a raw
+    asyncio.wait_for deadline in core.evaluator._run_plan_b and a timedelta
+    bound in the reaper sweep -- a value <= 0 would make wait_for(timeout=0)
+    fail EVERY digest send instantly, a strictly worse failure mode than the
+    misconfiguration digest.factory._safe_smtp_timeout guards against. Floor
+    to the safe default with a warning rather than let it through."""
+    if raw > 0:
+        return raw
+    logger.warning(
+        "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS=%r must be a positive "
+        "integer: falling back to the default (%ss).",
+        raw, DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
+    )
+    return DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS
+
+
 def get_settings() -> Settings:
     return Settings(
         session_secret=os.environ.get("KERDOOS_SESSION_SECRET"),
@@ -115,7 +139,7 @@ def get_settings() -> Settings:
             os.environ.get("KERDOOS_SMTP_USE_TLS", "true").lower() != "false"),
         smtp_timeout_seconds=float(os.environ.get(
             "KERDOOS_SMTP_TIMEOUT_SECONDS", str(DEFAULT_SMTP_TIMEOUT_SECONDS))),
-        digest_reaper_timeout_seconds=int(os.environ.get(
+        digest_reaper_timeout_seconds=_safe_reaper_timeout(int(os.environ.get(
             "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
-            str(DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS))),
+            str(DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS)))),
     )

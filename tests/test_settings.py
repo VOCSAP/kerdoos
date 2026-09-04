@@ -102,5 +102,33 @@ class SmtpSetFromEnvTest(_SettingsTestBase):
         self.assertTrue(get_settings().smtp_use_tls)
 
 
+class ReaperTimeoutFloorTest(_SettingsTestBase):
+    """roadmap 58d88fe0 gate fix: digest_reaper_timeout_seconds feeds a raw
+    asyncio.wait_for deadline in core.evaluator -- a non-positive value must
+    never reach that deadline, or every digest send fails instantly."""
+
+    def test_zero_floors_to_default_with_warning(self) -> None:
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "0"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(
+            settings.digest_reaper_timeout_seconds,
+            DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS)
+        self.assertTrue(any("positive integer" in msg for msg in cm.output), cm.output)
+
+    def test_negative_floors_to_default_with_warning(self) -> None:
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "-5"
+        with self.assertLogs("kerdoos.config", level="WARNING"):
+            settings = get_settings()
+        self.assertEqual(
+            settings.digest_reaper_timeout_seconds,
+            DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS)
+
+    def test_positive_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "1"
+        settings = get_settings()
+        self.assertEqual(settings.digest_reaper_timeout_seconds, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

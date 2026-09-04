@@ -770,12 +770,12 @@ class PlanBSendTotalDeadlineTest(unittest.IsolatedAsyncioTestCase):
                 error=None,
             ))
 
-        sender = _PerJobDelaySender({"job-slow-owner": 0.3, "job-fast-owner": 0.0})
+        sender = _PerJobDelaySender({"job-slow-owner": 5.0, "job-fast-owner": 0.0})
 
         summary = await evaluate_tick(
             config_store=config, state_store=state, router=router,
             parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
-            max_concurrent_sends=1, reaper_timeout_seconds=0.05,
+            max_concurrent_sends=1, reaper_timeout_seconds=0.5,
         )
 
         # Without the total deadline, job-slow-owner's send() would still be

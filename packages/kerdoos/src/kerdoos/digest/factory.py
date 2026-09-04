@@ -69,10 +69,16 @@ def _safe_smtp_timeout(smtp_timeout: float, reaper_timeout: int) -> float:
     interfaces/web/app.py's ASGI lifespan, where an uncaught exception fails
     the entire WebUI startup (no /health, no login), not just the digest
     path -- mirrors this module's existing degrade-not-crash policy for a
-    missing SMTP host/from."""
+    missing SMTP host/from.
+
+    reaper_timeout is a caller-guaranteed positive int (config.get_settings's
+    _safe_reaper_timeout floors it before it ever reaches here). `reaper / 2`
+    is strictly less than `reaper` for every such value -- unlike the
+    earlier `reaper - 1` formula, which produced clamped == reaper (not
+    strictly less) at reaper_timeout == 1."""
     if 0 < smtp_timeout < reaper_timeout:
         return smtp_timeout
-    clamped = max(1.0, float(reaper_timeout) - 1.0)
+    clamped = max(0.1, float(reaper_timeout) / 2.0)
     logger.warning(
         "KERDOOS_SMTP_TIMEOUT_SECONDS=%r is not a valid value strictly "
         "between 0 and KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS=%s: clamping "

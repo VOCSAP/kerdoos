@@ -118,6 +118,19 @@ class SmtpTimeoutOrderingTest(_FactoryTestBase):
         self.assertGreater(sender._smtp.timeout_seconds, 0)
         self.assertLess(sender._smtp.timeout_seconds, 300)
 
+    def test_reaper_timeout_of_one_still_clamps_strictly_below_reaper(self) -> None:
+        # roadmap 58d88fe0 gate fix: the earlier `max(1.0, reaper - 1.0)`
+        # formula produced clamped == reaper (not strictly less) at
+        # reaper_timeout_seconds == 1 -- the exact case that must now pass.
+        os.environ["KERDOOS_SMTP_TIMEOUT_SECONDS"] = "5"  # invalid: >= reaper=1
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "1"
+
+        with self.assertLogs("kerdoos.digest.factory", level="WARNING"):
+            sender = self._build()
+
+        self.assertGreater(sender._smtp.timeout_seconds, 0)
+        self.assertLess(sender._smtp.timeout_seconds, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
