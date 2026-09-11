@@ -102,10 +102,13 @@ a vis d'ADR 0001 Q6 : le self-contained prime pour l'ergonomie de deploiement.
   - **`run_now`** -- action **per-owner a la demande** (bouton WebUI "verifier
     maintenant" / MCP), enfilee dans la file intra-process. Distincte du batch
     quotidien.
-- Le couplage a l'uptime est mitige par `restart: unless-stopped` **et** un check
-  **catch-up** au boot : si `last_digest_run > 24h`, l'app enfile un digest de
-  rattrapage. Le digest est idempotent (il lit l'etat settled, il n'ecrit pas de
-  prix).
+- Le couplage a l'uptime est mitige par `restart: unless-stopped`, **sans
+  rattrapage au redemarrage** : l'evaluateur reprend a la fenetre courante de
+  chaque job (modele par job, ADR 0003). La fenetre en cours au redemarrage est
+  emise au premier tick si elle ne l'a pas deja ete ; les fenetres anterieures,
+  manquees pendant l'arret, ne sont jamais emises. Raison produit : un digest de
+  prix vieux de plusieurs jours n'a pas de valeur pour le destinataire.
+  L'exactly-once reste garanti par la cle primaire `(job_id, window_start)`.
 - `run_now` reste une **file INTRA-process** (aligne ADR 0001 Q6) : le bouton WebUI
   "verifier maintenant" enfile un job (owner_id) et rend la main immediatement ;
   un consumer unique traite la file en serie.
@@ -348,7 +351,8 @@ l'invariant #7.
   fige (fin de l'ambiguite post-spike) ; image et reseau deja valides ; Dockerfile
   simplifie apres publication d'autolycos (pas de git au build).
 - **Negatives / dettes assumees** : le digest est couple a l'uptime du container
-  (mitige par restart policy + catch-up) ; `workers>1` n'est pas "propre" day one
+  (mitige par la restart policy, sans rattrapage des fenetres manquees, cf.
+  Decision 1) ; `workers>1` n'est pas "propre" day one
   (garde-fou + lot de dev futur) ; l'echelle horizontale exigera le seam Postgres.
 
 ## Questions residuelles
