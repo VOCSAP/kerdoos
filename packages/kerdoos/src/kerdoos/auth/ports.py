@@ -92,26 +92,24 @@ class AuthStore(Protocol):
     # -- login rate-limit (roadmap f1048ab8) -- keyed by the identifier as
     # TYPED (normalized, never resolved to an owner_id), so behavior is
     # identical whether it names a real owner or not (anti-enumeration).
-    def login_attempt_blocked_seconds(
+    def reserve_login_attempt(
         self, identifier_key: str, *, now: float,
     ) -> float | None:
-        """None if identifier_key may attempt a login now. Otherwise the
-        number of seconds to wait: either its own failure count has
-        reached the configured max within the current window, or -- fail
-        closed -- the table is at its row cap and identifier_key has no
-        existing row to check (a flood of distinct identifiers must not
-        grow the table without bound, nor silently disable the limit)."""
-        ...
-
-    def record_login_failure(self, identifier_key: str, *, now: float) -> None:
-        """Increment identifier_key's failure count (creating its row if
-        capacity allows), after purging any row whose window has
-        expired."""
+        """Atomically reserve one login attempt for identifier_key: purge
+        expired rows, evict the oldest tracked row if capacity is needed
+        for a brand-new key (the row cap bounds STORAGE only -- it never
+        refuses an identifier that has no row of its own), then increment
+        (or create) this identifier's counter in the SAME transaction as
+        the read that decides the outcome, closing the race a separate
+        check-then-record pair would leave open under concurrent
+        requests. Returns None if the caller may proceed to authenticate()
+        now, or the seconds to wait if not (the caller must NOT call
+        authenticate() in that case)."""
         ...
 
     def record_login_success(self, identifier_key: str) -> None:
-        """Reset identifier_key's failure count to zero (deletes its
-        row, if any)."""
+        """Reset identifier_key's counter to zero (deletes its row, if
+        any)."""
         ...
 
     # -- sessions (WebUI) -- keyed by session_hash = sha256(session_id); only

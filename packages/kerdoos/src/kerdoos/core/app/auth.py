@@ -134,14 +134,15 @@ class AuthService:
         nonexistent identifier is throttled identically to a real one."""
         key = identifier.strip().lower()
         now = self._clock().timestamp()
-        retry_after = self._store.login_attempt_blocked_seconds(key, now=now)
+        # The reservation counts this ATTEMPT before its outcome is known
+        # (closes a check-then-record race under concurrent requests): a
+        # successful authenticate() below still resets the counter.
+        retry_after = self._store.reserve_login_attempt(key, now=now)
         if retry_after is not None:
             return None, retry_after
         principal = self.authenticate(identifier, password)
         if principal is not None:
             self._store.record_login_success(key)
-        else:
-            self._store.record_login_failure(key, now=now)
         return principal, None
 
     # -- sessions (WebUI) --------------------------------------------------

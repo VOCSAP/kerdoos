@@ -200,21 +200,51 @@ class LoginRateLimitTest(_AuthTestBase):
     def test_max_attempts_zero_disables_the_limiter(self) -> None:
         store = SqliteAuthStore(self.db_path, login_rate_limit_max_attempts=0)
         for _ in range(50):
-            store.record_login_failure("alice", now=1000.0)
-        self.assertIsNone(
-            store.login_attempt_blocked_seconds("alice", now=1000.0))
+            self.assertIsNone(
+                store.reserve_login_attempt("alice", now=1000.0))
 
-    def test_row_cap_fails_closed_for_a_never_seen_identifier(self) -> None:
+    def test_row_cap_evicts_oldest_row_instead_of_refusing(self) -> None:
+        # The cap bounds STORAGE only -- it must never refuse a brand-new
+        # identifier (that would let a flood of random identifiers fill
+        # the table and lock every legitimate user out).
         store = SqliteAuthStore(
             self.db_path, login_rate_limit_max_attempts=5,
             login_rate_limit_window_seconds=900,
-            login_rate_limit_row_cap=1)
-        store.record_login_failure("existing-key", now=1000.0)
-        self.assertIsNotNone(
-            store.login_attempt_blocked_seconds("new-key", now=1000.0))
-        # The already-tracked key is unaffected (1 failure < max_attempts).
+            login_rate_limit_row_cap=3)
+        store.reserve_login_attempt("old-1", now=1000.0)
+        store.reserve_login_attempt("old-2", now=1001.0)
+        store.reserve_login_attempt("recent-3", now=1002.0)
+        # Table is at cap (3 rows). A brand-new identifier must still be
+        # admitted, never blocked.
         self.assertIsNone(
-            store.login_attempt_blocked_seconds("existing-key", now=1000.0))
+            store.reserve_login_attempt("new-4", now=1003.0))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            keys = {
+                row[0] for row in conn.execute(
+                    "SELECT identifier_key FROM login_attempts").fetchall()
+            }
+        finally:
+            conn.close()
+        self.assertNotIn("old-1", keys)  # oldest evicted
+        self.assertIn("recent-3", keys)  # recent rows survive
+        self.assertIn("new-4", keys)
+
+    def test_legitimate_user_logs_in_after_table_is_flooded_to_cap(
+        self,
+    ) -> None:
+        self._add_owner("o1", "alice", "s3cret")
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=5,
+            login_rate_limit_window_seconds=900,
+            login_rate_limit_row_cap=3)
+        service = AuthService(store, self.real_hasher)
+        for fake in ("ghost-1", "ghost-2", "ghost-3"):
+            service.check_and_authenticate(fake, "wrong")
+        principal, retry_after = service.check_and_authenticate(
+            "alice", "s3cret")
+        self.assertIsNone(retry_after)
+        self.assertIsNotNone(principal)
 
     def test_two_store_instances_share_the_counter(self) -> None:
         store_a = SqliteAuthStore(
@@ -223,26 +253,61 @@ class LoginRateLimitTest(_AuthTestBase):
         store_b = SqliteAuthStore(
             self.db_path, login_rate_limit_max_attempts=2,
             login_rate_limit_window_seconds=60)
-        store_a.record_login_failure("alice", now=1000.0)
-        store_b.record_login_failure("alice", now=1000.0)
+        self.assertIsNone(store_a.reserve_login_attempt("alice", now=1000.0))
+        self.assertIsNone(store_b.reserve_login_attempt("alice", now=1000.0))
         self.assertIsNotNone(
-            store_a.login_attempt_blocked_seconds("alice", now=1000.0))
-        self.assertIsNotNone(
-            store_b.login_attempt_blocked_seconds("alice", now=1000.0))
+            store_a.reserve_login_attempt("alice", now=1000.0))
 
-    def test_expired_row_is_purged_not_just_ignored(self) -> None:
+    def test_parallel_requests_at_threshold_allow_exactly_one_through(
+        self,
+    ) -> None:
+        # The reserve must be a single atomic transaction: two separate
+        # check-then-record transactions would let concurrent requests
+        # all read the same pre-increment count and all pass.
+        self._add_owner("o1", "alice", "s3cret")
+        counting = _CountingHasher(self.real_hasher)
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=2,
+            login_rate_limit_window_seconds=60)
+        service = AuthService(store, counting)
+        service.check_and_authenticate("alice", "wrong")  # count=1
+        counting.hash_ops = 0
+        results: list[tuple] = []
+
+        def _attempt() -> None:
+            # All wrong: none of these can succeed and reset the counter
+            # mid-flight, which would otherwise let a later thread see a
+            # fresh row and pass too -- the point here is purely whether
+            # the gate itself lets more than one call through.
+            results.append(service.check_and_authenticate("alice", "wrong"))
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(_attempt) for _ in range(8)]
+            for f in futures:
+                f.result()
+
+        blocked = [r for _p, r in results if r is not None]
+        self.assertEqual(len(blocked), 7)
+        self.assertEqual(counting.hash_ops, 1)
+
+    def test_expired_window_restarts_cleanly_at_one(self) -> None:
         store = SqliteAuthStore(
             self.db_path, login_rate_limit_max_attempts=1,
             login_rate_limit_window_seconds=60)
-        store.record_login_failure("alice", now=1000.0)
-        store.login_attempt_blocked_seconds("alice", now=2000.0)  # window long expired
+        store.reserve_login_attempt("alice", now=1000.0)  # count=1
+        # Long after the window expired -- must purge and restart at 1,
+        # never keep accumulating from the pre-expiry value.
+        retry_after = store.reserve_login_attempt("alice", now=2000.0)
+        self.assertIsNone(retry_after)
         conn = sqlite3.connect(self.db_path)
         try:
             row = conn.execute(
-                "SELECT COUNT(*) FROM login_attempts").fetchone()
+                "SELECT COUNT(*), failure_count FROM login_attempts"
+            ).fetchone()
         finally:
             conn.close()
-        self.assertEqual(row[0], 0)
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], 1)
 
 
 class AntiEnumerationTest(_AuthTestBase):

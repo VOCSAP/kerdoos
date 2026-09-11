@@ -171,10 +171,11 @@ DEFAULT_RUN_QUEUE_BACKLOG_WARN_THRESHOLD = 5
 # WARNING is logged when an operator makes that choice explicitly).
 DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS = 900.0
 DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5
-# Bounds the login_attempts table against a flood of distinct identifiers
-# (real or fake) -- past this many tracked rows, a NEW identifier is
-# refused (429) rather than admitted unbounded or the limiter disabled.
-DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP = 10000
+# Bounds the login_attempts table's STORAGE only -- it never decides an
+# authentication outcome. Past this many tracked rows, admitting a new
+# identifier evicts the oldest tracked row instead of growing unbounded;
+# an identifier with no row of its own is NEVER blocked by this cap.
+DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP = 100000
 
 # Card 1af8b18b: min seconds between one owner's run_now finishing and
 # their next accepted manual re-run. 5 minutes is long enough to stop a
