@@ -16,10 +16,13 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
+from autolycos import router as router_mod
 from autolycos.ports import FetchResult
 from autolycos.router import StaticRouter
 
@@ -48,6 +51,18 @@ _BROKEN_SITE = SiteConfig(
     name="brokensite", fetcher="broken", domain="broken.example",
     parser=ParserSpec(kind="statejson", pix="a", card="b", availability="c"),
 )
+
+
+@contextmanager
+def _tier_forced_available(tier: str):
+    """"broken" is not a real tier (card 3aeb8a19 F1: tier_available is now
+    fail-closed on any unknown name), so adding a source against it through
+    AppService.add_source's REAL StaticRouter (self.service below) would be
+    rejected. This fixture's actual intent is a ROUTING failure INSIDE the
+    per-test local _StubRouter used for the scrape itself, not a deployment-
+    tier problem -- force "broken" available for the add_source call only."""
+    with mock.patch.dict(router_mod._TIER_MODULES, {tier: None}):
+        yield
 
 
 class _FakeFetcher:
@@ -243,8 +258,9 @@ class PlanAScrapeDedupTest(_EvaluatorTestBase):
     async def test_per_source_router_failure_does_not_abort_the_tick(self) -> None:
         good_sid = self._add_source(
             "owner1", "p1", "https://www.kabum.com.br/p/1", site="kabum")
-        bad_sid = self._add_source(
-            "owner1", "p2", "https://broken.example/p/2", site="brokensite")
+        with _tier_forced_available("broken"):
+            bad_sid = self._add_source(
+                "owner1", "p2", "https://broken.example/p/2", site="brokensite")
         self.service.create_job(
             Principal(owner_id="owner1"),
             DigestJobSpec(name="job1", frequency_kind="hourly",
@@ -271,8 +287,9 @@ class PlanAScrapeDedupTest(_EvaluatorTestBase):
         # an error and retry forever every tick.
         good_sid = self._add_source(
             "owner1", "p1", "https://www.kabum.com.br/p/1", site="kabum")
-        bad_sid = self._add_source(
-            "owner1", "p2", "https://broken.example/p/2", site="brokensite")
+        with _tier_forced_available("broken"):
+            bad_sid = self._add_source(
+                "owner1", "p2", "https://broken.example/p/2", site="brokensite")
         self.service.create_job(
             Principal(owner_id="owner1"),
             DigestJobSpec(name="job1", frequency_kind="hourly",

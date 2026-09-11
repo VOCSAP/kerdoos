@@ -195,7 +195,10 @@ partage (deps), deux targets finaux -> deux tags :
   d'etre rejouee indefiniment en INDETERMINATE (card 3aeb8a19). La detection
   ne verifie que la PRESENCE du paquet Python (`importlib.util.find_spec`) :
   un `seleniumbase` installe sans navigateur Chrome disponible est quand
-  meme compte comme "disponible" -- perimetre assume, pas couvert ici.
+  meme compte comme "disponible" -- perimetre assume, pas couvert ici. Un
+  nom de tier INCONNU (faute de frappe, ou une ligne arrivee dans config.db
+  par une porte sans validation propre comme `kerdoos config import`) est
+  traite comme indisponible, meme regle fail-closed qu'un tier absent.
 - **`kerdoos:autonomous`** : + tiers `browser` (patchright) + `uc` (seleniumbase).
   Embarque le Chromium **de patchright** (pas celui de playwright vanilla).
 

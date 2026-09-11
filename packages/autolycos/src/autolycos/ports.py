@@ -54,7 +54,12 @@ class Router(Protocol):
         ...
 
     def tier_available(self, fetcher_name: str) -> bool:
-        """True if this tier's optional dependency is importable HERE.
+        """True if this tier's optional dependency is importable HERE. An
+        UNKNOWN tier name is reported False too (fail-closed, card 3aeb8a19
+        F1) -- this is the ONE check every write/scrape path shares, so it
+        also catches a typo'd name that reached config.db by a door with no
+        known_tiers() validation of its own (bulk `config import`, a future
+        MCP door, a pre-existing row).
 
         A cheap presence check (no import executed): lets a caller in core/
         (which cannot import router.py, a concrete module) ask "would select()

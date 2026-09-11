@@ -82,12 +82,17 @@ def tier_available(fetcher_name: str) -> bool:
     tier's import (same rationale as the deferred imports in _make_tls/
     _make_browser/_make_uc above).
 
-    An UNKNOWN tier name (not in _TIER_MODULES, e.g. a config typo) is
-    reported as available -- this check is scoped to "the tier exists but
-    this image lacks its optional dependency" (card 3aeb8a19), not to
-    tier-name validation; select() still raises UnknownFetcherError for that,
-    unchanged."""
-    module = _TIER_MODULES.get(fetcher_name)
+    An UNKNOWN tier name (not in _TIER_MODULES, e.g. a config typo landed in
+    config.db via `kerdoos config import`, which does not go through
+    AppService.add_site's known_tiers() validation) is fail-closed -- reported
+    as UNAVAILABLE, not available (card 3aeb8a19 F1). This is deliberately
+    stricter than "tier-name validation only at add_site": add_source and
+    run_now/_run_plan_a call tier_available too, so a row that reached
+    config.db some other way (bulk import, a future MCP door, a pre-existing
+    row) is still rejected/skipped, not just newly-typed ones."""
+    if fetcher_name not in _TIER_MODULES:
+        return False
+    module = _TIER_MODULES[fetcher_name]
     if module is None:
         return True
     return importlib.util.find_spec(module) is not None

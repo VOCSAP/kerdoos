@@ -36,7 +36,8 @@ def log_unavailable_fetcher_tiers(config_store: ConfigStore) -> None:
     if missing:
         logger.error(
             "fetcher tier(s) %s are referenced by a configured source but "
-            "not importable in this deployment image -- those sources will "
-            "be skipped at every scrape until the deployment is fixed",
+            "unknown or not importable in this deployment image -- those "
+            "sources will be skipped at every scrape until the deployment "
+            "is fixed",
             missing,
         )

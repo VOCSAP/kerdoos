@@ -298,14 +298,17 @@ class AppService:
         for _product, source, site in registry.iter_sources():
             if site.tier2_label:
                 tier2_labels[source.source_id] = site.tier2_label
-            # Skip sources whose tier is not installed here: an INDETERMINATE
-            # record would replay a permanent deployment error every cadence.
-            if tier_unavailable(self._router, site):
-                continue
             # Per-source guard (invariants #3/#8): a failing source (unknown
             # fetcher/parser tier, store error, ...) must never abort the run
-            # nor suppress the aggregated digest.
+            # nor suppress the aggregated digest. tier_unavailable is INSIDE
+            # this try too: it does its own I/O (find_spec) and must not be
+            # allowed to abort the whole run if it ever raises.
             try:
+                # Skip sources whose tier is not installed here: an
+                # INDETERMINATE record would replay a permanent deployment
+                # error every cadence.
+                if tier_unavailable(self._router, site):
+                    continue
                 fetcher = self._router.select(site.fetcher, site.subresource_domains)
                 parser = self._parser_factory(site.parser)
                 record = scrape_and_record(

@@ -28,7 +28,7 @@ from kerdoos.parsers.ports import ParserSpec
 from kerdoos.persistence.sqlite_store import SqliteStateStore
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.errors import ConfigError, FetcherTierUnavailableError
-from kerdoos.registry.ports import SiteConfig
+from kerdoos.registry.ports import Product, ProductSource, SiteConfig
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 _HTTP_SITE = SiteConfig(
@@ -69,11 +69,12 @@ class TierAvailableHelperTest(unittest.TestCase):
     def test_http_is_always_available(self) -> None:
         self.assertTrue(tier_available("http"))
 
-    def test_unknown_tier_name_is_available(self) -> None:
-        # Scoped to "tier exists but this image lacks its module" -- an
-        # unknown tier name is select()'s UnknownFetcherError concern, not
-        # this check's (a config typo must not be swallowed here).
-        self.assertTrue(tier_available("not-a-real-tier"))
+    def test_unknown_tier_name_is_unavailable(self) -> None:
+        # F1: fail-closed on ANY unknown name, not just a known tier missing
+        # its module -- a typo that reached config.db through a door with no
+        # known_tiers() validation of its own (bulk `config import`, a future
+        # MCP door) must still be rejected/skipped, not swallowed as "fine".
+        self.assertFalse(tier_available("not-a-real-tier"))
 
     def test_missing_module_is_unavailable(self) -> None:
         with _tier_forced_missing("uc"):
@@ -208,9 +209,12 @@ class RunNowSkipTest(_AppServiceTestBase):
         self.assertEqual(len(result.records), 1)
         self.assertEqual(self.service.get_history("owner1", bad_id), [])
 
-    def test_tier_restored_produces_a_normal_record_no_fabricated_delta(self) -> None:
-        # While unavailable: zero records, zero history -- nothing to read as
-        # a stock-status transition (invariant #3).
+    def test_tier_available_is_rechecked_each_run_not_cached(self) -> None:
+        # No delta/diff engine exists in this codebase (nothing compares
+        # this run's record to a previous one) -- what this actually
+        # protects against is tier_available's result being memoized across
+        # run_now calls, which would keep skipping a source forever even
+        # after a redeploy makes its tier available again.
         with mock.patch.object(
             self.router, "select", return_value=_FakeFetcher(),
         ), mock.patch.object(
@@ -221,7 +225,7 @@ class RunNowSkipTest(_AppServiceTestBase):
         self.assertEqual(self.service.get_history("owner1", bad_id), [])
 
         # Tier available again (e.g. redeployed as `autonomous`): the next
-        # real scrape is a normal OK record, not a synthesized transition.
+        # run_now must re-evaluate tier_available, not reuse a stale result.
         with mock.patch.object(self.router, "select", return_value=_FakeFetcher()), \
              mock.patch.object(self.service, "_parser_factory", _fake_parser_factory), \
              _tier_forced_available("uc"):
@@ -347,6 +351,84 @@ class CliBootWiringTest(_BootWiringTestBase):
             "kerdoos.interfaces.boot_checks", level="ERROR") as cm:
             cli.cmd_digest(self._args("digest"))
         self.assertIn("uc", cm.output[0])
+
+
+class ConfigImportTypoTierTest(unittest.TestCase):
+    """F1: `kerdoos config import` bypasses AppService.add_site's
+    known_tiers() validation entirely -- cmd_config_import (cli/main.py)
+    calls config_store.add_site directly, and yaml_store.py only checks the
+    `fetcher` field is present, not that it names a real tier. A typo'd
+    fetcher lands in config.db this way; tier_available's fail-closed
+    default on an unknown name is the ONE check that still catches it,
+    regardless of which door it came through."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="kerdoos-import-typo-")
+        self.addCleanup(shutil.rmtree, self._dir, ignore_errors=True)
+        config_dir = Path(self._dir) / "config"
+        config_dir.mkdir()
+        (config_dir / "sites.yaml").write_text(
+            "sites:\n"
+            "  typo:\n"
+            "    fetcher: uC\n"
+            "    domain: example.com.br\n"
+            "    parser:\n"
+            "      kind: statejson\n"
+            "      pix: a\n"
+            "      card: b\n"
+            "      availability: c\n",
+            encoding="utf-8",
+        )
+        self.config_db = os.path.join(self._dir, "config.db")
+        self.state_db = os.path.join(self._dir, "state.db")
+        args = cli.build_parser_cli().parse_args([
+            "config", "import", "--config-dir", str(config_dir),
+            "--config-db", self.config_db, "--db", self.state_db,
+            "--owner", "owner1",
+        ])
+        self.assertEqual(cli.cmd_config_import(args), 0)
+
+    def test_import_lands_the_typo_unvalidated(self) -> None:
+        # Proves the bypass is real: cmd_config_import does not reject it.
+        config = SqliteConfigStore(self.config_db)
+        try:
+            self.assertIn("typo", config.load("owner1").sites)
+        finally:
+            config.close()
+
+    def test_add_source_against_the_typo_is_rejected(self) -> None:
+        config = SqliteConfigStore(self.config_db)
+        state = SqliteStateStore(self.state_db)
+        try:
+            domain_policy = CatalogueDomainPolicy(config)
+            service = AppService(
+                config, state, StaticRouter(domain_policy), domain_policy,
+                build_parser)
+            service.add_product("owner1", ProductSpec("p1"))
+            with self.assertRaises(FetcherTierUnavailableError):
+                service.add_source(
+                    "owner1", "p1", "typo", "https://example.com.br/p/1")
+        finally:
+            config.close()
+            state.close()
+
+    def test_boot_log_flags_a_pre_existing_bad_row(self) -> None:
+        # Simulates a row that reached product_sources through a door with
+        # no known_tiers() validation of its own (direct store write, same
+        # shape as the config-import bypass above) -- the boot log must
+        # still flag it, not just newly-rejected add_source calls.
+        config = SqliteConfigStore(self.config_db)
+        try:
+            config.add_product("owner1", Product(id="p1"))
+            config.add_source("owner1", ProductSource(
+                source_id="owner1:p1:typo:deadbeef", product_id="p1",
+                site="typo", url="https://example.com.br/p/1"))
+            with self.assertLogs(
+                "kerdoos.interfaces.boot_checks", level="ERROR") as cm:
+                log_unavailable_fetcher_tiers(config)
+        finally:
+            config.close()
+        self.assertIn("uC", cm.output[0])
 
 
 if __name__ == "__main__":
