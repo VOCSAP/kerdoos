@@ -75,6 +75,12 @@ launch_timeout_seconds), same floor-with-warning discipline. Read here and
 INJECTED into autolycos.router.StaticRouter at composition-root time --
 autolycos never reads this (or any other KERDOOS_*) env var itself
 (invariant 2).
+
+KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS (roadmap b3213f3c): bounds the
+Chromium LAUNCH itself for the browser tier (autolycos.adapters.browser.
+BrowserFetcher's launch_timeout_seconds), same floor-with-warning discipline
+and the same StaticRouter injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS
+above.
 """
 
 from __future__ import annotations
@@ -88,6 +94,9 @@ from typing import TypeVar
 
 # kerdoos may import autolycos (composition root -> tool), never the reverse
 # (invariant 2) -- this is the ALLOWED direction.
+from autolycos.adapters.browser import (
+    BROWSER_LAUNCH_TIMEOUT_SECONDS as _BROWSER_TIER_LAUNCH_TIMEOUT_SECONDS,
+)
 from autolycos.adapters.uc import (
     UC_LAUNCH_TIMEOUT_SECONDS as _UC_TIER_LAUNCH_TIMEOUT_SECONDS,
 )
@@ -161,6 +170,12 @@ DEFAULT_RUN_NOW_COOLDOWN_SECONDS = 300.0
 # so an unset env var falls back to exactly what UcFetcher would use anyway.
 DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS = float(_UC_TIER_LAUNCH_TIMEOUT_SECONDS)
 
+# Roadmap b3213f3c: single source of truth shared with the browser tier
+# itself, so an unset env var falls back to exactly what BrowserFetcher
+# would use anyway.
+DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS = float(
+    _BROWSER_TIER_LAUNCH_TIMEOUT_SECONDS)
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -185,6 +200,7 @@ class Settings:
     run_queue_max_restarts: int
     run_now_cooldown_seconds: float
     uc_launch_timeout_seconds: float
+    browser_launch_timeout_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -305,4 +321,7 @@ def get_settings() -> Settings:
         uc_launch_timeout_seconds=_env_number(
             "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
             DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
+        browser_launch_timeout_seconds=_env_number(
+            "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS",
+            DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
     )

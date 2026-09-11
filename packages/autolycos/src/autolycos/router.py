@@ -39,13 +39,17 @@ def _make_tls(domain_policy: DomainPolicy,
 
 def _make_browser(domain_policy: DomainPolicy,
                    subresource_domains: Iterable[str],
-                   browser_gate: BrowserGate) -> Fetcher:
+                   browser_gate: BrowserGate,
+                   launch_timeout_seconds: float | None = None) -> Fetcher:
     # Deferred import: Playwright is optional and only needed for the browser
     # tier (SPA sites whose price is injected by client-side JS). The per-site
     # render-CDN sub-resource allowlist flows in here.
     from .adapters.browser import BrowserFetcher
 
-    return BrowserFetcher(domain_policy, subresource_domains, browser_gate)
+    kwargs = {}
+    if launch_timeout_seconds is not None:
+        kwargs["launch_timeout_seconds"] = launch_timeout_seconds
+    return BrowserFetcher(domain_policy, subresource_domains, browser_gate, **kwargs)
 
 
 def _make_uc(domain_policy: DomainPolicy,
@@ -128,6 +132,7 @@ class StaticRouter:
         self, domain_policy: DomainPolicy,
         browser_gate: BrowserGate | None = None,
         uc_launch_timeout_seconds: float | None = None,
+        browser_launch_timeout_seconds: float | None = None,
     ) -> None:
         self._domain_policy = domain_policy
         # Defaults to the SAME module-level singleton as a directly-
@@ -135,11 +140,16 @@ class StaticRouter:
         # StaticRouters built without an explicit gate still share one door.
         self._browser_gate = (
             browser_gate if browser_gate is not None else default_browser_gate())
-        # None leaves UcFetcher's own UC_LAUNCH_TIMEOUT_SECONDS default in
-        # effect (roadmap 65cef071: KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS,
+        # None leaves each tier's own *_LAUNCH_TIMEOUT_SECONDS default in
+        # effect. KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071) and
+        # KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS (roadmap b3213f3c) are
         # injected by the kerdoos composition root -- autolycos itself never
-        # reads that env var, invariant 2).
-        self._uc_launch_timeout_seconds = uc_launch_timeout_seconds
+        # reads either env var (invariant 2).
+        self._launch_timeout_overrides: dict[str, float] = {}
+        if uc_launch_timeout_seconds is not None:
+            self._launch_timeout_overrides["uc"] = uc_launch_timeout_seconds
+        if browser_launch_timeout_seconds is not None:
+            self._launch_timeout_overrides["browser"] = browser_launch_timeout_seconds
         self._cache: dict[tuple[str, frozenset[str]], Fetcher] = {}
 
     def select(
@@ -154,13 +164,13 @@ class StaticRouter:
         # tier with different render CDNs get distinct instances.
         key = (fetcher_name, frozenset(subresource_domains))
         if key not in self._cache:
-            # Only the uc tier takes an extra kwarg: http/tls/browser's
-            # factories don't declare it, keeping their own call shape
-            # untouched.
-            if fetcher_name == "uc" and self._uc_launch_timeout_seconds is not None:
+            # Only browser/uc take the extra kwarg: http/tls's factories
+            # don't declare it, keeping their own call shape untouched.
+            override = self._launch_timeout_overrides.get(fetcher_name)
+            if override is not None:
                 self._cache[key] = _FACTORIES[fetcher_name](
                     self._domain_policy, subresource_domains, self._browser_gate,
-                    launch_timeout_seconds=self._uc_launch_timeout_seconds)
+                    launch_timeout_seconds=override)
             else:
                 self._cache[key] = _FACTORIES[fetcher_name](
                     self._domain_policy, subresource_domains, self._browser_gate)

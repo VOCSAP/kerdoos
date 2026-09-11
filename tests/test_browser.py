@@ -11,14 +11,20 @@ CONNECT/pin behavior is covered in test_ssrf.py.
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import socket
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from autolycos import safety
 from autolycos.adapters import browser
+from autolycos.browser_gate import BrowserGate
 from autolycos.challenge import looks_challenged
-from autolycos.errors import SSRFError
+from autolycos.errors import FetchError, SSRFError
+from autolycos.router import StaticRouter
 from autolycos.safety import DomainPolicy
 
 _POLICY = DomainPolicy(frozenset({
@@ -117,12 +123,16 @@ class _FakeBrowser:
 
 
 class _FakeChromium:
-    def __init__(self, browser_obj: _FakeBrowser) -> None:
+    def __init__(self, browser_obj: _FakeBrowser | None,
+                 error: BaseException | None = None) -> None:
         self._browser = browser_obj
+        self._error = error
         self.launch_kwargs: dict | None = None
 
     def launch(self, **kwargs):  # noqa: ANN003
         self.launch_kwargs = kwargs
+        if self._error is not None:
+            raise self._error
         return self._browser
 
 
@@ -303,6 +313,151 @@ class GateWiringTest(unittest.TestCase):
             default_gate_fn.return_value = spy_gate
             self._fetch_with_spy_gate(None)
         spy_gate.acquire.assert_called_once()
+
+
+_HAS_PATCHRIGHT = importlib.util.find_spec("patchright") is not None
+
+
+@unittest.skipUnless(
+    _HAS_PATCHRIGHT, "patchright not installed (autolycos[browser] extra)")
+class BrowserLaunchTimeoutWiringTest(unittest.TestCase):
+    """Roadmap b3213f3c: a launch that raises patchright's REAL TimeoutError
+    (not a look-alike local class -- the except clause must match the actual
+    type) is converted to a retryable FetchError, and the browser gate --
+    acquired around the whole launch-to-close cycle -- is released
+    regardless.
+    """
+
+    def _fetch_with_failing_launch(self, gate, launch_timeout_seconds=None):
+        from patchright.sync_api import TimeoutError as RealTimeoutError
+
+        chromium = _FakeChromium(
+            browser_obj=None, error=RealTimeoutError("boom"))
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        kwargs = {}
+        if launch_timeout_seconds is not None:
+            kwargs["launch_timeout_seconds"] = launch_timeout_seconds
+        raised = None
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                fetcher = browser.BrowserFetcher(_POLICY, gate=gate, **kwargs)
+                try:
+                    fetcher.fetch("https://mercadolivre.com.br/p/MLB1")
+                except FetchError as exc:
+                    raised = exc
+        return chromium, raised
+
+    def test_launch_timeout_becomes_a_fetch_error(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        _, raised = self._fetch_with_failing_launch(gate)
+        self.assertIsInstance(raised, FetchError)
+
+    def test_launch_timeout_seconds_is_passed_in_milliseconds(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        chromium, raised = self._fetch_with_failing_launch(
+            gate, launch_timeout_seconds=7.0)
+        self.assertIsInstance(raised, FetchError)
+        self.assertEqual(chromium.launch_kwargs["timeout"], 7000)
+
+    def test_gate_is_released_after_a_failed_launch(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        self._fetch_with_failing_launch(gate)
+        acquired_promptly = gate._semaphore.acquire(timeout=1.0)
+        self.assertTrue(acquired_promptly, "gate slot was not released")
+        gate._semaphore.release()
+
+
+_HAS_POSIX_SHELL = os.name == "posix" and Path("/bin/sh").exists()
+_NEUTRAL_POLICY = DomainPolicy(frozenset({"example.com"}))
+
+
+class RealBrowserLaunchTimeoutTest(unittest.TestCase):
+    """Roadmap b3213f3c acceptance test: drives the REAL UcFetcher-style
+    integration -- patchright's own BrowserType.launch, through the REAL
+    fetch() call, with executable_path swapped for a script that genuinely
+    hangs (never a nonexistent path, which fails instantly and proves
+    nothing). Neutral target only (example.com), never a real site. POSIX
+    only (needs /bin/sh); runs for real inside the autonomous image.
+    """
+
+    def setUp(self) -> None:
+        if _HAS_PATCHRIGHT and _HAS_POSIX_SHELL:
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but patchright or a POSIX "
+                "shell is unavailable -- run inside the autonomous image")
+        self.skipTest(
+            "needs patchright and a POSIX shell (autonomous image), not "
+            "just patchright")
+
+    def test_hung_launch_raises_fetch_error_releases_gate_no_leftover_process(
+            self) -> None:
+        import psutil
+        from patchright.sync_api import BrowserType
+
+        script_path = Path("/tmp/kerdoos-test-hang-browser-launch.sh")
+        script_path.write_text("#!/bin/sh\nsleep 60\n", encoding="utf-8")
+        script_path.chmod(0o755)
+        self.addCleanup(script_path.unlink, missing_ok=True)
+
+        original_launch = BrowserType.launch
+
+        def _patched_launch(self_bt, **kwargs):  # noqa: ANN001, ANN003
+            kwargs["executable_path"] = str(script_path)
+            return original_launch(self_bt, **kwargs)
+
+        gate = BrowserGate(max_concurrent=1)
+        before = {p.pid for p in psutil.Process().children(recursive=True)}
+        with mock.patch.object(BrowserType, "launch", _patched_launch), \
+             mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            fetcher = browser.BrowserFetcher(
+                _NEUTRAL_POLICY, gate=gate, launch_timeout_seconds=2.0)
+            t0 = time.monotonic()
+            with self.assertRaises(FetchError):
+                fetcher.fetch("https://example.com/")
+            elapsed = time.monotonic() - t0
+        # Bounded by the 2s deadline, not the script's 60s sleep.
+        self.assertLess(elapsed, 10.0)
+
+        acquired_promptly = gate._semaphore.acquire(timeout=1.0)
+        self.assertTrue(acquired_promptly, "gate slot was not released")
+        gate._semaphore.release()
+
+        time.sleep(1.0)
+        leftover = [p for p in psutil.Process().children(recursive=True)
+                    if p.pid not in before and p.is_running()]
+        self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
+
+
+class StaticRouterBrowserLaunchTimeoutTest(unittest.TestCase):
+    """Roadmap b3213f3c: KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS is injected
+    by the kerdoos composition root through StaticRouter/_make_browser --
+    never read by autolycos itself (invariant 2).
+    """
+
+    def test_injected_value_reaches_the_built_browser_fetcher(self) -> None:
+        router = StaticRouter(_POLICY, browser_launch_timeout_seconds=42.0)
+        fetcher = router.select("browser")
+        self.assertIsInstance(fetcher, browser.BrowserFetcher)
+        self.assertEqual(fetcher._launch_timeout_seconds, 42.0)
+
+    def test_no_value_injected_keeps_the_tier_s_own_default(self) -> None:
+        router = StaticRouter(_POLICY)
+        fetcher = router.select("browser")
+        self.assertEqual(
+            fetcher._launch_timeout_seconds,
+            browser.BROWSER_LAUNCH_TIMEOUT_SECONDS)
+
+    def test_other_tiers_call_shape_is_unaffected(self) -> None:
+        router = StaticRouter(_POLICY, browser_launch_timeout_seconds=5.0)
+        http_fetcher = router.select("http")
+        self.assertEqual(http_fetcher.method_name, "http")
 
 
 if __name__ == "__main__":

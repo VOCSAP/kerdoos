@@ -88,9 +88,11 @@ def _build_app_service(
     state_store = SqliteStateStore(db)
     domain_policy = CatalogueDomainPolicy(config_store)
     gate = browser_gate if browser_gate is not None else _build_browser_gate(db)
+    settings = get_settings()
     router = StaticRouter(
         domain_policy, browser_gate=gate,
-        uc_launch_timeout_seconds=get_settings().uc_launch_timeout_seconds)
+        uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds,
+        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds)
     service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
     return service, config_store, state_store
@@ -124,7 +126,8 @@ def cmd_digest(args: argparse.Namespace) -> int:
     settings = get_settings()
     router = StaticRouter(
         domain_policy, browser_gate=browser_gate,
-        uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds)
+        uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds,
+        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds)
     try:
         log_unavailable_fetcher_tiers(config_store)
         sender = build_sender(

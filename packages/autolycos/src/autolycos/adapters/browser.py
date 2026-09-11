@@ -54,6 +54,12 @@ from ..safety import DomainPolicy, validate_target
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 NAV_TIMEOUT_MS = 30_000
 _WAIT_UNTIL = "networkidle"
+# Roadmap b3213f3c: bounds the Chromium LAUNCH itself (pw.chromium.launch),
+# which patchright otherwise bounds at its own 180s internal default --
+# longer than KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS's default 120s, so a
+# stuck launch would hold the shared BrowserGate past every other caller's
+# own wait deadline. Kept below NAV_TIMEOUT_MS.
+BROWSER_LAUNCH_TIMEOUT_SECONDS = 20.0
 
 
 def _normalize_domains(domains: Iterable[str]) -> frozenset[str]:
@@ -85,6 +91,16 @@ def _load_stealth():  # type: ignore[no-untyped-def]
     return Stealth
 
 
+def _load_timeout_error():  # type: ignore[no-untyped-def]
+    """Lazy handle on patchright's TimeoutError (same rationale as
+    _load_playwright): imported on demand so this module loads without
+    patchright installed.
+    """
+    from patchright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    return PlaywrightTimeoutError
+
+
 class BrowserFetcher:
     """Fetcher port implementation backed by Playwright (headless Chromium).
 
@@ -101,10 +117,13 @@ class BrowserFetcher:
 
     def __init__(self, domain_policy: DomainPolicy,
                  subresource_domains: Iterable[str] = (),
-                 gate: BrowserGate | None = None) -> None:
+                 gate: BrowserGate | None = None,
+                 launch_timeout_seconds: float = BROWSER_LAUNCH_TIMEOUT_SECONDS,
+                 ) -> None:
         self._domain_policy = domain_policy
         self._subresource_domains = _normalize_domains(subresource_domains)
         self._gate = gate if gate is not None else default_browser_gate()
+        self._launch_timeout_seconds = launch_timeout_seconds
 
     def _subresource_allowed(self, host: str) -> bool:
         """Suffix-match a request host against the render-CDN allowlist."""
@@ -119,6 +138,7 @@ class BrowserFetcher:
         validate_target(url, self._domain_policy)
         sync_playwright = _load_playwright()
         stealth = _load_stealth()()
+        timeout_error = _load_timeout_error()
 
         # Loopback IP-pinning egress-proxy: Chromium routes every connection
         # (primary + sub-resources) through it and never resolves the target
@@ -126,12 +146,18 @@ class BrowserFetcher:
         # Gate acquired around the whole launch-to-close cycle (card ca30b736:
         # ADR 0002 Decision 1's single-Chromium OOM-coherence guarantee).
         with self._gate.acquire(), PinningProxy() as proxy, sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                proxy={"server": proxy.url},
-                # No caller args; scrub egress-weakening flags defensively.
-                args=strip_dangerous_browser_args([]),
-            )
+            try:
+                browser = pw.chromium.launch(
+                    headless=True,
+                    proxy={"server": proxy.url},
+                    # No caller args; scrub egress-weakening flags defensively.
+                    args=strip_dangerous_browser_args([]),
+                    timeout=self._launch_timeout_seconds * 1000,
+                )
+            except timeout_error as exc:
+                raise FetchError(
+                    f"browser launch exceeded {self._launch_timeout_seconds}s "
+                    "timeout") from exc
             try:
                 page = browser.new_page()
                 # JS-level stealth on top of patchright's launch patches, applied

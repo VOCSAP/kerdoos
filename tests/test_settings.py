@@ -16,7 +16,8 @@ import os
 import unittest
 
 from kerdoos.config import (
-    DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
+    DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS,
+    DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
     DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_RUN_NOW_COOLDOWN_SECONDS,
     DEFAULT_RUN_QUEUE_MAX_RESTARTS, DEFAULT_SMTP_PORT,
     DEFAULT_SMTP_RETRY_ATTEMPTS, DEFAULT_SMTP_RETRY_BACKOFF_SECONDS,
@@ -34,6 +35,7 @@ _SMTP_ENV_VARS = (
     "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
     "KERDOOS_RUN_QUEUE_MAX_RESTARTS", "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
     "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
+    "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS",
 )
 
 
@@ -473,6 +475,39 @@ class UcLaunchTimeoutFloorTest(_SettingsTestBase):
                     DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS)
                 self.assertTrue(
                     any("KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS" in msg
+                        for msg in cm.output), cm.output)
+
+
+class BrowserLaunchTimeoutFloorTest(_SettingsTestBase):
+    """Roadmap b3213f3c: a malformed KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS
+    warns and floors to the default instead of crashing at settings-read
+    time, and an unset one uses the browser tier's own default
+    (browser.BROWSER_LAUNCH_TIMEOUT_SECONDS)."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.browser_launch_timeout_seconds,
+            DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS"] = "15"
+        settings = get_settings()
+        self.assertEqual(settings.browser_launch_timeout_seconds, 15.0)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.browser_launch_timeout_seconds,
+                    DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS)
+                self.assertTrue(
+                    any("KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS" in msg
                         for msg in cm.output), cm.output)
 
 
