@@ -262,6 +262,18 @@
 .badge--on     { color: var(--state-ok); background: var(--state-ok-bg); border-color: transparent; }
 .badge--paused { color: var(--text-tertiary); background: var(--surface-2); }
 
+/* --- Last-send-status badge (roadmap 3c557a9c item 7): another JOB fact,
+ * same discipline as enabled/paused above -- reuses the same tokens
+ * through new modifiers instead of a bespoke color. */
+.badge--sent      { color: var(--state-ok);      background: var(--state-ok-bg);      border-color: transparent; }
+.badge--error     { color: var(--state-unavail); background: var(--state-unavail-bg); border-color: transparent; }
+.badge--attention {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface-1));
+  border-color: transparent;
+}
+.badge--pending { color: var(--text-tertiary); background: var(--surface-2); }
+
 /* --- Segmented control: cadence kind (hourly / daily / cron). Radios styled
  * as a single instrument switch. The native radios stay in the DOM (keyboard
  * + a11y); labels are the visible faces. */

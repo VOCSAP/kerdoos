@@ -113,6 +113,36 @@ def template_label(template_id: str) -> str:
     return _TEMPLATE_LABELS.get(template_id, template_id)
 
 
+# job_runs.status -> badge CSS modifier suffix / label (roadmap 3c557a9c
+# item 7). System semantics (sent/error/needs-attention), NOT the product
+# three-state signal (ok/indet/unavail) -- a job's send outcome is a
+# different axis from a source's price-reading determinacy.
+_JOB_RUN_STATUS_CLASS = {
+    "sent": "sent",
+    "error": "error",
+    "skipped_no_email": "attention",
+}
+_JOB_RUN_STATUS_LABEL = {
+    "sent": "Envoye",
+    "error": "Erreur",
+    "skipped_no_email": "Ajoutez un e-mail",
+    "queued": "En file",
+    "running": "En cours",
+}
+
+
+def job_run_status_class(run) -> str:
+    if run is None:
+        return "pending"
+    return _JOB_RUN_STATUS_CLASS.get(run.status, "pending")
+
+
+def job_run_status_label(run) -> str:
+    if run is None:
+        return "Jamais envoye"
+    return _JOB_RUN_STATUS_LABEL.get(run.status, run.status)
+
+
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 templates.env.filters["brl"] = format_brl
 templates.env.filters["status_class"] = status_class
@@ -122,4 +152,6 @@ templates.env.filters["tier_level"] = tier_level
 templates.env.filters["schedule_label"] = schedule_label
 templates.env.filters["frequency_label"] = frequency_label
 templates.env.filters["template_label"] = template_label
+templates.env.filters["job_run_status_class"] = job_run_status_class
+templates.env.filters["job_run_status_label"] = job_run_status_label
 templates.env.globals["tier_ladder"] = _TIER_LADDER

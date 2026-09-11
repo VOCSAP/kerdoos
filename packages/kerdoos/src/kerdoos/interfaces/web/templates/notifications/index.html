@@ -131,15 +131,18 @@
 </div>
 
 {% if jobs %}
-{% for job in jobs %}
+{% for job, last_run in jobs %}
 <div class="card" id="job-{{ job.id }}">
   <div class="spread">
     <h2 class="card__title">{{ job.name }}</h2>
-    {% if job.enabled %}
-    <span class="badge badge--on"><span class="badge__dot"></span>Active</span>
-    {% else %}
-    <span class="badge badge--paused"><span class="badge__dot"></span>Suspendue</span>
-    {% endif %}
+    <div class="row-actions">
+      {% if job.enabled %}
+      <span class="badge badge--on"><span class="badge__dot"></span>Active</span>
+      {% else %}
+      <span class="badge badge--paused"><span class="badge__dot"></span>Suspendue</span>
+      {% endif %}
+      <span class="badge badge--{{ last_run | job_run_status_class }}">{{ last_run | job_run_status_label }}</span>
+    </div>
   </div>
 
   <div class="job-meta">
@@ -159,6 +162,18 @@
       <span class="job-meta__k">Sources</span>
       <span class="job-meta__v">{{ job.source_ids | length }}</span>
     </div>
+    {% if last_run and last_run.sent_at %}
+    <div class="job-meta__item">
+      <span class="job-meta__k">Dernier envoi</span>
+      <span class="job-meta__v">{{ last_run.sent_at }}</span>
+    </div>
+    {% endif %}
+    {% if last_run and last_run.status == 'error' and last_run.error %}
+    <div class="job-meta__item">
+      <span class="job-meta__k">Erreur</span>
+      <span class="job-meta__v">{{ last_run.error }}</span>
+    </div>
+    {% endif %}
   </div>
 
   {% if job.source_ids %}

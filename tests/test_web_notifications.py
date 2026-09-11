@@ -165,6 +165,74 @@ class JobLifecycleTest(_NotificationsBase):
         self.assertEqual(rem.status_code, 204)
 
 
+class LastStatusTest(_NotificationsBase):
+    """roadmap 3c557a9c item 7: the notifications list shows each job's
+    last send status, read from job_runs (state.db)."""
+
+    def _record_run(self, job_id, owner_id, *, status, window_start,
+                     error=None):
+        from kerdoos.persistence.ports import JobRun
+        from kerdoos.persistence.sqlite_store import SqliteStateStore
+
+        state = SqliteStateStore(self.state_db)
+        try:
+            state.record_job_run(JobRun(
+                job_id=job_id, owner_id=owner_id, window_start=window_start,
+                fired_at=window_start, status=status, error=error,
+            ))
+        finally:
+            state.close()
+
+    def test_never_sent_job_shows_explicit_label(self):
+        self._create_job(name="Sans historique")
+        page = self.client.get("/notifications")
+        self.assertIn("Jamais envoye", page.text)
+
+    def test_skipped_no_email_status_is_displayed(self):
+        page = self._create_job(name="Sans e-mail")
+        job_id = _JOB_ROW.search(page.text).group(1)
+        self._record_run(
+            job_id, "o1", status="skipped_no_email",
+            window_start="2026-07-10T00:00:00+00:00")
+        page = self.client.get("/notifications")
+        self.assertIn("Ajoutez un e-mail", page.text)
+
+    def test_error_status_message_is_html_escaped(self):
+        page = self._create_job(name="Erreur")
+        job_id = _JOB_ROW.search(page.text).group(1)
+        self._record_run(
+            job_id, "o1", status="error",
+            window_start="2026-07-10T00:00:00+00:00",
+            error="<script>alert(3)</script>")
+        page = self.client.get("/notifications")
+        self.assertNotIn("<script>alert(3)</script>", page.text)
+        self.assertIn("&lt;script&gt;", page.text)
+
+    def test_cross_tenant_job_run_row_never_leaks(self):
+        page = self._create_job(name="Alice job")
+        job_id = _JOB_ROW.search(page.text).group(1)
+        self._record_run(
+            job_id, "o1", status="sent",
+            window_start="2026-07-10T00:00:00+00:00")
+        self._add_owner("ob", "bob", "s3cret")
+        bob = self._fresh_client()
+        self._login_on(bob, "bob", "s3cret")
+
+        from kerdoos.persistence.sqlite_store import SqliteStateStore
+        state = SqliteStateStore(self.state_db)
+        try:
+            # SQL-level isolation: bob's own scoped read must never see
+            # alice's job_run row, not just "bob's page happens not to
+            # render alice's job" (which is already guaranteed by
+            # list_jobs itself never returning alice's job to bob).
+            self.assertEqual(state.latest_job_runs("ob"), {})
+        finally:
+            state.close()
+
+        page = bob.get("/notifications")
+        self.assertNotIn("Alice job", page.text)
+
+
 class PreviewTest(_NotificationsBase):
     def test_preview_renders_sandboxed_iframe(self):
         page = self._create_job(name="Aperçu test")

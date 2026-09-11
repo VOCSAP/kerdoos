@@ -259,6 +259,37 @@ class SqliteStateStore:
             )
         return cur.rowcount == 1
 
+    def latest_job_runs(self, owner: str) -> dict[str, JobRun]:
+        # owner_id filtered INLINE (same discipline as every other
+        # StateStore method) -- rows for another owner never enter the
+        # result set at all, so a colliding job_id across tenants cannot
+        # leak a foreign row. Ordered by fired_at DESC and only the FIRST
+        # row seen per job_id is kept, so a tie or an out-of-order insert
+        # never yields two candidate rows for the same job_id.
+        with self._op() as conn:
+            rows = conn.execute(
+                """
+                SELECT job_id, owner_id, window_start, fired_at, sent_at,
+                       status, error
+                FROM job_runs
+                WHERE owner_id = ?
+                ORDER BY fired_at DESC
+                """,
+                (owner,),
+            ).fetchall()
+        latest: dict[str, JobRun] = {}
+        for row in rows:
+            job_id = row["job_id"]
+            if job_id in latest:
+                continue
+            latest[job_id] = JobRun(
+                job_id=job_id, owner_id=row["owner_id"],
+                window_start=row["window_start"], fired_at=row["fired_at"],
+                status=row["status"], sent_at=row["sent_at"],
+                error=row["error"],
+            )
+        return latest
+
     def has_active_job_run(self, owner: str, job_id: str) -> bool:
         # Double-scoping IDOR defense (ADR 0003 finding S2): owner_id is
         # filtered INLINE here even though job_id alone would already be a

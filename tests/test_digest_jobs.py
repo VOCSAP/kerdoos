@@ -221,6 +221,46 @@ class CrudOwnerScopeTest(_DigestJobsTestBase):
         self.assertEqual(len(self.service.list_jobs("owner1")), 1)
         self.assertEqual(len(self.service.list_jobs("owner2")), 0)
 
+    def test_list_jobs_with_status_job_without_history_has_no_last_run(
+        self,
+    ) -> None:
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly"))
+        rows = self.service.list_jobs_with_status("owner1")
+        self.assertEqual(len(rows), 1)
+        job, last_run = rows[0]
+        self.assertEqual(job.name, "job1")
+        self.assertIsNone(last_run)
+
+    def test_list_jobs_with_status_shows_skipped_no_email(self) -> None:
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly"))
+        self.state.record_job_run(JobRun(
+            job_id=job.id, owner_id="owner1",
+            window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00",
+            status="skipped_no_email",
+        ))
+        rows = self.service.list_jobs_with_status("owner1")
+        self.assertEqual(len(rows), 1)
+        _job, last_run = rows[0]
+        self.assertIsNotNone(last_run)
+        self.assertEqual(last_run.status, "skipped_no_email")
+
+    def test_list_jobs_with_status_cross_owner_job_never_appears(self) -> None:
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly"))
+        self.state.record_job_run(JobRun(
+            job_id=job.id, owner_id="owner1",
+            window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="sent",
+        ))
+        rows = self.service.list_jobs_with_status("owner2")
+        self.assertEqual(rows, ())
+
     def test_get_job_cannot_cross_tenant(self) -> None:
         job = self.service.create_job(
             Principal(owner_id="owner1"),
@@ -447,6 +487,53 @@ class JobRunTest(unittest.TestCase):
         self.state.record_job_run(run)
         self.assertTrue(self.state.has_active_job_run("ownerA", "shared-id"))
         self.assertFalse(self.state.has_active_job_run("ownerB", "shared-id"))
+
+    # -- roadmap 3c557a9c item 7 (WebUI last-send-status) -----------------
+
+    def test_latest_job_runs_returns_most_recent_per_job(self) -> None:
+        self.state.record_job_run(JobRun(
+            job_id="job1", owner_id="owner1",
+            window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="error",
+            error="first attempt failed",
+        ))
+        self.state.record_job_run(JobRun(
+            job_id="job1", owner_id="owner1",
+            window_start="2026-07-10T01:00:00+00:00",
+            fired_at="2026-07-10T01:00:05+00:00", status="sent",
+            sent_at="2026-07-10T01:00:06+00:00",
+        ))
+        latest = self.state.latest_job_runs("owner1")
+        self.assertEqual(latest["job1"].status, "sent")
+        self.assertEqual(latest["job1"].window_start, "2026-07-10T01:00:00+00:00")
+
+    def test_latest_job_runs_isolated_by_owner(self) -> None:
+        # A job_id shared (or forged) across two owners must not leak the
+        # other tenant's row -- same double-scoping discipline as
+        # has_active_job_run_is_owner_scoped above. Distinct window_start
+        # values: (job_id, window_start) is the GLOBAL primary key
+        # (record_job_run's ON CONFLICT DO NOTHING target), so reusing the
+        # same window_start across owners would collide on the PK itself,
+        # not exercise the owner filter.
+        self.state.record_job_run(JobRun(
+            job_id="shared-id", owner_id="ownerA",
+            window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="sent",
+        ))
+        self.state.record_job_run(JobRun(
+            job_id="shared-id", owner_id="ownerB",
+            window_start="2026-07-10T01:00:00+00:00",
+            fired_at="2026-07-10T01:00:05+00:00", status="error",
+        ))
+        latest_a = self.state.latest_job_runs("ownerA")
+        latest_b = self.state.latest_job_runs("ownerB")
+        self.assertEqual(latest_a["shared-id"].status, "sent")
+        self.assertEqual(latest_a["shared-id"].owner_id, "ownerA")
+        self.assertEqual(latest_b["shared-id"].status, "error")
+        self.assertEqual(latest_b["shared-id"].owner_id, "ownerB")
+
+    def test_latest_job_runs_empty_for_owner_with_no_runs(self) -> None:
+        self.assertEqual(self.state.latest_job_runs("owner1"), {})
 
 
 if __name__ == "__main__":

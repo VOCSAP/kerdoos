@@ -388,7 +388,7 @@ def _render_notifications(
     ctx = _base(request, principal, csrf, "notifications")
     sources = _owner_sources(svc.list_config(principal.owner_id))
     ctx.update(
-        jobs=svc.list_jobs(principal.owner_id),
+        jobs=svc.list_jobs_with_status(principal.owner_id),
         sources=sources,
         source_by_id={s["source_id"]: s for s in sources},
         timezones=_TIMEZONES,

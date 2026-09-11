@@ -118,6 +118,15 @@ class StateStore(Protocol):
         (job_id, window_start) pair (never raises on a missing row)."""
         ...
 
+    def latest_job_runs(self, owner: str) -> dict[str, JobRun]:
+        """Most recent job_runs row per job_id, scoped to owner (no N+1).
+        A job_id with no job_runs row at all is simply absent from the
+        returned dict -- the caller must handle the 'never sent' case
+        itself, since state.db has no way to enumerate job ids that were
+        never fired (digest_jobs lives in the physically separate
+        config.db, ADR 0003 T2)."""
+        ...
+
     def has_active_job_run(self, owner: str, job_id: str) -> bool:
         """True while `job_id` (scoped to `owner`, IDOR-safe double-scoping
         per ADR 0003 finding S2) has a job_runs row with status 'queued' or

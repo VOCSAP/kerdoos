@@ -24,7 +24,7 @@ from kerdoos.core.domain import Availability, ScrapeStatus
 from kerdoos.core.fetcher_guard import tier_unavailable
 from kerdoos.core.orchestrator import scrape_and_record
 from kerdoos.parsers.ports import Parser, ParserSpec
-from kerdoos.persistence.ports import ScrapeRecord, StateStore
+from kerdoos.persistence.ports import JobRun, ScrapeRecord, StateStore
 from kerdoos.registry.errors import (
     ConfigError,
     ConfigImportError,
@@ -379,6 +379,18 @@ class AppService:
 
     def list_jobs(self, owner: str) -> tuple[DigestJob, ...]:
         return self._config.list_jobs(owner)
+
+    def list_jobs_with_status(
+        self, owner: str,
+    ) -> tuple[tuple[DigestJob, JobRun | None], ...]:
+        """Each job paired with its most recent job_runs row (state.db),
+        or None if it was never fired. No cross-DB FK is possible (ADR
+        0003 T2: config.db and state.db are physically separate files),
+        so the join happens here, in memory, over two owner-scoped reads
+        -- never a raw SQL join across the two stores."""
+        jobs = self._config.list_jobs(owner)
+        latest = self._state.latest_job_runs(owner)
+        return tuple((job, latest.get(job.id)) for job in jobs)
 
     def get_job(self, owner: str, job_id: str) -> DigestJob:
         return self._config.get_job(owner, job_id)
