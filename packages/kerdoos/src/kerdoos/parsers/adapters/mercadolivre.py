@@ -170,28 +170,42 @@ def _extract_from_json_ld(html: str) -> Extract | None:
     """None if no JSON-LD Product node is found at all (-> try the meta repli).
 
     Raises ParseError if a Product WAS unambiguously identified but carries no
-    usable price -- that Product is authoritative, never silently discarded
-    in favor of a DOM heuristic.
+    usable price, a non-BRL currency, or a sku/productID that disagrees with
+    the page's own canonical id -- that Product is authoritative, never
+    silently discarded in favor of a DOM heuristic nor accepted with a value
+    that does not belong to the scraped listing.
     """
     products = _json_ld_products(html)
     if not products:
         return None
-    product = _select_product(products, _canonical_product_id(html))
+    canonical_id = _canonical_product_id(html)
+    product = _select_product(products, canonical_id)
     if product is None:
         raise ParseError(
             "multiple MercadoLivre JSON-LD Product nodes, none matching the "
+            "page's canonical product id")
+    sku = _product_sku(product)
+    if sku is not None and canonical_id is not None and sku != canonical_id:
+        # A single Product node is still validated against the canonical id:
+        # "the only candidate" does not mean "the right one" (e.g. a stale
+        # variant left over from a related listing).
+        raise ParseError(
+            "MercadoLivre JSON-LD Product sku/productID does not match the "
             "page's canonical product id")
     offers = _offers_of(product)
     price = to_cents(offers.get("price")) if offers else None
     if price is None:
         raise ParseError(
             "MercadoLivre JSON-LD Product has no usable offers.price")
-    currency = offers.get("priceCurrency")
+    currency = offers.get("priceCurrency") if offers else None
+    if currency != _CURRENCY:
+        raise ParseError(
+            f"MercadoLivre JSON-LD Product offers.priceCurrency is not "
+            f"{_CURRENCY!r} (got {currency!r})")
     return Extract(
         price_pix_cents=price,
         price_card_cents=price,
-        currency=currency if isinstance(currency, str) and currency
-        else _CURRENCY,
+        currency=_CURRENCY,
         availability=_availability_from_schema_url(
             offers.get("availability")),
     )

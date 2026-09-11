@@ -200,6 +200,29 @@ class MercadoLivreJsonLdTest(unittest.TestCase):
         extract = _parser().extract(html)
         self.assertEqual(extract.availability, Availability.UNKNOWN)
 
+    def test_jsonld_non_brl_currency_raises_parse_error(self) -> None:
+        # offers.priceCurrency is trusted, never copied verbatim: a non-BRL
+        # offer must not be funnelled through to_cents as if it were reais.
+        html = (
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"price":100,'
+            '"priceCurrency":"USD"}}</script>')
+        with self.assertRaises(ParseError):
+            _parser().extract(html)
+
+    def test_jsonld_single_product_sku_mismatch_with_canonical_raises(
+            self) -> None:
+        # Even with only ONE Product node (no ambiguity to resolve), a sku
+        # that disagrees with the page's own canonical id is a stale/unrelated
+        # variant, never silently accepted.
+        html = (
+            '<link rel="canonical" href="https://www.mercadolivre.com.br/p/MLB1">'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB2","offers":{"price":4321,'
+            '"priceCurrency":"BRL"}}</script>')
+        with self.assertRaises(ParseError):
+            _parser().extract(html)
+
     def test_malformed_jsonld_block_is_ignored_not_crashed(self) -> None:
         # A structurally broken JSON-LD block (unquoted key) sits alongside a
         # valid one: the malformed block is skipped, no exception leaks out,
