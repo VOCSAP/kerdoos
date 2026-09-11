@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterable
+from urllib.parse import quote
 
 from ..browser_gate import BrowserGate, default_browser_gate
 from ..challenge import looks_challenged
@@ -66,6 +67,14 @@ _STATUS_FALLBACK = 200
 # raises instead of holding the browser gate forever. Generous vs.
 # RECONNECT_TIME + RENDER_WAIT (~9s) to tolerate a slow Akamai challenge.
 UC_PAGE_LOAD_TIMEOUT_SECONDS = 45.0
+# Roadmap c06082a5 rempart (2): SeleniumBase's uc_open_with_reconnect
+# interpolates the url, unescaped, into a JS string literal (currently
+# double-quoted) executed via execute_script. Rempart (1) already rejects
+# the dangerous ASCII bytes at the shared SSRF predicate; this re-encodes
+# defensively at the JS sink itself, against a future seleniumbase change
+# that interpolates between single quotes instead -- ' is deliberately
+# EXCLUDED from `safe` (encoded to %27) for that reason.
+_JS_SAFE_URL_CHARS = ":/?#[]@!$&()*+,;=%"
 
 
 def _normalize_domains(domains: Iterable[str]) -> list[str]:
@@ -171,6 +180,7 @@ class UcFetcher:
         # dependency is absent (fail-closed, CWE-918).
         target = validate_target(url, self._domain_policy)
         rule = _host_resolver_rules(target, self._subresource_domains)
+        safe_url = quote(url, safe=_JS_SAFE_URL_CHARS)
 
         driver_cls = _load_seleniumbase()
         driver_kwargs = {
@@ -198,7 +208,8 @@ class UcFetcher:
                 # any acquisition-side deadline.
                 driver.set_page_load_timeout(UC_PAGE_LOAD_TIMEOUT_SECONDS)
                 # UC open + reconnect lets the Akamai JS challenge auto-resolve.
-                driver.uc_open_with_reconnect(url, reconnect_time=RECONNECT_TIME)
+                driver.uc_open_with_reconnect(
+                    safe_url, reconnect_time=RECONNECT_TIME)
                 driver.sleep(RENDER_WAIT)
                 html = driver.get_page_source()
                 if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:

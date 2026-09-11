@@ -137,6 +137,23 @@ class UcFetcherContractTest(unittest.TestCase):
             with self.assertRaises(SSRFError):
                 uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
 
+    def test_injection_shaped_url_rejected_before_driver_construction(
+            self) -> None:
+        # Roadmap c06082a5 L2: ties rempart 1 to the actual sink. The domain
+        # is allowlisted (unlike evil.com above), so only the RFC 3986
+        # character check can be what rejects this -- and the exploding
+        # factory proves seleniumbase.Driver is never even constructed, not
+        # merely that fetch() eventually raises.
+        def _exploding_factory(**kwargs):  # noqa: ANN003
+            raise AssertionError(
+                "Driver() must never be constructed for a rejected URL")
+
+        with mock.patch.object(uc, "_load_seleniumbase",
+                               return_value=_exploding_factory):
+            with self.assertRaises(SSRFError):
+                uc.UcFetcher(_POLICY).fetch(
+                    'https://www.magazineluiza.com.br/p/x");alert(1)//')
+
 
 class _FakeDriver:
     def __init__(self, page_source: str, **kwargs) -> None:  # noqa: ANN003
@@ -179,6 +196,32 @@ class UcFetcherWiringTest(unittest.TestCase):
                 result = uc.UcFetcher(
                     _POLICY, subresource_domains).fetch(_MAGALU_URL)
         return result, holder["driver"]
+
+    def test_apostrophe_percent_encoded_before_reaching_the_js_sink(
+            self) -> None:
+        # Roadmap c06082a5 L3, rempart (2): a literal apostrophe is valid
+        # RFC 3986 (rempart 1 accepts it, see RfcOutOfBandCharacterTest), but
+        # uc.py must still neutralise it for the JS sink -- a future
+        # seleniumbase version interpolating between '...' would otherwise
+        # be reachable through a perfectly legal URL.
+        url_with_apostrophe = _MAGALU_URL + "?ref=o'brien"
+        holder: dict = {}
+
+        def _factory(**kwargs):
+            drv = _FakeDriver("<html></html>", **kwargs)
+            holder["driver"] = drv
+            return drv
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(uc, "_load_seleniumbase",
+                                   return_value=_factory):
+                uc.UcFetcher(_POLICY).fetch(url_with_apostrophe)
+
+        opened_url = holder["driver"].opened[0]
+        self.assertNotIn("'", opened_url)
+        self.assertIn("%27", opened_url)
+        self.assertIn("o%27brien", opened_url)
 
     def test_binary_location_passed_to_driver_when_patchright_chromium_found(
             self) -> None:

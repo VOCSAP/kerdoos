@@ -203,11 +203,36 @@ class RfcOutOfBandCharacterTest(unittest.TestCase):
         with self.assertRaises(SSRFError):
             safety.check_scheme_and_domain(self._BASE + "\x00x", _POLICY)
 
+    def test_trailing_newline_only_rejected(self) -> None:
+        # Locks fullmatch specifically: re.match (or re.search) would accept
+        # this because everything BEFORE the newline matches the allowlist --
+        # only fullmatch's requirement that the WHOLE string match catches a
+        # trailing character with nothing after it.
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "\n", _POLICY)
+
+    def test_trailing_space_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + " ", _POLICY)
+
+    def test_trailing_tab_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "\t", _POLICY)
+
     def test_non_ascii_byte_rejected(self) -> None:
         # RFC 3986 requires percent-encoding for non-ASCII; a raw byte is
         # outside the allowed repertoire regardless of intent.
         with self.assertRaises(SSRFError):
             safety.check_scheme_and_domain(self._BASE + "-café", _POLICY)
+
+    def test_percent_encoded_quote_and_literal_apostrophe_accepted(self) -> None:
+        # Rempart 1 must not OVER-reject: %22 is a valid percent-escape (not
+        # a literal quote byte), and a literal apostrophe is a valid RFC 3986
+        # sub-delim. Both must pass check_scheme_and_domain -- rempart 2
+        # (uc.py's own call-site encoding) is what additionally neutralises
+        # the apostrophe for the JS sink specifically, not this predicate.
+        safety.check_scheme_and_domain(self._BASE + "%22x", _POLICY)
+        safety.check_scheme_and_domain(self._BASE + "'x", _POLICY)
 
     def test_real_stored_product_urls_still_accepted(self) -> None:
         # Every one of these is a REAL captured product URL from this repo's
