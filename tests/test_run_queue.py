@@ -178,6 +178,86 @@ class RunSupervisedTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status.state, RunState.ERROR)
         self.assertIn("restart budget", status.error)
 
+    async def test_restart_counter_resets_after_a_successful_run(self) -> None:
+        # Two crashes separated by a successful run are unrelated
+        # incidents, not one persistently broken consumer -- the budget
+        # must not accumulate across them.
+        service = _FakeService()
+        queue = RunQueue(service, max_consumer_restarts=1)
+        queue._restarts = 1  # simulate: one crash already recovered from
+        stop = asyncio.Event()
+        consumer = asyncio.create_task(queue.run_forever(stop))
+        try:
+            self.assertTrue(await queue.enqueue("owner1"))
+            status = None
+            for _ in range(300):
+                status = queue.status_for("owner1")
+                if status is not None and status.state == RunState.DONE:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(status.state, RunState.DONE)
+            self.assertEqual(queue._restarts, 0)
+        finally:
+            stop.set()
+            consumer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await consumer
+
+        async def _crash_once(self: RunQueue, stop_event: asyncio.Event) -> None:
+            raise RuntimeError("simulated consumer crash")
+
+        fresh_stop = asyncio.Event()
+        with mock.patch.object(RunQueue, "run_forever", _crash_once):
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    queue.run_supervised(fresh_stop), timeout=0.2)
+        self.assertEqual(queue._restarts, 1)
+        self.assertFalse(queue.is_dead)
+
+    async def test_queued_owners_flip_to_error_when_queue_dies(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, max_consumer_restarts=0)
+        stop = asyncio.Event()
+        queue._queued_or_running.add("queued-owner")
+        queue._status["queued-owner"] = RunStatus(state=RunState.QUEUED)
+
+        async def _always_crash(self: RunQueue, stop_event: asyncio.Event) -> None:
+            raise RuntimeError("simulated persistent crash")
+
+        with mock.patch.object(RunQueue, "run_forever", _always_crash):
+            await queue.run_supervised(stop)
+
+        self.assertTrue(queue.is_dead)
+        self.assertEqual(
+            queue.status_for("queued-owner").state, RunState.ERROR)
+        self.assertNotIn("queued-owner", queue._queued_or_running)
+
+    async def test_non_fatal_crash_keeps_queued_owner_in_flight(self) -> None:
+        # A QUEUED owner's item is still physically in the asyncio.Queue
+        # after a non-fatal crash -- dropping it from _queued_or_running
+        # would let a re-enqueue add a duplicate, processed twice in a row.
+        service = _FakeService()
+        queue = RunQueue(service, max_consumer_restarts=5)
+        stop = asyncio.Event()
+        queue._queued_or_running.add("running-owner")
+        queue._status["running-owner"] = RunStatus(state=RunState.RUNNING)
+        queue._queued_or_running.add("queued-owner")
+        queue._status["queued-owner"] = RunStatus(state=RunState.QUEUED)
+
+        async def _crash_once(self: RunQueue, stop_event: asyncio.Event) -> None:
+            raise RuntimeError("simulated consumer crash")
+
+        with mock.patch.object(RunQueue, "run_forever", _crash_once):
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(queue.run_supervised(stop), timeout=0.2)
+
+        self.assertNotIn("running-owner", queue._queued_or_running)
+        self.assertIn("queued-owner", queue._queued_or_running)
+        self.assertEqual(
+            queue.status_for("queued-owner").state, RunState.QUEUED)
+        self.assertEqual(
+            queue.status_for("running-owner").state, RunState.ERROR)
+
 
 if __name__ == "__main__":
     unittest.main()
