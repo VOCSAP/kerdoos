@@ -22,6 +22,12 @@ LogDigestSender (security policy: never bake a mail relay into the code).
 smtp_port defaults to 587 (STARTTLS submission), but that default only
 matters once an operator has already set KERDOOS_SMTP_HOST.
 
+KERDOOS_SMTP_RETRY_ATTEMPTS / KERDOOS_SMTP_RETRY_BACKOFF_SECONDS (roadmap
+f3b644ab): bound a retry on a TRANSIENT send failure (e.g. greylisting)
+inside digest.smtp_sender's send() call, never across evaluator ticks --
+defaults are low (2 attempts, a short backoff) since the retry budget is
+itself capped by digest_reaper_timeout_seconds.
+
 KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS (ADR 0003 Phase 6b fast-follow): the
 explicit max-send-timeout bound (default 300s / 5 min) core.evaluator's
 reaper sweep uses to reclaim a job_runs row stranded in 'queued'/'running'
@@ -82,6 +88,13 @@ DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS = 300
 # strictly below DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS.
 DEFAULT_SMTP_TIMEOUT_SECONDS = 30
 
+# Bounded retry on a TRANSIENT send failure (roadmap f3b644ab) -- e.g.
+# greylisting, a momentarily unavailable relay. Low by design: retries
+# happen inside the SAME send() call, budget-capped by
+# digest_reaper_timeout_seconds (digest.factory.build_sender).
+DEFAULT_SMTP_RETRY_ATTEMPTS = 2
+DEFAULT_SMTP_RETRY_BACKOFF_SECONDS = 2.0
+
 # Single-process default (ADR 0003 Decision 4).
 DEFAULT_WORKERS = 1
 
@@ -113,6 +126,8 @@ class Settings:
     smtp_password: str | None
     smtp_use_tls: bool
     smtp_timeout_seconds: float
+    smtp_retry_attempts: int
+    smtp_retry_backoff_seconds: float
     digest_reaper_timeout_seconds: int
     browser_max_concurrent: int
     browser_acquire_timeout_seconds: float
@@ -210,6 +225,12 @@ def get_settings() -> Settings:
         smtp_timeout_seconds=_env_number(
             "KERDOOS_SMTP_TIMEOUT_SECONDS", float(DEFAULT_SMTP_TIMEOUT_SECONDS),
             float, lambda v: True),
+        smtp_retry_attempts=_env_number(
+            "KERDOOS_SMTP_RETRY_ATTEMPTS", DEFAULT_SMTP_RETRY_ATTEMPTS, int,
+            lambda v: v >= 0),
+        smtp_retry_backoff_seconds=_env_number(
+            "KERDOOS_SMTP_RETRY_BACKOFF_SECONDS",
+            DEFAULT_SMTP_RETRY_BACKOFF_SECONDS, float, lambda v: v >= 0),
         digest_reaper_timeout_seconds=_env_number(
             "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
             DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, int, lambda v: v > 0),

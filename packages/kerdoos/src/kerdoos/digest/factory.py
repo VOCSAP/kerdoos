@@ -55,6 +55,16 @@ def build_sender(
         use_tls=settings.smtp_use_tls,
         timeout_seconds=_safe_smtp_timeout(
             settings.smtp_timeout_seconds, settings.digest_reaper_timeout_seconds),
+        retry_attempts=settings.smtp_retry_attempts,
+        retry_backoff_seconds=settings.smtp_retry_backoff_seconds,
+        # roadmap f3b644ab: the retry loop's own wall-clock budget mirrors
+        # the SAME deadline core.evaluator._run_plan_b already wraps the
+        # whole send() call in (asyncio.wait_for(timeout=
+        # digest_reaper_timeout_seconds)) -- self-imposed here so a stuck
+        # retry loop stops trying on its own once that budget is spent,
+        # even though nothing can kill the thread from the outside once
+        # the caller has given up (roadmap 3c0b1c80's orphan problem).
+        send_deadline_seconds=float(settings.digest_reaper_timeout_seconds),
     )
     return SmtpDigestSender(config_store, domain_policy, email_lookup, smtp_settings)
 

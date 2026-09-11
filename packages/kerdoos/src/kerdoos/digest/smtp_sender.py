@@ -50,6 +50,23 @@ duration case is closed one layer up, in core.evaluator._run_plan_b, which
 wraps the blocking send in asyncio.wait_for(..., timeout=reaper_timeout_seconds)
 so the evaluator loop reclaims its send_semaphore slot even if the
 underlying thread lingers (Python cannot forcibly kill a thread).
+
+S8 (roadmap f3b644ab): send() retries a TRANSIENT failure a bounded number
+of times (SmtpSettings.retry_attempts) inside this SAME call, never across
+evaluator ticks -- see _is_retryable_connect_failure/_is_retryable_send_failure
+for the exact classification boundary. Safe only because it is narrow:
+retryable means either (a) an explicit SMTP 4xx reply (the server itself
+said "not delivered, try again"), or (b) a connection-level failure
+strictly BEFORE send_message() is ever called. Anything at or after that
+point without an explicit 4xx -- a dropped connection, a raw timeout, a
+5xx reply, a capability/credential rejection -- is ambiguous or permanent
+and propagates unchanged, exactly as before this roadmap item (no retry,
+job_runs='error', window consumed). A self-imposed absolute deadline
+(SmtpSettings.send_deadline_seconds, computed once at the start of send())
+is checked before every attempt and before every backoff sleep, so a
+thread that outlives the evaluator's own wait_for budget (roadmap
+3c0b1c80's orphan problem) can never start a further attempt after that
+budget is spent, even though nothing can kill it from the outside.
 """
 
 from __future__ import annotations
@@ -57,6 +74,7 @@ from __future__ import annotations
 import logging
 import smtplib
 import ssl
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from email.message import EmailMessage
@@ -84,6 +102,9 @@ class SmtpSettings:
     password: str | None = None
     use_tls: bool = True
     timeout_seconds: float = 30.0
+    retry_attempts: int = 2
+    retry_backoff_seconds: float = 2.0
+    send_deadline_seconds: float = float("inf")
 
 
 def _clean_header(value: str) -> str:
@@ -91,6 +112,94 @@ def _clean_header(value: str) -> str:
     text/plain body (S1 CWE-93). Interior newlines are collapsed to spaces,
     matching digest.render._sanitize_error's discipline."""
     return value.replace("\r", " ").replace("\n", " ").strip()
+
+
+class _RetryableSmtpFailure(Exception):
+    """Internal-only wrapper: never escapes send(). Carries the ORIGINAL
+    smtplib/OSError failure so the caller can re-raise it verbatim once
+    retries are exhausted -- core/evaluator.py must keep seeing the real
+    exception type and message, not an internal retry-loop detail."""
+
+    def __init__(self, original: BaseException) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
+def _is_retryable_connect_failure(exc: BaseException) -> bool:
+    """True only for a network/connection-level failure at connect,
+    STARTTLS, or login -- e.g. connection refused, DNS failure, a dropped
+    socket. Explicitly NOT a certificate/protocol mismatch (ssl.SSLError,
+    including SSLCertVerificationError -- a PERMANENT configuration
+    problem no retry can fix) and NOT a capability/credential rejection
+    (SMTPNotSupportedError, SMTPAuthenticationError, SMTPHeloError --
+    smtplib.SMTPException subclasses OSError in modern Python, so these
+    must be excluded explicitly or a bare `isinstance(exc, OSError)` check
+    would wrongly net every smtplib protocol exception, not just raw
+    connection failures)."""
+    if isinstance(exc, ssl.SSLError):
+        return False
+    if isinstance(exc, (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected)):
+        return True
+    if isinstance(exc, smtplib.SMTPException):
+        return False
+    return isinstance(exc, OSError)
+
+
+def _is_retryable_send_failure(exc: BaseException) -> bool:
+    """True ONLY for an explicit SMTP 4xx reply -- the server unambiguously
+    said "not delivered, try again". A 5xx reply, or any failure with no
+    explicit code at all (a dropped connection, a raw timeout occurring
+    during or after send_message()), is either permanent or ambiguous
+    about whether the message was transmitted -- never retried."""
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return all(400 <= code < 500 for code, _msg in exc.recipients.values())
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return 400 <= exc.smtp_code < 500
+    return False
+
+
+def _send_smtp_once(smtp: SmtpSettings, message: EmailMessage) -> None:
+    """One full SMTP transaction: connect, optional STARTTLS/login, send.
+    Raises _RetryableSmtpFailure for a failure proven safe to retry (see
+    the two classifiers above); any other exception propagates as-is."""
+    try:
+        client = smtplib.SMTP(smtp.host, smtp.port, timeout=smtp.timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 -- classified below, not swallowed
+        if _is_retryable_connect_failure(exc):
+            raise _RetryableSmtpFailure(exc) from exc
+        raise
+    with client:
+        try:
+            if smtp.use_tls:
+                # S6 (CWE-295): explicit context -- check_hostname=True,
+                # verify_mode=CERT_REQUIRED. No STARTTLS support on the
+                # server -> SMTPNotSupportedError propagates uncaught
+                # (fail-closed, never a plaintext fallback, never retried).
+                client.starttls(context=ssl.create_default_context())
+            if smtp.username and smtp.password:
+                client.login(smtp.username, smtp.password)
+        except Exception as exc:  # noqa: BLE001 -- classified below, not swallowed
+            if _is_retryable_connect_failure(exc):
+                raise _RetryableSmtpFailure(exc) from exc
+            raise
+        try:
+            refused = client.send_message(message)
+        except Exception as exc:  # noqa: BLE001 -- classified below, not swallowed
+            if _is_retryable_send_failure(exc):
+                raise _RetryableSmtpFailure(exc) from exc
+            raise
+        # C1 (roadmap f3b644ab gate): send_message() can accept SOME
+        # recipients and refuse others via a non-empty returned dict,
+        # WITHOUT raising -- a retry after that would re-send to whoever
+        # already accepted. This adapter sends to exactly ONE recipient
+        # (owners.email is a single column, no Cc/Bcc anywhere in this
+        # module), so refused must always be empty; a non-empty dict here
+        # would mean that invariant broke, and silently returning "sent"
+        # would be worse than failing loud.
+        assert not refused, (
+            f"SmtpDigestSender: send_message() refused some but not all "
+            f"recipients ({refused!r}) -- retry-safety assumes exactly one "
+            f"recipient, this violates that invariant")
 
 
 class SmtpDigestSender:
@@ -122,6 +231,14 @@ class SmtpDigestSender:
                 "(will retry on a later window)", job.id, job.owner_id,
             )
             return False
+        # C1 (roadmap f3b644ab): the retry-safety reasoning below assumes
+        # exactly ONE recipient (a partial accept/refuse split is then
+        # impossible) -- measured: owners.email is a single TEXT column
+        # (registry.auth_store.SqliteAuthStore.get_email), no Cc/Bcc
+        # anywhere in this module. Guard the assumption instead of
+        # silently trusting it.
+        assert "," not in to_addr, (
+            f"SmtpDigestSender expects exactly one recipient, got {to_addr!r}")
 
         # S2: owner-scoped read only -- never a global/unscoped registry sweep.
         registry = self._config.load(job.owner_id)
@@ -145,19 +262,32 @@ class SmtpDigestSender:
         message.set_content(text_body)
         message.add_alternative(html_body, subtype="html")
 
-        with smtplib.SMTP(
-            self._smtp.host, self._smtp.port, timeout=self._smtp.timeout_seconds,
-        ) as client:
-            if self._smtp.use_tls:
-                # S6 (CWE-295): explicit context -- check_hostname=True,
-                # verify_mode=CERT_REQUIRED. No STARTTLS support on the
-                # server -> SMTPNotSupportedError propagates uncaught
-                # (fail-closed, never a plaintext fallback).
-                client.starttls(context=ssl.create_default_context())
-            if self._smtp.username and self._smtp.password:
-                client.login(self._smtp.username, self._smtp.password)
-            client.send_message(message)
-        return True
+        # S8 (roadmap f3b644ab): the absolute deadline is computed ONCE
+        # here, from this call's own configured timeouts -- checked before
+        # every attempt and before every backoff, so a thread that outlives
+        # the evaluator's wait_for budget can never start a further
+        # attempt after that budget is spent (roadmap 3c0b1c80's orphan
+        # problem: nothing can kill this thread from the outside).
+        deadline = time.monotonic() + self._smtp.send_deadline_seconds
+        attempts_left = self._smtp.retry_attempts + 1
+        while True:
+            attempts_left -= 1
+            try:
+                _send_smtp_once(self._smtp, message)
+                return True
+            except _RetryableSmtpFailure as wrapped:
+                if attempts_left <= 0:
+                    raise wrapped.original from None
+                remaining = deadline - time.monotonic()
+                if remaining < self._smtp.timeout_seconds:
+                    raise wrapped.original from None
+                backoff = min(
+                    self._smtp.retry_backoff_seconds,
+                    remaining - self._smtp.timeout_seconds)
+                if backoff > 0:
+                    time.sleep(backoff)
+                if deadline - time.monotonic() < self._smtp.timeout_seconds:
+                    raise wrapped.original from None
 
 
 def _clean_header_block(body: str) -> str:

@@ -91,6 +91,38 @@ class _ExplodingSMTP:
             "configured -- send() must return before opening a connection")
 
 
+class _ScriptedSMTP(_FakeSMTP):
+    """A _FakeSMTP whose connect stage and send_message() stage each
+    follow a SCRIPT: a list of outcomes consumed one per call. An entry
+    that is a BaseException is raised; a dict is returned as-is (a
+    send_message() partial-refusal simulation); None means a normal
+    success. Each test defines its own subclass with its own script/
+    counters, so nothing bleeds between tests."""
+
+    connect_script: list[BaseException | None] = []
+    send_script: list[BaseException | dict | None] = []
+    connect_attempts = 0
+
+    def __init__(self, *args, **kwargs) -> None:
+        cls = type(self)
+        cls.connect_attempts += 1
+        if cls.connect_script:
+            outcome = cls.connect_script.pop(0)
+            if outcome is not None:
+                raise outcome
+        super().__init__(*args, **kwargs)
+
+    def send_message(self, message):
+        cls = type(self)
+        self.sent_message = message
+        if cls.send_script:
+            outcome = cls.send_script.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome or {}
+        return {}
+
+
 @dataclass
 class _FakeConfigStore:
     """Owner-keyed registries. load() records every owner it was called
@@ -356,6 +388,128 @@ class SmtpSocketTimeoutTest(_SmtpSenderTestBase):
         # bundle closes -- SmtpSettings' own default must be a real timeout.
         self.assertGreater(_SMTP_SETTINGS.timeout_seconds, 0)
         self.assertLess(_SMTP_SETTINGS.timeout_seconds, float("inf"))
+
+
+class RetryTest(_SmtpSenderTestBase):
+    """roadmap f3b644ab: a bounded retry on a TRANSIENT SMTP failure,
+    never across evaluator ticks. Boundary: retryable only for an
+    explicit 4xx reply, or a connection failure strictly before
+    send_message() is ever called -- everything else (5xx, a dropped
+    connection during/after send, a capability/credential rejection)
+    propagates exactly as before this roadmap item."""
+
+    def _sender(self, **settings_kwargs) -> tuple[SmtpDigestSender, _FakeConfigStore]:
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        settings = SmtpSettings(
+            host="smtp.example.com", port=587, from_addr="digest@example.com",
+            retry_backoff_seconds=0.01, **settings_kwargs,
+        )
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "user@example.com", settings)
+        return sender, config_store
+
+    def test_transient_4xx_is_retried_and_succeeds_same_window(self) -> None:
+        class _Flaky(_ScriptedSMTP):
+            send_script = [smtplib.SMTPDataError(451, b"greylisted"), None]
+
+        sender, _config = self._sender(retry_attempts=2)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _Flaky):
+            sent = sender.send(
+                _job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertIs(sent, True)
+        self.assertEqual(_Flaky.connect_attempts, 2)
+
+    def test_permanent_5xx_is_never_retried(self) -> None:
+        class _Permanent(_ScriptedSMTP):
+            send_script = [smtplib.SMTPDataError(550, b"mailbox unavailable")]
+
+        sender, _config = self._sender(retry_attempts=2)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _Permanent):
+            with self.assertRaises(smtplib.SMTPDataError) as ctx:
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertEqual(ctx.exception.smtp_code, 550)
+        self.assertEqual(_Permanent.connect_attempts, 1)
+
+    def test_disconnect_during_send_is_never_retried(self) -> None:
+        # No explicit code -- ambiguous whether DATA was delivered, so
+        # this must be treated as permanent, not retried.
+        class _Disconnect(_ScriptedSMTP):
+            send_script = [
+                smtplib.SMTPServerDisconnected("Connection unexpectedly closed")]
+
+        sender, _config = self._sender(retry_attempts=2)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _Disconnect):
+            with self.assertRaises(smtplib.SMTPServerDisconnected):
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertEqual(_Disconnect.connect_attempts, 1)
+
+    def test_connection_refused_on_first_attempt_is_retried(self) -> None:
+        class _FlakyConnect(_ScriptedSMTP):
+            connect_script = [ConnectionRefusedError("connection refused"), None]
+
+        sender, _config = self._sender(retry_attempts=2)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _FlakyConnect):
+            sent = sender.send(
+                _job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertIs(sent, True)
+        self.assertEqual(_FlakyConnect.connect_attempts, 2)
+
+    def test_budget_exhausted_before_any_retry_makes_no_second_attempt(self) -> None:
+        # C2: send_deadline_seconds < timeout_seconds -- even a single
+        # failed attempt leaves less than one timeout's worth of budget,
+        # so no second attempt is made regardless of retry_attempts.
+        class _AlwaysTransient(_ScriptedSMTP):
+            send_script = [smtplib.SMTPDataError(451, b"greylisted")] * 5
+
+        sender, _config = self._sender(
+            timeout_seconds=5.0, retry_attempts=2, send_deadline_seconds=1.0)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _AlwaysTransient):
+            with self.assertRaises(smtplib.SMTPDataError) as ctx:
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertEqual(ctx.exception.smtp_code, 451)
+        self.assertEqual(_AlwaysTransient.connect_attempts, 1)
+
+    def test_partial_acceptance_trips_the_guard_no_retry(self) -> None:
+        # C1: send_message() returning a non-empty refused-recipients dict
+        # WITHOUT raising -- impossible today with exactly one recipient,
+        # but the guard must fail loud rather than silently retry into a
+        # duplicate send if this invariant is ever broken.
+        class _Partial(_ScriptedSMTP):
+            send_script = [{"user@example.com": (450, b"refused")}]
+
+        sender, _config = self._sender(retry_attempts=2)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _Partial):
+            with self.assertRaises(AssertionError):
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertEqual(_Partial.connect_attempts, 1)
+
+    def test_multiple_recipients_trips_the_guard_before_any_connection(self) -> None:
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY,
+            lambda owner: "a@example.com,b@example.com", _SMTP_SETTINGS)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _ExplodingSMTP):
+            with self.assertRaises(AssertionError) as ctx:
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+        # Message check, not just the exception TYPE: _ExplodingSMTP's own
+        # guard also raises AssertionError, so a type-only check would
+        # still pass even if THIS specific guard were removed.
+        self.assertIn("exactly one recipient", str(ctx.exception))
 
 
 if __name__ == "__main__":
