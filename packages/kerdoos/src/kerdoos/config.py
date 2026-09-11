@@ -68,6 +68,13 @@ Bounds how often a single tenant can hammer the shared browser gate
 (max_concurrent=1 by default) and degrade the shared egress IP's anti-bot
 reputation for every OTHER tenant. 0 explicitly disables the guard. Same
 floor-with-warning discipline; keyed per owner_id (invariant 10).
+
+KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071 re-gate): bounds the
+Chrome LAUNCH itself for the uc tier (autolycos.adapters.uc.UcFetcher's
+launch_timeout_seconds), same floor-with-warning discipline. Read here and
+INJECTED into autolycos.router.StaticRouter at composition-root time --
+autolycos never reads this (or any other KERDOOS_*) env var itself
+(invariant 2).
 """
 
 from __future__ import annotations
@@ -144,6 +151,10 @@ DEFAULT_RUN_QUEUE_MAX_RESTARTS = 5
 # fixing a config issue.
 DEFAULT_RUN_NOW_COOLDOWN_SECONDS = 300.0
 
+# Roadmap 65cef071 re-gate: matches autolycos.adapters.uc.UC_LAUNCH_TIMEOUT_SECONDS's
+# own default, so an unset env var reproduces the previous hardcoded behavior.
+DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS = 30.0
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -167,6 +178,7 @@ class Settings:
     browser_acquire_timeout_seconds: float
     run_queue_max_restarts: int
     run_now_cooldown_seconds: float
+    uc_launch_timeout_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -284,4 +296,7 @@ def get_settings() -> Settings:
         run_now_cooldown_seconds=_env_number(
             "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
             DEFAULT_RUN_NOW_COOLDOWN_SECONDS, float, lambda v: v >= 0),
+        uc_launch_timeout_seconds=_env_number(
+            "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
+            DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
     )

@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import uuid
 from collections.abc import Iterable
 from urllib.parse import quote
 
@@ -159,25 +160,77 @@ def _load_seleniumbase():  # type: ignore[no-untyped-def]
     return Driver
 
 
-def _kill_new_child_processes(before_pids: frozenset[int]) -> None:
-    """Best-effort: kill any child process (chromedriver, Chrome) spawned
-    since `before_pids` was snapshotted, so a launch abandoned at the
-    UC_LAUNCH_TIMEOUT_SECONDS deadline never leaves a zombie behind (roadmap
-    65cef071). psutil is optional (declared under the `uc` extra); any
-    psutil error here is swallowed -- this is cleanup, not correctness.
+# Roadmap 65cef071 re-gate, finding C1: an unknown Chrome switch (ignored by
+# Chrome itself) injected into chromium_arg, unique per launch, so cleanup
+# can identify THIS launch's OWN process tree by cmdline substring instead of
+# by mere process-tree novelty -- "every new child of the current process"
+# also matches a concurrent, unrelated browser/uc launch's own Chrome.
+_LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
+# SeleniumBase's own driver process sits between this Python process and the
+# marked Chrome process; the marker itself lives only in Chrome's argv.
+_LAUNCH_PARENT_NAMES = frozenset({"chromedriver", "uc_driver"})
+
+
+def _process_matches_launch(proc, marker: str) -> bool:  # type: ignore[no-untyped-def]
+    try:
+        cmdline = proc.cmdline()
+    except Exception:  # noqa: BLE001 -- psutil.Error / race with process exit
+        return False
+    return any(marker in arg for arg in cmdline)
+
+
+def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
+    """The OS process tree belonging to the launch tagged with `marker`: any
+    live process whose cmdline carries it, that process's parent when the
+    parent is itself named chromedriver/uc_driver, and all of their
+    descendants (renderer/GPU child processes, which do not carry the
+    marker in their own argv).
     """
     import psutil
 
     try:
-        after = psutil.Process(os.getpid()).children(recursive=True)
+        candidates = psutil.Process(os.getpid()).children(recursive=True)
     except psutil.Error:
-        return
-    for proc in after:
-        if proc.pid in before_pids:
+        return []
+
+    roots = [p for p in candidates if _process_matches_launch(p, marker)]
+    for proc in list(roots):
+        try:
+            parent = proc.parent()
+        except psutil.Error:
+            continue
+        if parent is None:
             continue
         try:
-            proc.kill()
+            parent_name = parent.name().lower()
         except psutil.Error:
+            continue
+        if parent_name in _LAUNCH_PARENT_NAMES:
+            roots.append(parent)
+
+    tree: dict[int, object] = {}
+    for root in roots:
+        tree[root.pid] = root
+        try:
+            for descendant in root.children(recursive=True):
+                tree[descendant.pid] = descendant
+        except psutil.Error:
+            continue
+    return list(tree.values())
+
+
+def _kill_launch_processes(marker: str) -> None:
+    """Best-effort: kill only the process tree of the launch tagged with
+    `marker`, so a launch abandoned at the deadline never leaves a zombie
+    behind (roadmap 65cef071) without also hitting a concurrent, unrelated
+    launch's own process (re-gate finding C1). psutil is optional (declared
+    under the `uc` extra); any error here is swallowed -- this is cleanup,
+    not correctness.
+    """
+    for proc in _launch_process_tree(marker):
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
             pass
 
 
@@ -210,34 +263,76 @@ class UcFetcher:
 
     def _launch_with_deadline(self, driver_cls, driver_kwargs):  # type: ignore[no-untyped-def]
         """Runs driver_cls(**driver_kwargs) (the Chrome launch itself) under
-        UC_LAUNCH_TIMEOUT_SECONDS. A native launch cannot be cancelled from
-        Python once started, so a hang is bounded by abandoning the thread
-        (daemon, never joined again) and killing any process it spawned,
-        rather than by cancelling the call itself.
+        self._launch_timeout_seconds. A native launch cannot be cancelled
+        from Python once started, so a hang is bounded by abandoning the
+        thread (daemon, never joined again after abandonment) and killing
+        the process tree it spawned, rather than by cancelling the call
+        itself.
+
+        A unique --kerdoos-launch-id marker is injected into chromium_arg so
+        cleanup can target THIS launch's own process tree instead of every
+        new child of the current process, which also hits a concurrent,
+        unrelated launch (roadmap 65cef071 re-gate, finding C1).
+
+        Which side -- this method's timeout, or the thread's own completion
+        -- gets to resolve the launch is decided by a single atomic claim.
+        Whichever side loses it is the one that happened AFTER the other has
+        already committed to its outcome: if the thread loses, it means the
+        launch finished (successfully or not) only after this method had
+        already given up and moved on, so the caller will never see that
+        Driver -- the thread quits it and kills its process tree
+        itself before returning (re-gate finding C2, a leak in the previous
+        single-snapshot-at-the-deadline implementation). If this method
+        loses (the launch finished right as the deadline fired), it defers
+        to the thread's own result instead of raising a spurious timeout.
         """
-        import psutil
+        launch_id = uuid.uuid4().hex
+        marker = f"{_LAUNCH_ID_ARG_PREFIX}{launch_id}"
+        driver_kwargs = dict(driver_kwargs)
+        driver_kwargs["chromium_arg"] = [
+            *driver_kwargs.get("chromium_arg", []), marker,
+        ]
 
         holder: dict = {}
+        claim_lock = threading.Lock()
+        claimed = {"value": False}
+
+        def _claim() -> bool:
+            with claim_lock:
+                if claimed["value"]:
+                    return False
+                claimed["value"] = True
+                return True
 
         def _construct() -> None:
             try:
-                holder["driver"] = driver_cls(**driver_kwargs)
+                driver = driver_cls(**driver_kwargs)
             except BaseException as exc:  # noqa: BLE001 -- relayed to the caller
-                holder["error"] = exc
-
-        try:
-            before_pids = frozenset(
-                p.pid for p in psutil.Process(os.getpid()).children(recursive=True))
-        except psutil.Error:
-            before_pids = frozenset()
+                if _claim():
+                    holder["error"] = exc
+                else:
+                    _kill_launch_processes(marker)
+                return
+            if _claim():
+                holder["driver"] = driver
+            else:
+                try:
+                    driver.quit()
+                except Exception:  # noqa: BLE001 -- best-effort, caller is gone
+                    pass
+                _kill_launch_processes(marker)
 
         launch_thread = threading.Thread(target=_construct, daemon=True)
         launch_thread.start()
         launch_thread.join(timeout=self._launch_timeout_seconds)
-        if launch_thread.is_alive():
-            _kill_new_child_processes(before_pids)
+        if launch_thread.is_alive() and _claim():
+            _kill_launch_processes(marker)
             raise FetchError(
                 f"uc launch exceeded {self._launch_timeout_seconds}s timeout")
+        # Either the thread had already finished by the deadline, or it won
+        # the claim race right as the deadline fired -- either way it is
+        # about to return (or already has), so this join is bounded.
+        launch_thread.join()
         if "error" in holder:
             raise holder["error"]
         return holder["driver"]

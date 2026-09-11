@@ -50,13 +50,17 @@ def _make_browser(domain_policy: DomainPolicy,
 
 def _make_uc(domain_policy: DomainPolicy,
              subresource_domains: Iterable[str],
-             browser_gate: BrowserGate) -> Fetcher:
+             browser_gate: BrowserGate,
+             launch_timeout_seconds: float | None = None) -> Fetcher:
     # Deferred import: SeleniumBase is optional and only needed for the uc tier
     # (sites behind Akamai Bot Manager; Magalu). The per-site render-CDN
     # sub-resource allowlist feeds the DNS-level host-resolver rule.
     from .adapters.uc import UcFetcher
 
-    return UcFetcher(domain_policy, subresource_domains, browser_gate)
+    kwargs = {}
+    if launch_timeout_seconds is not None:
+        kwargs["launch_timeout_seconds"] = launch_timeout_seconds
+    return UcFetcher(domain_policy, subresource_domains, browser_gate, **kwargs)
 
 
 # Lazy factories so importing the router does not construct every tool. Each
@@ -123,6 +127,7 @@ class StaticRouter:
     def __init__(
         self, domain_policy: DomainPolicy,
         browser_gate: BrowserGate | None = None,
+        uc_launch_timeout_seconds: float | None = None,
     ) -> None:
         self._domain_policy = domain_policy
         # Defaults to the SAME module-level singleton as a directly-
@@ -130,6 +135,11 @@ class StaticRouter:
         # StaticRouters built without an explicit gate still share one door.
         self._browser_gate = (
             browser_gate if browser_gate is not None else default_browser_gate())
+        # None leaves UcFetcher's own UC_LAUNCH_TIMEOUT_SECONDS default in
+        # effect (roadmap 65cef071 re-gate MINOR: KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS,
+        # injected by the kerdoos composition root -- autolycos itself never
+        # reads that env var, invariant 2).
+        self._uc_launch_timeout_seconds = uc_launch_timeout_seconds
         self._cache: dict[tuple[str, frozenset[str]], Fetcher] = {}
 
     def select(
@@ -144,8 +154,16 @@ class StaticRouter:
         # tier with different render CDNs get distinct instances.
         key = (fetcher_name, frozenset(subresource_domains))
         if key not in self._cache:
-            self._cache[key] = _FACTORIES[fetcher_name](
-                self._domain_policy, subresource_domains, self._browser_gate)
+            # Only the uc tier takes an extra kwarg: http/tls/browser's
+            # factories don't declare it, keeping their own call shape
+            # untouched.
+            if fetcher_name == "uc" and self._uc_launch_timeout_seconds is not None:
+                self._cache[key] = _FACTORIES[fetcher_name](
+                    self._domain_policy, subresource_domains, self._browser_gate,
+                    launch_timeout_seconds=self._uc_launch_timeout_seconds)
+            else:
+                self._cache[key] = _FACTORIES[fetcher_name](
+                    self._domain_policy, subresource_domains, self._browser_gate)
         return self._cache[key]
 
     def tier_available(self, fetcher_name: str) -> bool:

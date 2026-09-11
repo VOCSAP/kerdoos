@@ -15,6 +15,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -24,6 +25,7 @@ from autolycos import safety
 from autolycos.adapters import uc
 from autolycos.browser_gate import BrowserGate
 from autolycos.errors import FetchError, SSRFError
+from autolycos.router import StaticRouter
 from autolycos.safety import DomainPolicy, ValidatedTarget
 
 _POLICY = DomainPolicy(frozenset({
@@ -44,6 +46,16 @@ def _target(ip: str) -> ValidatedTarget:
     return ValidatedTarget(url="https://www.magazineluiza.com.br/x",
                            scheme="https", host="www.magazineluiza.com.br",
                            port=443, ip=ip)
+
+
+def _marker_from_kwargs(kwargs: dict) -> str:
+    # Mirrors how a real Chrome process receives the launch-id: as a literal
+    # entry of the chromium_arg list _launch_with_deadline injects, which a
+    # fake factory must thread into its own spawned process's argv the same
+    # way SeleniumBase threads it into Chrome's argv.
+    return next(
+        arg for arg in kwargs["chromium_arg"]
+        if arg.startswith(uc._LAUNCH_ID_ARG_PREFIX))
 
 
 class HostResolverRulesTest(unittest.TestCase):
@@ -250,13 +262,16 @@ class UcFetcherWiringTest(unittest.TestCase):
         # internal commas into bogus standalone switches and silently drop
         # the deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
         self.assertIsInstance(chromium_arg, list)
-        self.assertEqual(len(chromium_arg), 1)
+        # host-resolver-rules + the per-launch --kerdoos-launch-id marker
+        # _launch_with_deadline appends (roadmap 65cef071 re-gate C1).
+        self.assertEqual(len(chromium_arg), 2)
         arg = chromium_arg[0]
         self.assertIn(
             "--host-resolver-rules=MAP www.magazineluiza.com.br 104.18.0.1", arg)
         self.assertIn("MAP * ~NOTFOUND", arg)
         self.assertIn("EXCLUDE mlcdn.com.br", arg)
         self.assertNotIn("EXCLUDE www.magazineluiza.com.br", arg)
+        self.assertTrue(chromium_arg[1].startswith(uc._LAUNCH_ID_ARG_PREFIX))
         self.assertTrue(driver.kwargs["uc"])
         self.assertEqual(result.method, "uc")
         self.assertEqual(result.status, 200)      # CDP absent -> 200 fallback
@@ -535,13 +550,27 @@ class UcLaunchDeadlineTest(unittest.TestCase):
 
     def _hanging_factory(self, sleep_seconds: float, spawned: list) -> object:
         def _factory(**kwargs):  # noqa: ANN003
+            # The spawned process carries the launch-id marker in its own
+            # argv, exactly as a real Chrome process would receive it via
+            # chromium_arg -- required for the marker-targeted kill (C1) to
+            # find it at all.
+            marker = _marker_from_kwargs(kwargs)
             proc = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(60)"])
+                [sys.executable, "-c", "import time; time.sleep(60)", marker])
             spawned.append(proc)
             time.sleep(sleep_seconds)
             return _FakeDriver("<html></html>", **kwargs)
 
         return _factory
+
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return predicate()
 
     def test_hung_launch_raises_fetch_error_within_the_deadline(self) -> None:
         gate = BrowserGate(max_concurrent=1)
@@ -600,6 +629,99 @@ class UcLaunchDeadlineTest(unittest.TestCase):
         self.assertIsNotNone(
             proc.poll(), "the spawned child process was not killed")
 
+    def test_timed_out_launch_kills_only_its_own_process_tree(self) -> None:
+        """Re-gate finding C1 (MAJOR): the previous implementation killed
+        every new child of the current process, so a concurrent, unrelated
+        launch's own Chrome/chromedriver was killed too as soon as
+        max_concurrent >= 2. Two REAL _launch_with_deadline calls run
+        concurrently on the SAME gate: only the one that times out may lose
+        its process, the other one's must survive.
+        """
+        gate = BrowserGate(max_concurrent=2)
+        own_spawned: list = []
+        other_spawned: list = []
+        other_result: dict = {}
+
+        def _other_factory(**kwargs):  # noqa: ANN003
+            marker = _marker_from_kwargs(kwargs)
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)", marker])
+            other_spawned.append(proc)
+            return _FakeDriver("<html></html>", **kwargs)
+
+        def _other_launch() -> None:
+            time.sleep(0.2)  # starts inside the timed-out launch's window
+            other_fetcher = uc.UcFetcher(
+                _POLICY, gate=gate, launch_timeout_seconds=5.0)
+            other_result["driver"] = other_fetcher._launch_with_deadline(
+                _other_factory, {})
+
+        other_thread = threading.Thread(target=_other_launch, daemon=True)
+        other_thread.start()
+        try:
+            fetcher = uc.UcFetcher(
+                _POLICY, gate=gate,
+                launch_timeout_seconds=0.6)
+            with self.assertRaises(FetchError):
+                fetcher._launch_with_deadline(
+                    self._hanging_factory(3.0, own_spawned), {})
+            other_thread.join(timeout=5)
+            self.assertFalse(other_thread.is_alive(),
+                              "the concurrent launch never completed")
+            self.assertIn("driver", other_result)
+            self.assertTrue(
+                self._wait_until(lambda: own_spawned
+                                  and own_spawned[0].poll() is not None),
+                "the timed-out launch's own process was not killed")
+            self.assertIsNone(
+                other_spawned[0].poll(),
+                "an unrelated concurrent launch's process was killed")
+        finally:
+            for proc in own_spawned + other_spawned:
+                if proc.poll() is None:
+                    proc.kill()
+
+    def test_launch_finishing_after_the_deadline_is_quit_and_cleaned_up(
+            self) -> None:
+        """Re-gate finding C2 (MAJOR, regression vs main): the previous
+        implementation snapshotted/killed only ONCE, at the deadline. A
+        launch whose factory returns its Driver AFTER the deadline (a slow
+        launch under load, chromedriver up before Chrome) leaked both the
+        Driver's process tree and the gate slot it had already vacated.
+        """
+        gate = BrowserGate(max_concurrent=1)
+        late_spawned: list = []
+        driver_holder: dict = {}
+
+        def _late_factory(**kwargs):  # noqa: ANN003
+            time.sleep(0.8)  # returns AFTER the 0.3s deadline below
+            marker = _marker_from_kwargs(kwargs)
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)", marker])
+            late_spawned.append(proc)
+            drv = _FakeDriver("<html></html>", **kwargs)
+            driver_holder["driver"] = drv
+            return drv
+
+        try:
+            fetcher = uc.UcFetcher(
+                _POLICY, gate=gate, launch_timeout_seconds=0.3)
+            with self.assertRaises(FetchError):
+                fetcher._launch_with_deadline(_late_factory, {})
+            self.assertTrue(
+                self._wait_until(
+                    lambda: driver_holder.get("driver") is not None
+                    and driver_holder["driver"].quit_called),
+                "the Driver returned after the deadline was never quit()")
+            self.assertTrue(
+                self._wait_until(lambda: late_spawned
+                                  and late_spawned[0].poll() is not None),
+                "the process spawned after the deadline was never cleaned up")
+        finally:
+            for proc in late_spawned:
+                if proc.poll() is None:
+                    proc.kill()
+
 
 class GateWiringTest(unittest.TestCase):
     """Card ca30b736: fetch() must acquire the browser gate around the
@@ -631,6 +753,32 @@ class GateWiringTest(unittest.TestCase):
             default_gate_fn.return_value = spy_gate
             self._fetch_with_gate(None)
         spy_gate.acquire.assert_called_once()
+
+
+class StaticRouterUcLaunchTimeoutTest(unittest.TestCase):
+    """Roadmap 65cef071 re-gate MINOR: KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS is
+    injected by the kerdoos composition root through
+    StaticRouter/_make_uc -- never read by autolycos itself (invariant 2).
+    """
+
+    def test_injected_value_reaches_the_built_uc_fetcher(self) -> None:
+        router = StaticRouter(_POLICY, uc_launch_timeout_seconds=99.0)
+        fetcher = router.select("uc")
+        self.assertIsInstance(fetcher, uc.UcFetcher)
+        self.assertEqual(fetcher._launch_timeout_seconds, 99.0)
+
+    def test_no_value_injected_keeps_the_tier_s_own_default(self) -> None:
+        router = StaticRouter(_POLICY)
+        fetcher = router.select("uc")
+        self.assertEqual(
+            fetcher._launch_timeout_seconds, uc.UC_LAUNCH_TIMEOUT_SECONDS)
+
+    def test_other_tiers_call_shape_is_unaffected(self) -> None:
+        # http/tls/browser's factories don't declare launch_timeout_seconds;
+        # injecting it must not break their construction.
+        router = StaticRouter(_POLICY, uc_launch_timeout_seconds=5.0)
+        http_fetcher = router.select("http")
+        self.assertEqual(http_fetcher.method_name, "http")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@ from kerdoos.config import (
     DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_RUN_NOW_COOLDOWN_SECONDS,
     DEFAULT_RUN_QUEUE_MAX_RESTARTS, DEFAULT_SMTP_PORT,
     DEFAULT_SMTP_RETRY_ATTEMPTS, DEFAULT_SMTP_RETRY_BACKOFF_SECONDS,
-    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS, MAX_SMTP_RETRY_ATTEMPTS,
+    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS,
+    DEFAULT_WORKERS, MAX_SMTP_RETRY_ATTEMPTS,
     MIN_SMTP_RETRY_BACKOFF_SECONDS, get_settings,
 )
 
@@ -32,6 +33,7 @@ _SMTP_ENV_VARS = (
     "KERDOOS_WORKERS", "KERDOOS_BROWSER_MAX_CONCURRENT",
     "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
     "KERDOOS_RUN_QUEUE_MAX_RESTARTS", "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
+    "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
 )
 
 
@@ -439,6 +441,39 @@ class RunNowCooldownFloorTest(_SettingsTestBase):
                     DEFAULT_RUN_NOW_COOLDOWN_SECONDS)
                 self.assertTrue(
                     any("KERDOOS_RUN_NOW_COOLDOWN_SECONDS" in msg
+                        for msg in cm.output), cm.output)
+
+
+class UcLaunchTimeoutFloorTest(_SettingsTestBase):
+    """Roadmap 65cef071 re-gate MINOR: a malformed
+    KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS warns and floors to the default
+    instead of crashing at settings-read time, and an unset one preserves
+    the tier's own previously-hardcoded default (uc.UC_LAUNCH_TIMEOUT_SECONDS)."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.uc_launch_timeout_seconds,
+            DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "45"
+        settings = get_settings()
+        self.assertEqual(settings.uc_launch_timeout_seconds, 45.0)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.uc_launch_timeout_seconds,
+                    DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS)
+                self.assertTrue(
+                    any("KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS" in msg
                         for msg in cm.output), cm.output)
 
 
