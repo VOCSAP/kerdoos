@@ -140,6 +140,73 @@ class ConfigImportExportTest(unittest.TestCase):
             self.assertEqual(sites["kabum"].domain, "kabum.com.br")
             self.assertEqual(len(products), 1)
 
+    def test_rejected_source_reports_clearly_and_partial_state(self) -> None:
+        # Roadmap c06082a5: a raw traceback is not an acceptable CLI failure
+        # mode. Measures (not assumes) that config import is PARTIAL: rows
+        # processed before the rejected entry, INCLUDING the failing
+        # product's own row (added before its source is validated), are
+        # already committed.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            config_dir = d / "config"
+            config_dir.mkdir()
+            (config_dir / "sites.yaml").write_text(_SITES_YAML, encoding="utf-8")
+            products_yaml = (
+                "products:\n"
+                "  - id: good-one\n"
+                "    sources:\n"
+                "      - site: kabum\n"
+                "        url: https://www.kabum.com.br/produto/1\n"
+                "  - id: bad-one\n"
+                "    sources:\n"
+                '      - site: kabum\n'
+                '        url: \'https://www.kabum.com.br/produto/2"x\'\n'
+            )
+            (config_dir / "products.yaml").write_text(
+                products_yaml, encoding="utf-8")
+
+            config_db = d / "config.db"
+            state_db = d / "state.db"
+            args = cli.build_parser_cli().parse_args([
+                "config", "import",
+                "--config-dir", str(config_dir),
+                "--config-db", str(config_db),
+                "--db", str(state_db),
+                "--owner", "owner1",
+            ])
+
+            import io
+            from contextlib import redirect_stderr
+
+            captured = io.StringIO()
+            with redirect_stderr(captured):
+                exit_code = cli.cmd_config_import(args)
+
+            self.assertEqual(exit_code, 1)
+            message = captured.getvalue()
+            self.assertIn("bad-one", message)
+            self.assertIn("kabum", message)
+            self.assertIn("produto/2", message)
+            self.assertIn("PARTIAL", message)
+
+            store = SqliteConfigStore(config_db)
+            try:
+                registry = store.load("owner1")
+                product_ids = {p.id for p in registry.products}
+                # MEASURED: both products are persisted (add_product commits
+                # before the source is validated) -- only the rejected
+                # source itself is missing.
+                self.assertEqual(product_ids, {"good-one", "bad-one"})
+                sources_by_product = {
+                    p.id: [s.url for s in p.sources] for p in registry.products
+                }
+                self.assertEqual(
+                    sources_by_product["good-one"],
+                    ["https://www.kabum.com.br/produto/1"])
+                self.assertEqual(sources_by_product["bad-one"], [])
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

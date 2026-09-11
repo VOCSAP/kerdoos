@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 import uuid
 from pathlib import Path
 
@@ -130,9 +131,28 @@ def cmd_config_import(args: argparse.Namespace) -> int:
                 for product_key, sources in parse_products_yaml(
                     products_path, sites
                 ):
-                    service.add_product(args.owner, ProductSpec(product_key))
+                    try:
+                        service.add_product(args.owner, ProductSpec(product_key))
+                    except (ValueError, KeyError) as exc:
+                        print(
+                            f"config import: product {product_key!r} rejected: "
+                            f"{exc}\nImport is PARTIAL: sites and any earlier "
+                            "products/sources are already committed to "
+                            "config.db.", file=sys.stderr)
+                        return 1
                     for site_name, url in sources:
-                        service.add_source(args.owner, product_key, site_name, url)
+                        try:
+                            service.add_source(
+                                args.owner, product_key, site_name, url)
+                        except (ValueError, KeyError) as exc:
+                            print(
+                                f"config import: source rejected "
+                                f"(product={product_key!r}, site={site_name!r}, "
+                                f"url={url!r}): {exc}\nImport is PARTIAL: this "
+                                "product and any earlier products/sources are "
+                                "already committed to config.db; this "
+                                "source is not.", file=sys.stderr)
+                            return 1
         print(f"imported {len(sites)} site(s)"
               + (f" for owner {args.owner!r}" if args.owner else ""))
     finally:
