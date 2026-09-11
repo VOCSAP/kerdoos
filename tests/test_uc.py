@@ -82,6 +82,22 @@ class HostResolverRulesTest(unittest.TestCase):
             "MAP www.magazineluiza.com.br [2606:4700::6812:1]"))
 
 
+class FindPatchrightChromiumTest(unittest.TestCase):
+    def test_returns_none_when_no_chromium_cached(self) -> None:
+        with mock.patch.object(uc.glob, "glob", return_value=[]):
+            self.assertIsNone(uc._find_patchright_chromium())
+
+    def test_returns_first_sorted_match_when_multiple_present(self) -> None:
+        paths = [
+            "/root/.cache/ms-playwright/chromium-1300/chrome-linux64/chrome",
+            "/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome",
+        ]
+        with mock.patch.object(uc.glob, "glob", return_value=paths):
+            self.assertEqual(
+                uc._find_patchright_chromium(),
+                "/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome")
+
+
 class UcFetcherContractTest(unittest.TestCase):
     def test_method_name(self) -> None:
         self.assertEqual(uc.UcFetcher.method_name, "uc")
@@ -135,6 +151,20 @@ class UcFetcherWiringTest(unittest.TestCase):
                 result = uc.UcFetcher(
                     _POLICY, subresource_domains).fetch(_MAGALU_URL)
         return result, holder["driver"]
+
+    def test_binary_location_passed_to_driver_when_patchright_chromium_found(
+            self) -> None:
+        chrome_path = "/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome"
+        with mock.patch.object(uc, "_find_patchright_chromium",
+                               return_value=chrome_path):
+            _, driver = self._run("<html>ok</html>")
+        self.assertEqual(driver.kwargs["binary_location"], chrome_path)
+
+    def test_binary_location_omitted_when_no_patchright_chromium(self) -> None:
+        with mock.patch.object(uc, "_find_patchright_chromium",
+                               return_value=None):
+            _, driver = self._run("<html>ok</html>")
+        self.assertNotIn("binary_location", driver.kwargs)
 
     def test_pins_and_builds_result_from_page_source(self) -> None:
         page = "<html>" + "x" * 5000 + "</html>"

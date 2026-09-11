@@ -47,6 +47,8 @@ is computed from the rendered page_source, not from the status).
 
 from __future__ import annotations
 
+import glob
+import os
 from collections.abc import Iterable
 
 from ..challenge import looks_challenged
@@ -88,6 +90,29 @@ def _host_resolver_rules(
     rules = [f"MAP {target.host} {addr}", "MAP * ~NOTFOUND"]
     rules += [f"EXCLUDE {d}" for d in _normalize_domains(subresource_domains)]
     return ", ".join(rules)
+
+
+_PATCHRIGHT_CHROMIUM_GLOB = "~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"
+
+
+def _find_patchright_chromium() -> str | None:
+    """Locate the Chromium binary installed by patchright (autonomous image).
+
+    SeleniumBase's own browser detection (detect_b_ver.chrome_on_linux_path)
+    only looks at PATH and a handful of hardcoded system paths, so it never
+    finds patchright's privately-cached Chromium -- the two tools coexist in
+    the image without sharing a browser location. Passing this path via
+    Driver(binary_location=...) is honored end-to-end, including on the
+    uc/undetected launch path (seleniumbase/core/browser_launcher.py ->
+    seleniumbase/undetected/__init__.py options.binary_location), confirmed
+    by execution, not by documentation (roadmap card 460d7bce).
+
+    Returns None (not an empty string) when patchright is absent -- e.g. dev
+    machines or the `slim` image -- so callers can fall back to SeleniumBase's
+    own detection unchanged.
+    """
+    candidates = sorted(glob.glob(os.path.expanduser(_PATCHRIGHT_CHROMIUM_GLOB)))
+    return candidates[0] if candidates else None
 
 
 def _load_seleniumbase():  # type: ignore[no-untyped-def]
@@ -133,8 +158,15 @@ class UcFetcher:
         rule = _host_resolver_rules(target, self._subresource_domains)
 
         driver_cls = _load_seleniumbase()
-        driver = driver_cls(uc=True, headless=True,
-                            chromium_arg=f"--host-resolver-rules={rule}")
+        driver_kwargs = {
+            "uc": True,
+            "headless": True,
+            "chromium_arg": f"--host-resolver-rules={rule}",
+        }
+        binary_location = _find_patchright_chromium()
+        if binary_location is not None:
+            driver_kwargs["binary_location"] = binary_location
+        driver = driver_cls(**driver_kwargs)
         try:
             # UC open + reconnect lets the Akamai JS challenge auto-resolve.
             driver.uc_open_with_reconnect(url, reconnect_time=RECONNECT_TIME)
