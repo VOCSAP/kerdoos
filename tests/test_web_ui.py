@@ -496,5 +496,130 @@ class ProfileIntegrationTest(_WebUITestBase):
         self.assertEqual(resp.status_code, 403)
 
 
+class RunQueueWebUITest(_WebUITestBase):
+    """Card ca30b736 tranche 2: POST /run must not block on the scrape.
+    The lifespan (where the run-queue consumer starts) only runs inside
+    `with TestClient(...) as client:` (pytest.md rule -- see
+    DigestEvaluatorLifespanTest in test_web_app.py for the same pattern),
+    so each test here opens its OWN `with`-scoped client rather than using
+    the bare self.client from _WebUITestBase.setUp."""
+
+    def setUp(self):
+        super().setUp()
+        self._add_owner("o1", "alice", "s3cret")
+        self._add_owner("o2", "bob", "s3cret")
+
+    def _poll_status_text(self, client, timeout=2.0):
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            text = client.get("/").text
+            if "run-status" in text:
+                return text
+            time.sleep(0.02)
+        return client.get("/").text
+
+    def test_post_run_does_not_block_while_run_now_is_slow(self):
+        import threading
+        import time
+        from unittest import mock as _mock
+
+        from kerdoos.core.app.services import AppService
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_run_now(self, owner_id):  # noqa: ANN001
+            entered.set()
+            release.wait(timeout=2)
+            from kerdoos.core.app.services import RunResult
+            return RunResult(records=[], generated_at="2026-01-01T00:00:00+00:00")
+
+        with _mock.patch.object(AppService, "run_now", _blocking_run_now):
+            with TestClient(create_app()) as client:
+                self._login_on(client, "alice", "s3cret")
+                token = self._csrf_on(client)
+                start = time.monotonic()
+                resp = client.post("/run", data={"csrf_token": token})
+                elapsed = time.monotonic() - start
+                self.assertEqual(resp.status_code, 200)  # 303 -> GET / (200)
+                # The request must return well before release.wait's 2s cap.
+                self.assertLess(elapsed, 1.0)
+                self.assertTrue(entered.wait(timeout=2))
+                text = self._poll_status_text(client)
+                self.assertIn("run-status--running", text)
+                release.set()
+                # Poll until the status flips to done.
+                for _ in range(200):
+                    text = client.get("/").text
+                    if "run-status--done" in text:
+                        break
+                    time.sleep(0.02)
+                self.assertIn("run-status--done", text)
+
+    def test_second_post_run_while_running_is_coalesced(self):
+        import threading
+        from unittest import mock as _mock
+
+        from kerdoos.core.app.services import AppService
+
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        def _blocking_run_now(self, owner_id):  # noqa: ANN001
+            calls.append(owner_id)
+            entered.set()
+            release.wait(timeout=2)
+            from kerdoos.core.app.services import RunResult
+            return RunResult(records=[], generated_at="2026-01-01T00:00:00+00:00")
+
+        with _mock.patch.object(AppService, "run_now", _blocking_run_now):
+            with TestClient(create_app()) as client:
+                self._login_on(client, "alice", "s3cret")
+                token = self._csrf_on(client)
+                client.post("/run", data={"csrf_token": token})
+                self.assertTrue(entered.wait(timeout=2))
+                client.post("/run", data={"csrf_token": token})
+                release.set()
+                for _ in range(200):
+                    if "run-status--done" in client.get("/").text:
+                        break
+                import time
+                time.sleep(0.02)
+        self.assertEqual(calls, ["o1"])  # exactly one run_now call
+
+    def test_run_status_is_isolated_per_owner(self):
+        # Same app/queue, SEQUENTIAL logins on one client (login overwrites
+        # the session cookie) -- proves the dashboard route scopes
+        # queue.status_for() to the CURRENT principal, not a global lookup.
+        import threading
+        from unittest import mock as _mock
+
+        from kerdoos.core.app.services import AppService
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_run_now(self, owner_id):  # noqa: ANN001
+            entered.set()
+            release.wait(timeout=2)
+            from kerdoos.core.app.services import RunResult
+            return RunResult(records=[], generated_at="2026-01-01T00:00:00+00:00")
+
+        with _mock.patch.object(AppService, "run_now", _blocking_run_now):
+            with TestClient(create_app()) as client:
+                self._login_on(client, "alice", "s3cret")
+                token = self._csrf_on(client)
+                client.post("/run", data={"csrf_token": token})
+                self.assertTrue(entered.wait(timeout=2))
+
+                self._login_on(client, "bob", "s3cret")  # overwrites the cookie
+                text_b = client.get("/").text
+                self.assertNotIn("run-status", text_b)
+                release.set()
+
+
 if __name__ == "__main__":
     unittest.main()

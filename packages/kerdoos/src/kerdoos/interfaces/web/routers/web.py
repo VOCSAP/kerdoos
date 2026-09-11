@@ -25,6 +25,7 @@ from kerdoos.core.app.services import (
     Principal,
     ProductSpec,
 )
+from kerdoos.core.run_queue import RunQueue
 from kerdoos.digest.templates import render_digest_html
 from kerdoos.digest.view import build_digest_view
 from kerdoos.interfaces.web.csrf import csrf_token_for, verify_csrf
@@ -32,6 +33,7 @@ from kerdoos.interfaces.web.deps import (
     get_app_service,
     get_auth_service,
     get_domain_policy,
+    get_run_queue,
     get_session_cookie,
     verify_session,
 )
@@ -61,11 +63,13 @@ def dashboard(
     request: Request,
     principal: Principal = Depends(verify_session),
     svc: AppService = Depends(get_app_service),
+    queue: RunQueue = Depends(get_run_queue),
     csrf: str = Depends(csrf_token_for),
 ) -> Response:
     owner = principal.owner_id
     records = svc.list_state(owner)
     registry = svc.list_config(owner)
+    run_status = queue.status_for(owner)
 
     # Presentation join (invariant #9: orchestration, not business logic):
     # list_state yields ScrapeRecord keyed only by source_id, so pair each with
@@ -102,16 +106,20 @@ def dashboard(
         "to_watch": counts["indeterminate"] + counts["unavailable"],
     }
     ctx = _base(request, principal, csrf, "dashboard")
-    ctx.update(rows=rows, briefing=briefing)
+    ctx.update(rows=rows, briefing=briefing, run_status=run_status)
     return templates.TemplateResponse(request, "dashboard/index.html", ctx)
 
 
 @router.post("/run")
-def run_now(
+async def run_now(
     principal: Principal = Depends(verify_session),
-    svc: AppService = Depends(get_app_service),
+    queue: RunQueue = Depends(get_run_queue),
 ) -> Response:
-    svc.run_now(principal.owner_id)
+    # Enqueue and redirect immediately (card ca30b736: the request must
+    # never block on a scrape). A second POST /run while this owner's run is
+    # already queued/running is silently coalesced -- enqueue()'s return
+    # value is not surfaced as an error, matching that intent.
+    await queue.enqueue(principal.owner_id)
     return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
 
 

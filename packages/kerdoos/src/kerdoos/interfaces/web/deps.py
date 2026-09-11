@@ -15,6 +15,7 @@ from fastapi import Depends, HTTPException, Request, status
 
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import AppService, Principal
+from kerdoos.core.run_queue import RunQueue
 from kerdoos.interfaces.web.security import COOKIE_NAME, SessionCookie
 
 
@@ -24,6 +25,10 @@ def get_auth_service(request: Request) -> AuthService:
 
 def get_app_service(request: Request) -> AppService:
     return request.app.state.app_service
+
+
+def get_run_queue(request: Request) -> RunQueue:
+    return request.app.state.run_queue
 
 
 def get_domain_policy(request: Request) -> DomainPolicy:

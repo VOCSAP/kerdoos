@@ -37,6 +37,7 @@ from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import AppService
 from kerdoos.core.evaluator import (
     run_evaluator_loop, should_start_intra_process_evaluator)
+from kerdoos.core.run_queue import RunQueue
 from kerdoos.digest.factory import build_sender
 from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
 from kerdoos.interfaces.web import health
@@ -89,9 +90,21 @@ def create_app() -> FastAPI:
         lock_dir=Path(settings.state_db).parent)
     router = StaticRouter(domain_policy, browser_gate=browser_gate)
     log_unavailable_fetcher_tiers(config_store)
+    app_service = AppService(
+        config_store, state_store, router, domain_policy, build_parser)
+    # Card ca30b736: POST /run enqueues here instead of calling
+    # AppService.run_now directly, so the request never blocks on a scrape
+    # (browser/uc sources can take tens of seconds, more now that they also
+    # wait on the gate above). Started unconditionally in the lifespan below,
+    # not behind a flag: a synchronous POST /run is the bug being fixed.
+    run_queue = RunQueue(app_service)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        run_queue_stop = asyncio.Event()
+        run_queue_task = asyncio.create_task(
+            run_queue.run_forever(run_queue_stop))
+
         # Default OFF (KERDOOS_DIGEST_EVALUATOR_ENABLED unset/false): this
         # branch is a true no-op, so the 3 pre-existing TestClient(create_app())
         # test files see zero behavior change (pytest.md rule -- every new
@@ -124,12 +137,16 @@ def create_app() -> FastAPI:
                 evaluator_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await evaluator_task
+            run_queue_stop.set()
+            run_queue_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run_queue_task
 
     app = FastAPI(title="Kerdoos", lifespan=_lifespan)
     app.state.auth_service = AuthService(
         SqliteAuthStore(settings.config_db), Argon2Hasher())
-    app.state.app_service = AppService(
-        config_store, state_store, router, domain_policy, build_parser)
+    app.state.app_service = app_service
+    app.state.run_queue = run_queue
     # Exposed for the Notifications digest preview (Phase 6-web): build_digest_view
     # needs the SAME DomainPolicy the run path uses to scheme/domain-check hrefs.
     app.state.domain_policy = domain_policy

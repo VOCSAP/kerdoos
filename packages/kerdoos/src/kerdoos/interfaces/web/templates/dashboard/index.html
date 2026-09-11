@@ -7,10 +7,21 @@
     <h1>Tableau de veille</h1>
     <p class="main__subtitle">Ce qui a bougé, et ce qui est bloqué -- pas en rupture.</p>
   </div>
-  <form method="post" action="/run">
-    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
-    <button class="btn btn--primary" type="submit">Vérifier maintenant</button>
-  </form>
+  <div class="main__actions">
+    {% if run_status %}
+    <span class="run-status run-status--{{ run_status.state.value }}">
+      {% if run_status.state.value == "queued" %}En file
+      {% elif run_status.state.value == "running" %}Vérification en cours
+      {% elif run_status.state.value == "done" %}Terminé à {{ run_status.finished_at[11:16] }}
+      {% elif run_status.state.value == "error" %}Erreur
+      {% endif %}
+    </span>
+    {% endif %}
+    <form method="post" action="/run">
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+      <button class="btn btn--primary" type="submit">Vérifier maintenant</button>
+    </form>
+  </div>
 </div>
 
 {% if rows %}
