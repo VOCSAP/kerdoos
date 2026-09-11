@@ -47,6 +47,7 @@ is computed from the rendered page_source, not from the status).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -60,6 +61,8 @@ from ..challenge import looks_challenged, looks_like_chrome_error_page
 from ..errors import FetchError
 from ..ports import FetchResult
 from ..safety import DomainPolicy, ValidatedTarget, validate_target
+
+logger = logging.getLogger(__name__)
 
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 # Reconnect window (s) SeleniumBase UC uses to let the Akamai JS challenge settle.
@@ -104,6 +107,13 @@ ORPHAN_SWEEP_DELAY_SECONDS = 5.0
 # MEASURED real cycle (data: URL) put get_page_source/current_url/quit at
 # well under 1s combined -- comfortable margin above that floor.
 UC_FETCH_TIMEOUT_SECONDS = 90.0
+# Roadmap d8b7b8fd, MEASURED (browser tier, same mechanism): a bare kill()
+# only SENDS SIGKILL and returns immediately -- an instrumented gate saw
+# the targeted processes still genuinely running for ~0.5s after kill()
+# returned, a window in which a caller releasing the gate right after
+# could hand the slot to a new launch while this one's Chromium is still
+# alive. _kill_identities waits (bounded) for confirmed death instead.
+_KILL_WAIT_SECONDS = 5.0
 
 
 def _normalize_domains(domains: Iterable[str]) -> list[str]:
@@ -285,14 +295,21 @@ def _capture_identities(procs) -> list[tuple[int, float]]:  # type: ignore[no-un
 
 
 def _kill_identities(identities: list[tuple[int, float]]) -> None:
-    """Best-effort kill + zombie reap for an already-identified (pid,
-    create_time) set. Re-verifies identity against a FRESH psutil.Process
-    immediately before acting, so a pid recycled since capture is skipped
-    rather than signalled -- uc_driver is routinely already a zombie by
-    the time this runs; we are its direct parent, so
-    os.waitpid(pid, WNOHANG) reaps it."""
+    """Best-effort kill + reap for an already-identified (pid, create_time)
+    set. Re-verifies identity against a FRESH psutil.Process immediately
+    before acting, so a pid recycled since capture is skipped rather than
+    signalled. uc_driver is routinely already a zombie by the time this
+    runs; we are its direct parent, so os.waitpid(pid, WNOHANG) reaps it.
+
+    Roadmap d8b7b8fd, MEASURED (browser tier, same mechanism): kill() only
+    SENDS SIGKILL and returns immediately, before the kernel finishes
+    tearing the process down -- psutil.wait_procs waits (bounded by
+    _KILL_WAIT_SECONDS) for confirmed death, so a caller releasing the
+    browser gate right after this call never does so on a false negative.
+    """
     import psutil
 
+    killed: list = []
     for pid, created in identities:
         try:
             proc = psutil.Process(pid)
@@ -304,12 +321,21 @@ def _kill_identities(identities: list[tuple[int, float]]) -> None:
             proc.kill()
         except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
             pass
+        else:
+            killed.append(proc)
         try:
             os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             pass  # not our own direct child (a grandchild), or already reaped
         except Exception:  # noqa: BLE001 -- best-effort, never raise from cleanup
             pass
+    if not killed:
+        return
+    _gone, alive = psutil.wait_procs(killed, timeout=_KILL_WAIT_SECONDS)
+    if alive:
+        logger.warning(
+            "uc tier: %d process(es) survived SIGKILL + %.1fs wait: %s",
+            len(alive), _KILL_WAIT_SECONDS, [p.pid for p in alive])
 
 
 def _kill_launch_processes(
