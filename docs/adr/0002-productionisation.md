@@ -80,14 +80,17 @@ produit **deux Chromium concurrents** (le cron et le web ignorent chacun le
   seul process, une seule file, **une seule porte browser** (inter + intra process),
   aucun cron/infra externe (app auto-schedulable = self-contained). Elimine le seam
   "deux ordonnanceurs". *Cout* : couple le digest a l'uptime du container ; exige
-  `workers=1`.
+  `workers=1`. *Realisation* : pas de file commune au digest et a `run_now` ; la
+  "porte browser unique" est une porte Chromium partagee (Decisions 1 et 2).
 - **S-C -- APScheduler in-process**. Plus lourd, meme couplage, aucun benefice sur
   S-B pour un unique job quotidien. **Rejetee.**
 
 ### Decision : **S-B**, avec garde-fou `workers>1`
 Force decisive : la **coherence OOM** -- une seule porte browser inter et intra
-process, sans lock inter-process a inventer. L'operateur a ratifie la deviation vis
-a vis d'ADR 0001 Q6 : le self-contained prime pour l'ergonomie de deploiement.
+process. L'operateur a ratifie la deviation vis a vis d'ADR 0001 Q6 : le
+self-contained prime pour l'ergonomie de deploiement. La realisation a finalement
+ajoute une borne inter-process par verrous fichier (Decision 2) : elle couvre aussi
+un `kerdoos digest` lance par cron a cote de la WebUI.
 
 - Le timer intra-process est le **defaut a `workers=1`**.
 - **Garde-fou** : si `workers>1` (override env), l'app **NE demarre PAS** le
@@ -100,8 +103,8 @@ a vis d'ADR 0001 Q6 : le self-contained prime pour l'ergonomie de deploiement.
     du digest par owner. C'est le point d'entree du timer S-B (et de tout cron
     externe en mode `workers>1`).
   - **`run_now`** -- action **per-owner a la demande** (bouton WebUI "verifier
-    maintenant" / MCP), enfilee dans la file intra-process. Distincte du batch
-    quotidien.
+    maintenant" / MCP), qui passe par sa propre file (voir ci-dessous). Distincte
+    du batch quotidien.
 - Le couplage a l'uptime est mitige par `restart: unless-stopped`, **sans
   rattrapage au redemarrage** : l'evaluateur reprend a la fenetre courante de
   chaque job (modele par job, ADR 0003). La fenetre en cours au redemarrage est
@@ -109,31 +112,69 @@ a vis d'ADR 0001 Q6 : le self-contained prime pour l'ergonomie de deploiement.
   manquees pendant l'arret, ne sont jamais emises. Raison produit : un digest de
   prix vieux de plusieurs jours n'a pas de valeur pour le destinataire.
   L'exactly-once reste garanti par la cle primaire `(job_id, window_start)`.
-- `run_now` reste une **file INTRA-process** (aligne ADR 0001 Q6) : le bouton WebUI
-  "verifier maintenant" enfile un job (owner_id) et rend la main immediatement ;
-  un consumer unique traite la file en serie.
+- **Deux files distinctes, une seule porte Chromium** (realisation, carte ca30b736) :
+  - `run_now` passe par une `RunQueue` **intra-process** (aligne ADR 0001 Q6) :
+    une `asyncio.Queue` et un **consumer unique** lance dans le lifespan de la
+    WebUI. Le bouton "verifier maintenant" enfile l'owner et rend la main
+    immediatement ; une demande pour un owner deja en file ou en cours est
+    fusionnee avec la precedente. Le statut (en file, en cours, termine, erreur) est
+    garde en memoire, affiche sur le tableau de bord, et perdu au redemarrage (les
+    releves deja ecrits restent dans `state.db`).
+  - Le digest ne passe **pas** par cette file : il est porte par la boucle de
+    l'evaluateur (ADR 0003 Decision 4).
+  - La garantie memoire n'est donc **pas** portee par une file commune, mais par
+    **une porte Chromium unique**, `autolycos.browser_gate.BrowserGate`, que les
+    tiers `browser` et `uc` prennent autour de chaque cycle lancement-fermeture de
+    Chromium, quel que soit l'appelant (consumer `run_now`, Plan A de
+    l'evaluateur, CLI). Bornes et portee : Decision 2.
 
-### Consequence transverse -- offload threadpool obligatoire
-Les fetchers etant sync-bloquants, le **consumer de la file DOIT offloader le
-travail de fetch en threadpool 1-slot** (`run_in_executor` + semaphore/executor a
-un seul worker) pour ne pas bloquer l'event loop ASGI. Le slot unique materialise
-aussi `max_concurrent=1` cote application. Vrai pour `run_now` ET pour le digest.
+### Consequence transverse -- offload hors de l'event loop
+Les fetchers etant sync-bloquants, le consumer `run_now` et le Plan A de
+l'evaluateur executent le scrape via `asyncio.to_thread` pour ne pas bloquer
+l'event loop ASGI. Ce n'est **pas** un threadpool a un slot : la borne sur les
+Chromium vivants est portee par la porte (Decision 2), pas par le pool de threads.
 
 ---
 
 ## Decision 2 (Q-c) -- Concurrence : `workers=1` et `max_concurrent=1` par defaut
 
 ### Decision
-`workers=1` (uvicorn) et `browser.max_concurrent=1` sont des **defauts
-surchargeables par variable d'environnement** (l'enveloppe OOM depend de la machine
-cible). `workers=1` est la **topologie par defaut documentee**.
+`workers=1` (uvicorn, `KERDOOS_WORKERS`) et une seule instance Chromium vivante
+(`KERDOOS_BROWSER_MAX_CONCURRENT=1`) sont des **defauts surchargeables par variable
+d'environnement** (l'enveloppe OOM depend de la machine cible). `workers=1` est la
+**topologie par defaut documentee**.
+
+### Porte Chromium : variables et portee (realisation, carte ca30b736)
+- `KERDOOS_BROWSER_MAX_CONCURRENT` (defaut 1) : nombre maximal de Chromium vivants.
+  **Une seule borne pour les tiers `browser` (patchright) et `uc` (seleniumbase)**,
+  qui consomment la meme memoire. Une valeur invalide ou <= 0 retombe sur le
+  defaut, avec un warning.
+- `KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS` (defaut 120) : attente maximale d'une
+  place. A l'echeance, le fetch leve une `FetchError`, qui n'est pas reessayee et
+  donne un releve `INDETERMINATE` (blocage transitoire, invariant 3), jamais une
+  rupture de stock.
+- Les deux valeurs sont lues par la racine de composition (WebUI, CLI) et injectees
+  dans `BrowserGate` : autolycos ne lit jamais l'environnement (invariant 2).
+- **Portee** :
+  - sous Linux (image Docker), la borne est **inter-process** : N fichiers
+    `browser-slot-<i>.lock`, verrouilles par `fcntl.flock`, dans le repertoire de
+    la base d'etat (`/data` dans l'image), partages par tous les process qui
+    utilisent cette base. Le noyau libere un verrou a la mort de son process : pas
+    de verrou orphelin a nettoyer ;
+  - sous Windows (developpement), `fcntl` n'existe pas : la borne est **par process
+    seulement**, et un warning le signale a la construction de la porte ;
+  - la CLI (`kerdoos digest`, `kerdoos run`) place ses verrous a cote de la base
+    passee en `--db`. Pour partager les slots avec la WebUI, elle doit viser la meme
+    base (`--db /data/state.db`). Son defaut `kerdoos.db` ne lit pas encore
+    `KERDOOS_STATE_DB` (carte 1af8b18b).
 
 ### Justification
 1. SQLite ne gagne rien en debit d'ecriture avec N process writers.
 2. La file `run_now` est **per-process** (asyncio) : avec N workers, un job enfile
    dans le worker A est invisible du worker B -> `workers=1` est un **prerequis** de
    la topologie S-B.
-3. `max_concurrent=1` serialise deja le chemin browser lourd.
+3. La porte Chromium (`KERDOOS_BROWSER_MAX_CONCURRENT=1`) serialise deja le chemin
+   browser lourd.
 4. LXC petit + OOM : N workers lancant chacun un Chromium = risque RAM.
 
 Un seul worker uvicorn (concurrence async + offload threadpool) tient la charge LAN
@@ -271,7 +312,7 @@ de fin de stage (Q-f) verifie aussi la majeure de ce `chromedriver` copie.
 
 ### Reseau (confirme ADR 0001 S8/S9)
 Port WebUI -> reverse-proxy LAN ; **`9222` (CDP) JAMAIS mappe** ; egress-proxy
-**loopback-only** ; `browser.max_concurrent=1` par defaut.
+**loopback-only** ; `KERDOOS_BROWSER_MAX_CONCURRENT=1` par defaut (Decision 2).
 
 ---
 

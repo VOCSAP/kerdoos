@@ -240,8 +240,10 @@ quand la selection change.
 Un **unique** task asyncio (le timer S-B d'ADR 0002 D1, `workers=1`) qui **tick**
 periodiquement (resolution proposee : **60 s**). A chaque tick, l'**evaluateur** :
 
-1. **Plan A** (scrape) : calcule l'union des scrapes dus (D3), enfile dans la file
-   intra-process (consumer offload threadpool 1-slot, `max_concurrent=1` -- ADR 0002).
+1. **Plan A** (scrape) : calcule l'union des scrapes dus (D3) et les execute en
+   sequence via `asyncio.to_thread`, sans file. La borne memoire est la porte
+   Chromium partagee (`KERDOOS_BROWSER_MAX_CONCURRENT`, ADR 0002 Decision 2), que le
+   Plan A prend comme tout autre appelant des tiers `browser` et `uc`.
 2. **Plan B** (notify) : pour chaque job `enabled`, calcule sa **window_start** = la
    plus recente occurrence planifiee <= now (cron + tz). **Idempotence** : si
    `job_runs` contient deja une ligne `(job_id, window_start)`, **skip** (deja
