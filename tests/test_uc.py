@@ -611,6 +611,78 @@ class UcErrorPageDetectionTest(unittest.TestCase):
             f"html[:200]={html[:200]!r}")
 
 
+class UcOrphanCleanupImageTest(unittest.TestCase):
+    """Card 6521bbce acceptance test: a REAL Driver() construction, a real
+    (artificially tiny) launch timeout, real Chrome + uc_driver processes.
+    No live target needed -- it is the LAUNCH itself that must time out,
+    not navigation, so this runs cleanly under --network none."""
+
+    def setUp(self) -> None:
+        if _HAS_REAL_CHROMIUM:
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but no real patchright "
+                "Chromium was found -- run inside the autonomous image")
+        self.skipTest(
+            "needs a real patchright Chromium (autonomous image), not just "
+            "SeleniumBase")
+
+    def test_real_timeout_leaves_no_uc_driver_or_chrome_but_spares_foreign(
+            self) -> None:
+        import psutil
+        from autolycos.adapters.uc import _find_patchright_chromium
+        from seleniumbase import Driver
+
+        me = psutil.Process(os.getpid())
+        before_pids = {p.pid for p in me.children(recursive=True)}
+
+        foreign = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            binary = _find_patchright_chromium()
+            fetcher = uc.UcFetcher(
+                _NEUTRAL_POLICY, launch_timeout_seconds=0.01)
+            with self.assertRaises(FetchError):
+                fetcher._launch_with_deadline(
+                    Driver,
+                    {"uc": True, "headless": True, "binary_location": binary})
+
+            # Real Driver() construction takes ~0.3-0.8s (cold start) --
+            # well past the 0.01s deadline above, so this genuinely
+            # exercises both cleanup paths (the deadline's own pass, and
+            # the construction's own late-completion cleanup once it
+            # actually returns), plus the delayed sweep. Construction
+            # timing varies with system load (shared with every other
+            # image test in this run) -- poll instead of a fixed sleep.
+            def _survivors() -> list:
+                found = []
+                for p in me.children(recursive=True):
+                    if p.pid in before_pids or p.pid == foreign.pid:
+                        continue
+                    try:
+                        if not p.is_running():
+                            continue
+                        name = p.name().lower()
+                    except psutil.Error:
+                        continue
+                    if name in ("chrome", "uc_driver", "chromedriver"):
+                        found.append((p.pid, name))
+                return found
+
+            deadline = time.monotonic() + 30.0
+            survivors = _survivors()
+            while survivors and time.monotonic() < deadline:
+                time.sleep(0.5)
+                survivors = _survivors()
+            self.assertEqual(survivors, [], f"processes leaked: {survivors}")
+            self.assertIsNone(
+                foreign.poll(), "an unrelated foreign process was killed")
+        finally:
+            if foreign.poll() is None:
+                foreign.kill()
+
+
 class UcLaunchDeadlineTest(unittest.TestCase):
     """Roadmap 65cef071: bounds the Chrome LAUNCH itself, not just navigation
     (UC_PAGE_LOAD_TIMEOUT_SECONDS only takes effect after the launch already
@@ -792,6 +864,116 @@ class UcLaunchDeadlineTest(unittest.TestCase):
             for proc in late_spawned:
                 if proc.poll() is None:
                     proc.kill()
+
+    def test_process_spawned_after_the_deadline_is_caught_by_delayed_sweep(
+            self) -> None:
+        """Roadmap 6521bbce: a launch whose factory call never returns at
+        all can still spawn a process AFTER the deadline's own one-shot
+        kill already ran -- the delayed second sweep must catch it. The
+        factory spawns its marked child shortly after the 0.3s deadline
+        (so the FIRST pass alone finds nothing), well BEFORE the delayed
+        sweep fires (a wide margin so the two events never race).
+        """
+        gate = BrowserGate(max_concurrent=1)
+        late_spawned: list = []
+
+        def _never_returns_factory(**kwargs):  # noqa: ANN003
+            time.sleep(0.4)  # after the 0.3s deadline's first kill pass
+            marker = _marker_from_kwargs(kwargs)
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)", marker])
+            late_spawned.append(proc)
+            time.sleep(60)  # the construction call itself never returns
+
+        try:
+            with mock.patch.object(uc, "_ORPHAN_SWEEP_DELAY_SECONDS", 1.5):
+                fetcher = uc.UcFetcher(
+                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                with self.assertRaises(FetchError):
+                    fetcher._launch_with_deadline(
+                        _never_returns_factory, {})
+            self.assertTrue(
+                self._wait_until(
+                    lambda: late_spawned
+                    and late_spawned[0].poll() is not None, timeout=5),
+                "the process spawned after the first kill pass was not "
+                "caught by the delayed sweep")
+        finally:
+            for proc in late_spawned:
+                if proc.poll() is None:
+                    proc.kill()
+
+
+class UcDriverSiblingDiscoveryTest(unittest.TestCase):
+    """Roadmap 6521bbce: in undetected mode SeleniumBase launches Chrome
+    DIRECTLY from Python and runs uc_driver as Chrome's SIBLING, not its
+    parent (measured: 'children NOT in targeted tree: [\"uc_driver\"]') --
+    the marker-walk in _launch_process_tree never finds it. Exercises the
+    create_time-based matching logic directly against fake psutil.Process
+    objects (deterministic, no real uc_driver binary needed -- the
+    end-to-end proof against a real process runs in the image)."""
+
+    class _FakeProc:
+        def __init__(self, pid, name, create_time, cmdline=()):
+            self.pid = pid
+            self._name = name
+            self._create_time = create_time
+            self._cmdline = list(cmdline)
+
+        def name(self):
+            return self._name
+
+        def cmdline(self):
+            return self._cmdline
+
+        def create_time(self):
+            return self._create_time
+
+        def parent(self):
+            return None
+
+        def children(self, recursive=False):  # noqa: ARG002
+            return []
+
+    def test_sibling_uc_driver_born_after_launch_start_is_included(
+            self) -> None:
+        marker = "--kerdoos-launch-id=abc123"
+        chrome = self._FakeProc(100, "chrome", 10.0, cmdline=["chrome", marker])
+        own_uc_driver = self._FakeProc(101, "uc_driver", 10.5)
+        stale_uc_driver = self._FakeProc(102, "uc_driver", 5.0)
+        unrelated = self._FakeProc(103, "python", 10.5)
+        all_children = [chrome, own_uc_driver, stale_uc_driver, unrelated]
+
+        class _FakeMe:
+            def children(self, recursive=False):  # noqa: ARG002
+                return all_children
+
+        with mock.patch("psutil.Process", side_effect=lambda pid=None: _FakeMe()):
+            tree = uc._launch_process_tree(marker, launched_after=10.0)
+
+        pids = {p.pid for p in tree}
+        self.assertIn(100, pids)         # Chrome itself, marker match
+        self.assertIn(101, pids)         # uc_driver sibling, born after launch start
+        self.assertNotIn(102, pids)      # pre-existing uc_driver, born before
+        self.assertNotIn(103, pids)      # right timing window, wrong name
+
+    def test_no_launched_after_keeps_prior_behavior(self) -> None:
+        # launched_after=None (the default) must not pick up ANY sibling by
+        # name/create_time -- only the pre-existing marker/parentage walk.
+        marker = "--kerdoos-launch-id=abc123"
+        chrome = self._FakeProc(100, "chrome", 10.0, cmdline=["chrome", marker])
+        sibling_uc_driver = self._FakeProc(101, "uc_driver", 10.5)
+        all_children = [chrome, sibling_uc_driver]
+
+        class _FakeMe:
+            def children(self, recursive=False):  # noqa: ARG002
+                return all_children
+
+        with mock.patch("psutil.Process", side_effect=lambda pid=None: _FakeMe()):
+            tree = uc._launch_process_tree(marker)
+
+        pids = {p.pid for p in tree}
+        self.assertEqual(pids, {100})
 
 
 class GateWiringTest(unittest.TestCase):
