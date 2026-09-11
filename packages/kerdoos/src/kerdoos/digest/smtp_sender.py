@@ -77,6 +77,7 @@ later reap if the process outlives it.
 from __future__ import annotations
 
 import logging
+import re
 import smtplib
 import ssl
 import time
@@ -134,8 +135,16 @@ class _UnsafeRecipientError(Exception):
     """Raised (never asserted -- `assert` statements are compiled out
     under python -O / PYTHONOPTIMIZE, which would silently disable this
     security guard) when the retry-safety single-recipient invariant is
-    violated: either to_addr itself looks like more than one address, or
-    send_message() refused some but not all recipients."""
+    violated (to_addr looks like more than one address, or send_message()
+    refused some but not all recipients), or when to_addr's domain is not
+    a dot-separated label sequence (an IP-address literal such as
+    [10.0.0.1] would make this SMTP relay connect to an arbitrary host)."""
+
+
+# Mirrors core.app.auth._EMAIL_RE's domain part -- an independent, adapter-
+# side rampart (roadmap 4a8afdf2) so a row written before that regex was
+# tightened still fails closed here, before any SMTP connection opens.
+_VALID_DOMAIN_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 
 
 # One retry "attempt" (_send_smtp_once) is NOT one timeout_seconds window:
@@ -265,6 +274,12 @@ class SmtpDigestSender:
         if "," in to_addr:
             raise _UnsafeRecipientError(
                 f"SmtpDigestSender expects exactly one recipient, got {to_addr!r}")
+        domain = to_addr.rsplit("@", 1)[-1]
+        if not _VALID_DOMAIN_RE.match(domain):
+            raise _UnsafeRecipientError(
+                f"SmtpDigestSender refuses a non-domain-label recipient host "
+                f"in {to_addr!r} (e.g. an IP-address literal) -- this relay "
+                f"would otherwise connect to an arbitrary host")
 
         # S2: owner-scoped read only -- never a global/unscoped registry sweep.
         registry = self._config.load(job.owner_id)

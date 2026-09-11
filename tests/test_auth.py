@@ -308,6 +308,26 @@ class SetEmailTest(_AuthTestBase):
                     self.service.set_email(
                         Principal("o1", "user"), f"alice{forbidden}@example.com")
 
+    def test_ip_literal_domain_rejected(self) -> None:
+        # roadmap 4a8afdf2: a bracketed IP-address literal domain would let
+        # a tenant redirect their own digest to an arbitrary host reachable
+        # from the configured SMTP relay (SSRF against the relay).
+        self._add_owner("o1", "alice", "pw", email=None)
+        for literal in ("a@[10.0.0.1]", "a@[::1]"):
+            with self.subTest(literal=literal):
+                with self.assertRaises(ValueError):
+                    self.service.set_email(Principal("o1", "user"), literal)
+
+    def test_common_addresses_still_accepted(self) -> None:
+        self._add_owner("o1", "alice", "pw", email=None)
+        for address in (
+            "a+b@x.com", "first.last@mail.example.co.uk",
+            "jean-pierre@sub-domain.example.org", "o_brien@x.io",
+            "o'brien@x.com", "user@xn--caf-dma.com",
+        ):
+            with self.subTest(address=address):
+                self.service.set_email(Principal("o1", "user"), address)
+
     def test_collision_rejected_as_named_error(self) -> None:
         self._add_owner("o1", "alice", "pw", email="taken@example.com")
         self._add_owner("o2", "bob", "pw", email=None)

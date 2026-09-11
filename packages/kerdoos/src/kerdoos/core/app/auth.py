@@ -46,7 +46,15 @@ DEFAULT_TOKEN_TTL = timedelta(days=90)
 # email "To" header (digest.smtp_sender's retry-safety reasoning assumes
 # exactly one recipient); the other characters can forge address/header
 # structure the same way.
-_EMAIL_RE = re.compile(r'^[^@\s,;<>"()]+@[^@\s,;<>"()]+\.[^@\s,;<>"()]+$')
+#
+# The domain part is restricted to dot-separated DNS labels
+# ([A-Za-z0-9-]+, punycode xn-- included), narrower than the local part's
+# negated class -- roadmap 4a8afdf2: a bracketed IP-address literal
+# (a@[10.0.0.1]) would let a tenant make the configured SMTP relay connect
+# to an arbitrary host on port 25 (SSRF against the relay's own network
+# reach).
+_EMAIL_RE = re.compile(
+    r'^[^@\s,;<>"()]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$')
 
 
 def _utcnow() -> datetime:

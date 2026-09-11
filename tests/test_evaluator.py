@@ -40,6 +40,7 @@ from kerdoos.core.evaluator import (
     should_start_intra_process_evaluator,
 )
 from kerdoos.core.scheduler import compute_window_start
+from kerdoos.digest.smtp_sender import SmtpDigestSender, SmtpSettings
 from kerdoos.parsers.factory import build_parser
 from kerdoos.parsers.ports import ParserSpec
 from kerdoos.persistence.ports import JobRun, ScrapeRecord
@@ -470,6 +471,55 @@ class PlanBNotifyTest(_EvaluatorTestBase):
             ).fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row["status"], "skipped_no_email")
+
+
+class UnsafeRecipientEndToEndTest(_EvaluatorTestBase):
+    """roadmap 4a8afdf2 M2: a real SmtpDigestSender wired to an unsafe
+    stored recipient must fail closed through the full evaluator path --
+    job_runs ends 'error' and no SMTP connection is ever opened."""
+
+    async def test_comma_containing_stored_email_ends_job_run_error_no_smtp(
+        self,
+    ) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        self._seed_history("owner1", sid, tick_now - _minutes(1))
+
+        class _CountingSMTP:
+            instances = 0
+
+            def __init__(self, *args, **kwargs) -> None:
+                type(self).instances += 1
+                raise AssertionError("must never connect")
+
+        domain_policy = CatalogueDomainPolicy(self.config)
+        smtp_settings = SmtpSettings(
+            host="smtp.example.com", port=587, from_addr="digest@example.com")
+        sender = SmtpDigestSender(
+            self.config, domain_policy,
+            lambda owner: "a@example.com,b@example.com", smtp_settings)
+
+        with mock.patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _CountingSMTP):
+            summary = await evaluate_tick(
+                config_store=self.config, state_store=self.state,
+                router=self.router, parser_factory=_fake_parser_factory,
+                sender=sender, now=tick_now,
+            )
+
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(_CountingSMTP.instances, 0)
+        window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
+        with self.state._op() as conn:
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
+                (job.id, window_start),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "error")
 
 
 class ReaperStaleJobRunEndToEndTest(_EvaluatorTestBase):

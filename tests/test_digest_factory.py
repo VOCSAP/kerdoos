@@ -28,6 +28,7 @@ _SMTP_ENV_VARS = (
     "KERDOOS_SMTP_HOST", "KERDOOS_SMTP_PORT", "KERDOOS_SMTP_FROM",
     "KERDOOS_SMTP_USERNAME", "KERDOOS_SMTP_PASSWORD", "KERDOOS_SMTP_USE_TLS",
     "KERDOOS_SMTP_TIMEOUT_SECONDS", "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
+    "KERDOOS_SMTP_RETRY_ATTEMPTS",
 )
 
 
@@ -130,6 +131,38 @@ class SmtpTimeoutOrderingTest(_FactoryTestBase):
 
         self.assertGreater(sender._smtp.timeout_seconds, 0)
         self.assertLess(sender._smtp.timeout_seconds, 1)
+
+
+class SmtpRetryBudgetWarningTest(_FactoryTestBase):
+    """roadmap 4a8afdf2: a retry attempt only starts if the remaining
+    budget covers _MAX_OPS_PER_ATTEMPT worst-case operations (smtp_sender.
+    py), i.e. at least 9x the socket timeout once one already-spent
+    timeout is subtracted from the reaper window."""
+
+    def test_thin_margin_warns(self) -> None:
+        os.environ["KERDOOS_SMTP_TIMEOUT_SECONDS"] = "40"
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "300"
+
+        with self.assertLogs("kerdoos.digest.factory", level="WARNING") as cm:
+            self._build()
+
+        self.assertTrue(
+            any("retry" in msg.lower() for msg in cm.output), cm.output)
+
+    def test_ample_margin_does_not_warn(self) -> None:
+        os.environ["KERDOOS_SMTP_TIMEOUT_SECONDS"] = "10"
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "300"
+
+        with self.assertNoLogs("kerdoos.digest.factory", level="WARNING"):
+            self._build()
+
+    def test_no_warning_when_retry_is_already_disabled(self) -> None:
+        os.environ["KERDOOS_SMTP_TIMEOUT_SECONDS"] = "40"
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "300"
+        os.environ["KERDOOS_SMTP_RETRY_ATTEMPTS"] = "0"
+
+        with self.assertNoLogs("kerdoos.digest.factory", level="WARNING"):
+            self._build()
 
 
 if __name__ == "__main__":

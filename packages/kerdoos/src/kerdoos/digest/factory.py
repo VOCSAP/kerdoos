@@ -48,6 +48,9 @@ def build_sender(
     email_lookup = SqliteAuthStore(config_db_path or settings.config_db).get_email
     smtp_timeout_seconds = _safe_smtp_timeout(
         settings.smtp_timeout_seconds, settings.digest_reaper_timeout_seconds)
+    if settings.smtp_retry_attempts > 0:
+        _warn_if_retry_budget_too_thin(
+            smtp_timeout_seconds, settings.digest_reaper_timeout_seconds)
     smtp_settings = SmtpSettings(
         host=settings.smtp_host,
         port=settings.smtp_port,
@@ -98,3 +101,21 @@ def _safe_smtp_timeout(smtp_timeout: float, reaper_timeout: int) -> float:
         smtp_timeout, reaper_timeout, clamped,
     )
     return clamped
+
+
+def _warn_if_retry_budget_too_thin(smtp_timeout: float, reaper_timeout: int) -> None:
+    """roadmap 4a8afdf2: a retry attempt only starts if the remaining
+    budget covers _MAX_OPS_PER_ATTEMPT (smtp_sender.py) worst-case
+    operations, i.e. 9x smtp_timeout once one already-spent timeout is
+    subtracted from the reaper window. Below that, digest.smtp_sender's
+    retry loop silently never retries -- an operator raising
+    KERDOOS_SMTP_TIMEOUT_SECONDS could disable the f3b644ab retry without
+    any error, only a missing behavior."""
+    if reaper_timeout - smtp_timeout < 9 * smtp_timeout:
+        logger.warning(
+            "SMTP retry effectively disabled by the timeout budget: "
+            "KERDOOS_SMTP_TIMEOUT_SECONDS=%s leaves too little of "
+            "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS=%s for even one retry "
+            "attempt (needs at least 9x the socket timeout as margin).",
+            smtp_timeout, reaper_timeout,
+        )

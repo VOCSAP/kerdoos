@@ -584,6 +584,19 @@ class RetryTest(_SmtpSenderTestBase):
                 sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
         self.assertIn("exactly one recipient", str(ctx.exception))
 
+    def test_ip_literal_domain_trips_the_guard_before_any_connection(self) -> None:
+        # roadmap 4a8afdf2: an address stored before auth.py's domain
+        # regex was tightened must still fail closed here.
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "a@[10.0.0.1]", _SMTP_SETTINGS)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _ExplodingSMTP):
+            with self.assertRaises(_UnsafeRecipientError) as ctx:
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+        self.assertIn("[10.0.0.1]", str(ctx.exception))
+
     def test_guard_still_fires_under_python_dash_o(self) -> None:
         """Gate C1a: the guard is `if ...: raise`, not `assert`, so it must
         survive python -O / PYTHONOPTIMIZE (which compiles out every
