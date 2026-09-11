@@ -263,7 +263,7 @@ class UcFetcherWiringTest(unittest.TestCase):
         # the deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
         self.assertIsInstance(chromium_arg, list)
         # host-resolver-rules + the per-launch --kerdoos-launch-id marker
-        # _launch_with_deadline appends (roadmap 65cef071 re-gate C1).
+        # _launch_with_deadline appends (roadmap 65cef071).
         self.assertEqual(len(chromium_arg), 2)
         arg = chromium_arg[0]
         self.assertIn(
@@ -630,12 +630,11 @@ class UcLaunchDeadlineTest(unittest.TestCase):
             proc.poll(), "the spawned child process was not killed")
 
     def test_timed_out_launch_kills_only_its_own_process_tree(self) -> None:
-        """Re-gate finding C1 (MAJOR): the previous implementation killed
-        every new child of the current process, so a concurrent, unrelated
-        launch's own Chrome/chromedriver was killed too as soon as
-        max_concurrent >= 2. Two REAL _launch_with_deadline calls run
-        concurrently on the SAME gate: only the one that times out may lose
-        its process, the other one's must survive.
+        """Roadmap 65cef071: killing every new child of the current process
+        would hit a concurrent, unrelated launch's own Chrome/chromedriver
+        too as soon as max_concurrent >= 2. Two REAL _launch_with_deadline
+        calls run concurrently on the SAME gate: only the one that times out
+        may lose its process, the other one's must survive.
         """
         gate = BrowserGate(max_concurrent=2)
         own_spawned: list = []
@@ -683,11 +682,11 @@ class UcLaunchDeadlineTest(unittest.TestCase):
 
     def test_launch_finishing_after_the_deadline_is_quit_and_cleaned_up(
             self) -> None:
-        """Re-gate finding C2 (MAJOR, regression vs main): the previous
-        implementation snapshotted/killed only ONCE, at the deadline. A
-        launch whose factory returns its Driver AFTER the deadline (a slow
-        launch under load, chromedriver up before Chrome) leaked both the
-        Driver's process tree and the gate slot it had already vacated.
+        """Roadmap 65cef071: a launch whose factory returns its Driver AFTER
+        the deadline (a slow launch under load, chromedriver up before
+        Chrome) must still be quit() and have its process tree cleaned up,
+        instead of leaking both the Driver's process tree and the gate slot
+        already vacated.
         """
         gate = BrowserGate(max_concurrent=1)
         late_spawned: list = []
@@ -756,9 +755,9 @@ class GateWiringTest(unittest.TestCase):
 
 
 class StaticRouterUcLaunchTimeoutTest(unittest.TestCase):
-    """Roadmap 65cef071 re-gate MINOR: KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS is
-    injected by the kerdoos composition root through
-    StaticRouter/_make_uc -- never read by autolycos itself (invariant 2).
+    """Roadmap 65cef071: KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS is injected by
+    the kerdoos composition root through StaticRouter/_make_uc -- never read
+    by autolycos itself (invariant 2).
     """
 
     def test_injected_value_reaches_the_built_uc_fetcher(self) -> None:

@@ -69,7 +69,7 @@ Bounds how often a single tenant can hammer the shared browser gate
 reputation for every OTHER tenant. 0 explicitly disables the guard. Same
 floor-with-warning discipline; keyed per owner_id (invariant 10).
 
-KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071 re-gate): bounds the
+KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071): bounds the
 Chrome LAUNCH itself for the uc tier (autolycos.adapters.uc.UcFetcher's
 launch_timeout_seconds), same floor-with-warning discipline. Read here and
 INJECTED into autolycos.router.StaticRouter at composition-root time --
@@ -85,6 +85,12 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
+
+# kerdoos may import autolycos (composition root -> tool), never the reverse
+# (invariant 2) -- this is the ALLOWED direction.
+from autolycos.adapters.uc import (
+    UC_LAUNCH_TIMEOUT_SECONDS as _UC_TIER_LAUNCH_TIMEOUT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +157,9 @@ DEFAULT_RUN_QUEUE_MAX_RESTARTS = 5
 # fixing a config issue.
 DEFAULT_RUN_NOW_COOLDOWN_SECONDS = 300.0
 
-# Roadmap 65cef071 re-gate: matches autolycos.adapters.uc.UC_LAUNCH_TIMEOUT_SECONDS's
-# own default, so an unset env var reproduces the previous hardcoded behavior.
-DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS = 30.0
+# Roadmap 65cef071: single source of truth shared with the uc tier itself,
+# so an unset env var falls back to exactly what UcFetcher would use anyway.
+DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS = float(_UC_TIER_LAUNCH_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)

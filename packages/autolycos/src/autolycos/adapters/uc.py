@@ -160,11 +160,11 @@ def _load_seleniumbase():  # type: ignore[no-untyped-def]
     return Driver
 
 
-# Roadmap 65cef071 re-gate, finding C1: an unknown Chrome switch (ignored by
-# Chrome itself) injected into chromium_arg, unique per launch, so cleanup
-# can identify THIS launch's OWN process tree by cmdline substring instead of
-# by mere process-tree novelty -- "every new child of the current process"
-# also matches a concurrent, unrelated browser/uc launch's own Chrome.
+# Roadmap 65cef071: an unknown Chrome switch (ignored by Chrome itself)
+# injected into chromium_arg, unique per launch, so cleanup can identify
+# THIS launch's OWN process tree by cmdline substring instead of by mere
+# process-tree novelty, which also matches a concurrent, unrelated
+# browser/uc launch's own Chrome.
 _LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
 # SeleniumBase's own driver process sits between this Python process and the
 # marked Chrome process; the marker itself lives only in Chrome's argv.
@@ -223,9 +223,8 @@ def _kill_launch_processes(marker: str) -> None:
     """Best-effort: kill only the process tree of the launch tagged with
     `marker`, so a launch abandoned at the deadline never leaves a zombie
     behind (roadmap 65cef071) without also hitting a concurrent, unrelated
-    launch's own process (re-gate finding C1). psutil is optional (declared
-    under the `uc` extra); any error here is swallowed -- this is cleanup,
-    not correctness.
+    launch's own process. psutil is optional (declared under the `uc`
+    extra); any error here is swallowed -- this is cleanup, not correctness.
     """
     for proc in _launch_process_tree(marker):
         try:
@@ -265,26 +264,14 @@ class UcFetcher:
         """Runs driver_cls(**driver_kwargs) (the Chrome launch itself) under
         self._launch_timeout_seconds. A native launch cannot be cancelled
         from Python once started, so a hang is bounded by abandoning the
-        thread (daemon, never joined again after abandonment) and killing
-        the process tree it spawned, rather than by cancelling the call
-        itself.
+        thread (daemon) and killing the process tree it spawned instead.
 
         A unique --kerdoos-launch-id marker is injected into chromium_arg so
-        cleanup can target THIS launch's own process tree instead of every
-        new child of the current process, which also hits a concurrent,
-        unrelated launch (roadmap 65cef071 re-gate, finding C1).
-
-        Which side -- this method's timeout, or the thread's own completion
-        -- gets to resolve the launch is decided by a single atomic claim.
-        Whichever side loses it is the one that happened AFTER the other has
-        already committed to its outcome: if the thread loses, it means the
-        launch finished (successfully or not) only after this method had
-        already given up and moved on, so the caller will never see that
-        Driver -- the thread quits it and kills its process tree
-        itself before returning (re-gate finding C2, a leak in the previous
-        single-snapshot-at-the-deadline implementation). If this method
-        loses (the launch finished right as the deadline fired), it defers
-        to the thread's own result instead of raising a spurious timeout.
+        cleanup targets only THIS launch's own process tree (roadmap
+        65cef071). An atomic claim decides which side -- this method's
+        timeout, or the thread's own completion -- resolves the launch;
+        whichever side loses cleans up (quit the Driver, kill the marked
+        process tree) instead of leaking it.
         """
         launch_id = uuid.uuid4().hex
         marker = f"{_LAUNCH_ID_ARG_PREFIX}{launch_id}"

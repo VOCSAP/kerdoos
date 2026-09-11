@@ -445,10 +445,9 @@ class RunNowCooldownFloorTest(_SettingsTestBase):
 
 
 class UcLaunchTimeoutFloorTest(_SettingsTestBase):
-    """Roadmap 65cef071 re-gate MINOR: a malformed
-    KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS warns and floors to the default
-    instead of crashing at settings-read time, and an unset one preserves
-    the tier's own previously-hardcoded default (uc.UC_LAUNCH_TIMEOUT_SECONDS)."""
+    """Roadmap 65cef071: a malformed KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS warns
+    and floors to the default instead of crashing at settings-read time, and
+    an unset one uses the uc tier's own default (uc.UC_LAUNCH_TIMEOUT_SECONDS)."""
 
     def test_unset_uses_default(self) -> None:
         settings = get_settings()

@@ -136,7 +136,7 @@ class StaticRouter:
         self._browser_gate = (
             browser_gate if browser_gate is not None else default_browser_gate())
         # None leaves UcFetcher's own UC_LAUNCH_TIMEOUT_SECONDS default in
-        # effect (roadmap 65cef071 re-gate MINOR: KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS,
+        # effect (roadmap 65cef071: KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS,
         # injected by the kerdoos composition root -- autolycos itself never
         # reads that env var, invariant 2).
         self._uc_launch_timeout_seconds = uc_launch_timeout_seconds
