@@ -21,6 +21,9 @@ from kerdoos.core.app.services import AppService
 logger = logging.getLogger(__name__)
 
 _POLL_TIMEOUT_SECONDS = 0.5
+# Fixed (not operator-configurable, unlike the restart CAP): bounds a
+# persistently crashing consumer to a slow retry instead of a CPU hot loop.
+_RESTART_BACKOFF_SECONDS = 0.5
 
 
 class RunState(str, Enum):
@@ -40,17 +43,34 @@ class RunStatus:
 class RunQueue:
     """In-memory, single-process run_now queue with per-owner coalescing."""
 
-    def __init__(self, service: AppService) -> None:
+    def __init__(
+        self, service: AppService, max_consumer_restarts: int = 5,
+    ) -> None:
         self._service = service
+        self._max_consumer_restarts = max_consumer_restarts
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._queued_or_running: set[str] = set()
         self._status: dict[str, RunStatus] = {}
         self._lock = asyncio.Lock()
+        self._dead = False
+        self._dead_reason: str | None = None
+
+    @property
+    def is_dead(self) -> bool:
+        return self._dead
 
     async def enqueue(self, owner_id: str) -> bool:
         """Enqueue owner_id unless a run for it is already queued or
         running. Returns True iff this call actually enqueued it (False =
-        silently coalesced into the existing one)."""
+        silently coalesced into the existing one, OR refused because the
+        consumer exhausted its restart budget -- status_for(owner_id)
+        distinguishes the two: ERROR for a refusal, QUEUED/RUNNING for a
+        coalesce)."""
+        if self._dead:
+            async with self._lock:
+                self._status[owner_id] = RunStatus(
+                    state=RunState.ERROR, error=self._dead_reason)
+            return False
         async with self._lock:
             if owner_id in self._queued_or_running:
                 return False
@@ -62,18 +82,41 @@ class RunQueue:
     def status_for(self, owner_id: str) -> RunStatus | None:
         return self._status.get(owner_id)
 
-    def handle_consumer_crash(self, task: asyncio.Task) -> None:
-        """asyncio.Task.add_done_callback target for run_forever. Each
-        owner's own exception is already isolated inside the loop, so this
-        only fires on a genuinely unexpected crash -- log it and clear the
-        in-flight set, or every coalesced owner would stay stuck 'running'
-        forever against a consumer that no longer exists."""
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.error("run_queue consumer crashed: %s", exc, exc_info=exc)
-            self._queued_or_running.clear()
+    async def run_supervised(self, stop_event: asyncio.Event) -> None:
+        """Top-level coroutine the composition root starts (replaces a bare
+        run_forever task): restarts run_forever after an unexpected crash
+        (a bug in the queue mechanics itself -- an individual owner's
+        run_now failure is already isolated inside run_forever and never
+        reaches here) up to max_consumer_restarts, logging each one. Beyond
+        the cap, marks the queue dead instead of restarting forever."""
+        restarts = 0
+        while True:
+            try:
+                await self.run_forever(stop_event)
+                return  # clean shutdown (stop_event set), not a crash
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- supervisor: isolate any crash
+                restarts += 1
+                logger.error(
+                    "run_queue consumer crashed (restart %d/%d): %s",
+                    restarts, self._max_consumer_restarts, exc, exc_info=exc)
+                async with self._lock:
+                    for owner_id, status in self._status.items():
+                        if status.state is RunState.RUNNING:
+                            self._status[owner_id] = RunStatus(
+                                state=RunState.ERROR,
+                                error="run_queue consumer crashed")
+                    self._queued_or_running.clear()
+                if stop_event.is_set():
+                    return
+                if restarts > self._max_consumer_restarts:
+                    self._dead = True
+                    self._dead_reason = (
+                        f"run_queue consumer crashed {restarts} times, "
+                        "exceeding the restart budget")
+                    return
+                await asyncio.sleep(_RESTART_BACKOFF_SECONDS)
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         """Consumer loop. Polls with a short timeout (rather than blocking

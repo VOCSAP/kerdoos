@@ -57,6 +57,10 @@ their default (with a warning, never a crash at import) on a non-positive or
 non-numeric value, same discipline as _safe_workers. Read here and INJECTED
 into autolycos.BrowserGate at composition-root time -- autolycos never reads
 either env var itself (invariant 2).
+
+KERDOOS_RUN_QUEUE_MAX_RESTARTS (card 65cef071): max times the WebUI's
+background run-queue consumer restarts itself after an unexpected crash
+before refusing new POST /run enqueues. Same floor-with-warning discipline.
 """
 
 from __future__ import annotations
@@ -118,6 +122,13 @@ DEFAULT_BROWSER_MAX_CONCURRENT = 1
 # in a bounded time if a holder is genuinely stuck.
 DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS = 120
 
+# Card 65cef071: max times the WebUI run-queue consumer restarts itself
+# after an unexpected crash (a bug in the queue mechanics, NOT an
+# individual owner's run_now failure, already isolated) before the queue
+# is marked dead and refuses new enqueues. A handful of restarts survives
+# a transient bug without masking a persistently broken consumer forever.
+DEFAULT_RUN_QUEUE_MAX_RESTARTS = 5
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -139,6 +150,7 @@ class Settings:
     digest_reaper_timeout_seconds: int
     browser_max_concurrent: int
     browser_acquire_timeout_seconds: float
+    run_queue_max_restarts: int
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -250,4 +262,7 @@ def get_settings() -> Settings:
             "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
             float(DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS), float,
             lambda v: v > 0),
+        run_queue_max_restarts=_env_number(
+            "KERDOOS_RUN_QUEUE_MAX_RESTARTS",
+            DEFAULT_RUN_QUEUE_MAX_RESTARTS, int, lambda v: v >= 0),
     )

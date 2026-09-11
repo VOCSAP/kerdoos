@@ -6,10 +6,12 @@ AppService double; no real scrape, no real HTTP.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import unittest
+from unittest import mock
 
-from kerdoos.core.run_queue import RunQueue, RunState
+from kerdoos.core.run_queue import RunQueue, RunState, RunStatus
 
 
 class _FakeService:
@@ -119,21 +121,62 @@ class RunQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.queue.status_for("owner1").state, RunState.QUEUED)
 
-    async def test_consumer_crash_clears_in_flight_set(self) -> None:
-        # A genuinely unexpected crash (not an owner's own run_now failure,
-        # already isolated inside run_forever) must not leave every
-        # coalesced owner stuck 'running' against a dead consumer forever.
-        self.queue._queued_or_running.add("stuck-owner")
-        crashed: asyncio.Future = asyncio.get_event_loop().create_future()
 
-        async def _boom() -> None:
-            raise RuntimeError("simulated consumer crash")
+class RunSupervisedTest(unittest.IsolatedAsyncioTestCase):
+    """run_supervised (card 65cef071) restarts run_forever after an
+    unexpected crash, up to max_consumer_restarts."""
 
-        task = asyncio.create_task(_boom())
-        task.add_done_callback(self.queue.handle_consumer_crash)
-        task.add_done_callback(lambda t: crashed.set_result(True))
-        await crashed
-        self.assertNotIn("stuck-owner", self.queue._queued_or_running)
+    async def test_restart_after_crash_processes_next_enqueue(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, max_consumer_restarts=2)
+        stop = asyncio.Event()
+        real_run_forever = RunQueue.run_forever
+        calls = {"n": 0}
+
+        async def _flaky_run_forever(self: RunQueue, stop_event: asyncio.Event) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated consumer crash")
+            await real_run_forever(self, stop_event)
+
+        with mock.patch.object(RunQueue, "run_forever", _flaky_run_forever):
+            supervised = asyncio.create_task(queue.run_supervised(stop))
+            self.assertTrue(await queue.enqueue("owner1"))
+            status = None
+            for _ in range(300):
+                status = queue.status_for("owner1")
+                if status is not None and status.state == RunState.DONE:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(status.state, RunState.DONE)
+            self.assertFalse(queue.is_dead)
+            stop.set()
+            supervised.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await supervised
+
+    async def test_restart_cap_exceeded_marks_dead_and_refuses_enqueue(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, max_consumer_restarts=1)
+        stop = asyncio.Event()
+        queue._queued_or_running.add("stuck-owner")
+        queue._status["stuck-owner"] = RunStatus(state=RunState.RUNNING)
+
+        async def _always_crash(self: RunQueue, stop_event: asyncio.Event) -> None:
+            raise RuntimeError("simulated persistent crash")
+
+        with mock.patch.object(RunQueue, "run_forever", _always_crash):
+            await queue.run_supervised(stop)  # returns once dead, no task needed
+
+        self.assertTrue(queue.is_dead)
+        self.assertEqual(
+            queue.status_for("stuck-owner").state, RunState.ERROR)
+
+        enqueued = await queue.enqueue("new-owner")
+        self.assertFalse(enqueued)
+        status = queue.status_for("new-owner")
+        self.assertEqual(status.state, RunState.ERROR)
+        self.assertIn("restart budget", status.error)
 
 
 if __name__ == "__main__":

@@ -97,14 +97,14 @@ def create_app() -> FastAPI:
     # Card ca30b736: POST /run enqueues here instead of blocking on a scrape
     # (now also gated by the browser gate above). Started unconditionally
     # below, not behind a flag.
-    run_queue = RunQueue(app_service)
+    run_queue = RunQueue(
+        app_service, max_consumer_restarts=settings.run_queue_max_restarts)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         run_queue_stop = asyncio.Event()
         run_queue_task = asyncio.create_task(
-            run_queue.run_forever(run_queue_stop))
-        run_queue_task.add_done_callback(run_queue.handle_consumer_crash)
+            run_queue.run_supervised(run_queue_stop))
 
         # Default OFF (KERDOOS_DIGEST_EVALUATOR_ENABLED unset/false): this
         # branch is a true no-op, so the 3 pre-existing TestClient(create_app())
