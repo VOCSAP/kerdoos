@@ -1,12 +1,32 @@
 """MercadoLivre parser adapter (kind "mercadolivre") -- stdlib only, no bs4.
 
-MercadoLivre (mercadolivre.com.br) product pages are JS SPAs; once rendered, the
-effective price is exposed as a schema.org Offer meta inside the main price
-block:
+MercadoLivre (mercadolivre.com.br) product pages are JS SPAs. Two DOM
+generations of the same listing have been observed (roadmap 35a14a39):
 
+  * Current: no id="price"/meta itemprop="price" block at all. The effective
+    price lives in a <script type="application/ld+json"> schema.org/Product
+    node, under offers.price (a bare number, reais) / offers.priceCurrency /
+    offers.availability (a schema.org URL, e.g. ".../InStock").
+  * Older (still the shape of the committed fixture
+    tests/fixtures/mercadolivre_mlb35045987.html): a
     <div id="price"> ... <meta itemprop="price" content="9433"> ... </div>
+    block, read DOM-side.
 
-Scoping discipline (invariant #4 -- read the CURRENT effective price):
+JSON-LD is tried FIRST; the meta anchor is the REPLI (fallback) for any page
+that has no JSON-LD Product node at all. Once a JSON-LD Product node has been
+unambiguously identified, it is treated as authoritative: a Product with no
+usable offers.price raises ParseError rather than silently falling back to a
+DOM heuristic that could read a stale or unrelated price.
+
+Multiple Product nodes (rare edge case, not observed in any capture so far):
+selected by matching "sku"/"productID" against the page's own canonical
+product id (<link rel="canonical" href=".../MLB12345">). No unique match ->
+ParseError (never guess the first one). Malformed JSON-LD blocks are silently
+skipped (not every <script type="application/ld+json"> on the page is a
+Product -- BreadcrumbList/Table nodes are expected and ignored).
+
+Scoping discipline for the meta REPLI path (invariant #4 -- read the CURRENT
+effective price):
   * The price is read from the <meta itemprop="price"> node scoped under the
     single id="price" block. The meta content is the clean, unformatted amount
     (reais), so no thousands/decimal parsing ambiguity.
@@ -22,17 +42,20 @@ interest-free card installments at the same total). Pending an operator ruling,
 the single price fills BOTH the pix and card regular slots. Option B (pix-only,
 card None) is a one-line change -- see the TODO in extract().
 
-Availability is DOM-based (there is no schema.org availability node): an
-explicit out-of-stock marker wins; otherwise the presence of the buy box /
-stock element marks IN_STOCK; else UNKNOWN. Currency is BRL (hardcoded; the page
-carries no exploitable priceCurrency meta). Prices funnel through the shared
-normalize.to_cents contract. If no price can be located the parser fails closed
-(ParseError -> the orchestrator degrades the scrape to INDETERMINATE).
+Availability on the meta REPLI path is DOM-based (there is no schema.org node
+to read there): an explicit out-of-stock marker wins; otherwise the presence
+of the buy box / stock element marks IN_STOCK; else UNKNOWN. Currency is BRL
+(hardcoded there; the page carries no exploitable priceCurrency meta outside
+JSON-LD). Prices funnel through the shared normalize.to_cents contract. If no
+price can be located by either path the parser fails closed (ParseError -> the
+orchestrator degrades the scrape to INDETERMINATE).
 """
 
 from __future__ import annotations
 
+import json
 import re
+from typing import Any
 
 from kerdoos.core.domain import Availability, Extract, ParseError
 
@@ -55,6 +78,124 @@ _PRICE_META_RE = re.compile(
 _BLOCK_TO_META_WINDOW = 4000
 
 _TAG_RE = re.compile(r"<[^>]+>")
+
+# JSON-LD (order-independent on the type attribute, mirrors _PRICE_META_RE).
+# Non-greedy up to the first closing tag: JSON-LD script content never
+# legitimately contains a literal "</script>" (it would be JSON-escaped).
+_JSON_LD_BLOCK_RE = re.compile(
+    r'<script\b(?=[^>]*\btype="application/ld\+json")[^>]*>(.*?)</script>',
+    re.DOTALL)
+_CANONICAL_HREF_RE = re.compile(
+    r'<link\b(?=[^>]*\brel="canonical")(?=[^>]*\bhref="([^"]*)")[^>]*>')
+_CANONICAL_ID_RE = re.compile(r"([^/]+)$")
+
+
+def _json_ld_products(html: str) -> list[dict[str, Any]]:
+    """All @type=="Product" objects found in <script type="application/ld+json">.
+
+    A block that fails to parse (malformed JSON, pathological nesting) is
+    skipped, never raised -- most JSON-LD on the page (BreadcrumbList, Table)
+    is not a Product and is filtered out the same way.
+    """
+    products = []
+    for match in _JSON_LD_BLOCK_RE.finditer(html):
+        try:
+            obj = json.loads(match.group(1))
+        except (json.JSONDecodeError, RecursionError, ValueError,
+                OverflowError):
+            continue
+        if isinstance(obj, dict) and obj.get("@type") == "Product":
+            products.append(obj)
+    return products
+
+
+def _canonical_product_id(html: str) -> str | None:
+    """Trailing path segment of <link rel="canonical">, e.g. "MLB35045987"."""
+    match = _CANONICAL_HREF_RE.search(html)
+    if match is None:
+        return None
+    id_match = _CANONICAL_ID_RE.search(match.group(1))
+    return id_match.group(1) if id_match else None
+
+
+def _product_sku(product: dict[str, Any]) -> str | None:
+    for key in ("sku", "productID"):
+        value = product.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _select_product(
+    products: list[dict[str, Any]], canonical_id: str | None
+) -> dict[str, Any] | None:
+    """The single Product, or the one matching the page's own canonical id.
+
+    Never returns an arbitrary pick among several non-matching candidates.
+    """
+    if len(products) == 1:
+        return products[0]
+    if not products or canonical_id is None:
+        return None
+    matches = [p for p in products if _product_sku(p) == canonical_id]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _offers_of(product: dict[str, Any]) -> dict[str, Any] | None:
+    offers = product.get("offers")
+    if isinstance(offers, dict):
+        return offers
+    if isinstance(offers, list):
+        for entry in offers:
+            if isinstance(entry, dict) and "price" in entry:
+                return entry
+        for entry in offers:
+            if isinstance(entry, dict):
+                return entry
+    return None
+
+
+def _availability_from_schema_url(value: Any) -> Availability:
+    if not isinstance(value, str):
+        return Availability.UNKNOWN
+    tail = value.rsplit("/", 1)[-1]
+    if tail == Availability.IN_STOCK.value:
+        return Availability.IN_STOCK
+    if tail == Availability.OUT_OF_STOCK.value:
+        return Availability.OUT_OF_STOCK
+    return Availability.UNKNOWN
+
+
+def _extract_from_json_ld(html: str) -> Extract | None:
+    """None if no JSON-LD Product node is found at all (-> try the meta repli).
+
+    Raises ParseError if a Product WAS unambiguously identified but carries no
+    usable price -- that Product is authoritative, never silently discarded
+    in favor of a DOM heuristic.
+    """
+    products = _json_ld_products(html)
+    if not products:
+        return None
+    product = _select_product(products, _canonical_product_id(html))
+    if product is None:
+        raise ParseError(
+            "multiple MercadoLivre JSON-LD Product nodes, none matching the "
+            "page's canonical product id")
+    offers = _offers_of(product)
+    price = to_cents(offers.get("price")) if offers else None
+    if price is None:
+        raise ParseError(
+            "MercadoLivre JSON-LD Product has no usable offers.price")
+    currency = offers.get("priceCurrency")
+    return Extract(
+        price_pix_cents=price,
+        price_card_cents=price,
+        currency=currency if isinstance(currency, str) and currency
+        else _CURRENCY,
+        availability=_availability_from_schema_url(
+            offers.get("availability")),
+    )
+
 
 # DOM availability signals (no schema.org node on ML). Availability is scoped to
 # a bounded window around the stock/buy-box element so BOTH the out-of-stock and
@@ -115,9 +256,15 @@ class MercadoLivreParser:
         self._spec = spec
 
     def extract(self, html: str) -> Extract:
+        from_json_ld = _extract_from_json_ld(html)
+        if from_json_ld is not None:
+            return from_json_ld
+
         price = _scoped_meta_price(html)
         if price is None:
-            raise ParseError("no MercadoLivre price located (meta itemprop=price)")
+            raise ParseError(
+                "no MercadoLivre price located "
+                "(JSON-LD offers.price / meta itemprop=price)")
 
         # PROVISIONAL mapping -- Option A: the single headline price fills BOTH
         # regular slots (ML advertises no distinct PIX price for this listing).

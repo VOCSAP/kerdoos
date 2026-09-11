@@ -8,6 +8,14 @@ installment) and dozens of recommended-product andes-money-amount spans. The
 effective price is volatile (invariant #4), so this is the exact value present
 in this capture: R$ 9.433 -> 943300 cents. The 10x installment (943,30 -> 94330)
 must NEVER be read.
+
+`mercadolivre_mlb35045987_camoufox.html` is a later capture (roadmap 35a14a39)
+of the SAME listing where ML dropped the id="price"/meta itemprop="price" block
+entirely: the effective price now lives only in a <script
+type="application/ld+json"> schema.org/Product node (offers.price). Session/
+device identifiers (d2id, csrf token, request/correlation/tracking ids) were
+replaced with fixed placeholders before committing; the product data (sku,
+price, reviews) is untouched.
 """
 
 from __future__ import annotations
@@ -20,6 +28,9 @@ from kerdoos.parsers.adapters.mercadolivre import MercadoLivreParser
 from kerdoos.parsers.ports import ParserSpec
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "mercadolivre_mlb35045987.html"
+_JSONLD_FIXTURE = (
+    Path(__file__).parent / "fixtures"
+    / "mercadolivre_mlb35045987_camoufox.html")
 
 
 def _parser() -> MercadoLivreParser:
@@ -106,6 +117,100 @@ class MercadoLivreSyntheticTest(unittest.TestCase):
         )
         self.assertEqual(_parser().extract(html).availability,
                          Availability.IN_STOCK)
+
+
+class MercadoLivreJsonLdTest(unittest.TestCase):
+    def test_real_camoufox_dump_extracts_jsonld_price(self) -> None:
+        # RED before the fix: the old meta-only parser raises ParseError on
+        # this dump (measured: "no MercadoLivre price located (meta
+        # itemprop=price)") because id="price"/meta itemprop="price" is gone
+        # from the current markup. JSON-LD offers.price is now read first.
+        html = _JSONLD_FIXTURE.read_text(encoding="utf-8")
+        extract = _parser().extract(html)
+        self.assertEqual(extract.price_pix_cents, 943400)
+        self.assertEqual(extract.price_card_cents, 943400)
+        self.assertEqual(extract.currency, "BRL")
+        self.assertEqual(extract.availability, Availability.IN_STOCK)
+
+    def test_meta_repli_when_no_jsonld_product(self) -> None:
+        # No JSON-LD Product node at all -> falls back to the old meta anchor,
+        # never ParseError as long as the meta path can still resolve a price.
+        html = ('<div id="price"><meta itemprop="price" content="1999">'
+                '</div><div id="buybox_available_quantity"></div>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.price_pix_cents, 199900)
+        self.assertEqual(extract.availability, Availability.IN_STOCK)
+
+    def test_jsonld_without_offers_price_raises_parse_error(self) -> None:
+        # A Product node was found and is unambiguous, but its offers carry no
+        # usable price: fail closed, never silently fall back to meta (which
+        # could read a stale/unrelated price from elsewhere on the page).
+        html = (
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"availability":'
+            '"https://schema.org/InStock"}}</script>')
+        with self.assertRaises(ParseError):
+            _parser().extract(html)
+
+    def test_jsonld_multiple_products_without_sku_match_raises_parse_error(
+            self) -> None:
+        # Two Product nodes, neither sku matching the page's own canonical
+        # product id (MLB1): never guess, fail closed.
+        html = (
+            '<link rel="canonical" href="https://www.mercadolivre.com.br/p/MLB1">'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB2","offers":{"price":100,'
+            '"priceCurrency":"BRL"}}</script>'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB3","offers":{"price":200,'
+            '"priceCurrency":"BRL"}}</script>')
+        with self.assertRaises(ParseError):
+            _parser().extract(html)
+
+    def test_jsonld_multiple_products_matching_sku_is_selected(self) -> None:
+        # One of two Product nodes matches the page's own canonical id:
+        # that one wins, never the first at random.
+        html = (
+            '<link rel="canonical" href="https://www.mercadolivre.com.br/p/MLB2">'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB2","offers":{"price":100,'
+            '"priceCurrency":"BRL","availability":'
+            '"https://schema.org/InStock"}}</script>'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB3","offers":{"price":200,'
+            '"priceCurrency":"BRL"}}</script>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.price_pix_cents, 10000)
+
+    def test_jsonld_out_of_stock_maps_to_out_of_stock(self) -> None:
+        html = (
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"price":9999,'
+            '"priceCurrency":"BRL","availability":'
+            '"https://schema.org/OutOfStock"}}</script>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.availability, Availability.OUT_OF_STOCK)
+
+    def test_jsonld_unrecognized_availability_is_unknown(self) -> None:
+        html = (
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"price":9999,'
+            '"priceCurrency":"BRL","availability":'
+            '"https://schema.org/PreOrder"}}</script>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.availability, Availability.UNKNOWN)
+
+    def test_malformed_jsonld_block_is_ignored_not_crashed(self) -> None:
+        # A structurally broken JSON-LD block (unquoted key) sits alongside a
+        # valid one: the malformed block is skipped, no exception leaks out,
+        # and the valid Product is still used.
+        html = (
+            '<script type="application/ld+json">{not: valid json}</script>'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"price":500,'
+            '"priceCurrency":"BRL"}}</script>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.price_pix_cents, 50000)
 
 
 if __name__ == "__main__":
