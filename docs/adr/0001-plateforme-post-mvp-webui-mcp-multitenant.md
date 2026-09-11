@@ -596,9 +596,11 @@ mini-PC ~25 GiB, historique OOM (baisser la concurrence, images maitrisees).
 Force decisive : l'operateur impose de supporter les deux, defaut autonome. On publie
 **deux tags d'image** depuis le meme Dockerfile multi-stage : `kerdoos:autonomous`
 (bundle **navigateurs patchright**, cf. section 7 : l'image installe les navigateurs
-patchright) et `kerdoos:slim` (remote-only). L'image slim n'embarque pas les binaires,
-donc `browser.mode=autonomous` sur l'image slim echoue proprement (fail-closed a la
-construction du fetcher).
+patchright) et `kerdoos:slim`. L'image slim n'embarque pas les binaires : elle ne
+sert que les tiers `http` et `tls`, et le mode remote qui devait la completer n'est
+pas construit (carte 67c9a3b4). Sur l'image slim, une source dont le site demande le
+tier `browser` ou `uc` est ignoree au scrape, fail-closed par source (ADR 0002
+Decision 5).
 
 ### Topologie (Q6 + separation reseau, verrouille)
 - **Un seul `docker-compose` sur l'hote de deploiement**, avec des **profiles**
@@ -610,8 +612,10 @@ construction du fetcher).
   legitimes (UI/API Kerdoos, SSE crawl4ai) ; reseau **prive** pour un futur browser
   partage. **Jamais** de mapping `ports:` sur `9222` (CDP), sur aucun des deux
   reseaux (Kleos #11047).
-- **OOM-aware** : RAM du LXC non figee mais `browser.max_concurrent=1` (un seul
-  render a la fois) ; Chromium est le principal consommateur RAM.
+- **OOM-aware** : RAM du LXC non figee mais `KERDOOS_BROWSER_MAX_CONCURRENT=1`
+  (variable d'environnement : une seule instance Chromium vivante a la fois, tiers
+  `browser` et `uc` confondus ; ADR 0002 Decision 2) ; Chromium est le principal
+  consommateur RAM.
 - **Ordonnancement (Q6)** : **cron systeme** du LXC appelant `kerdoos run` pour le
   digest quotidien (modele MVP, robuste) **+ file de jobs intra-process** pour
   `run_now` declenche par UI/MCP (non bloquant, section 3).
@@ -630,7 +634,7 @@ flowchart TB
   LAN(("LAN")) --> RP["reverse-proxy<br/>(reseau public)"]:::net
   subgraph LXC["hote de deploiement -- docker-compose (profiles, standalone-first)"]
     direction TB
-    RP --> WEBAPP["kerdoos (ASGI)<br/>FastAPI+HTMX + FastMCP same-app<br/>uvicorn, browser.max_concurrent=1"]:::svc
+    RP --> WEBAPP["kerdoos (ASGI)<br/>FastAPI+HTMX + FastMCP same-app<br/>uvicorn, KERDOOS_BROWSER_MAX_CONCURRENT=1"]:::svc
     RP --> CRAWLSSE["crawl4ai-rag-mcp<br/>SSE :8051 (NON modifie)"]:::ext
     WEBAPP --- VOL[("volume: config.db + state.db")]:::vol
     WEBAPP -. "patchright Chromium loopback-only (autonome)" .- WEBAPP
@@ -664,8 +668,9 @@ flowchart TB
   (Kleos #11046, #11049).
 - **Mode `remote` = opt-in, DIFFERE, NON active day one** : connexion CDP-over-WS
   avec `?token=` vers un service **browserless+TOKEN** sur un **reseau Docker prive** ;
-  `9222` JAMAIS publie sur le LAN (Kleos #11047). **On construit la capacite de
-  config (`cdp_url` + `token`) mais on ne l'active pas.**
+  `9222` JAMAIS publie sur le LAN (Kleos #11047). La capacite de config (`cdp_url`
+  + `token`) n'a **pas** ete construite : le mode remote est ecarte (carte
+  67c9a3b4).
 - **Tier `uc` : toujours local, inchange** (SeleniumBase pour Akamai/Magalu). Verdict
   Q-iv (Kleos #11051, conf 60% vers NON) : aucune preuve que patchright batte Akamai
   -> **pas de consolidation `uc -> patchright`**.
@@ -751,19 +756,19 @@ le gate security-auditor les reverifiera independamment.
    1 (section 13) ; a re-gater avant toute activation.
 
 ### Contrat de config du browser
-```yaml
-browser:
-  mode: autonomous            # 'autonomous' (defaut) | 'remote' (DIFFERE, non active)
-  remote_cdp_url: "ws://browserless.internal:3000?token=..."  # requis si mode=remote
-  remote_token: "<TOKEN>"     # reseau Docker prive uniquement, 9222 jamais publie
-  max_concurrent: 1           # anti-OOM sur le LXC
-```
-- `autonomous` : patchright `chromium.launch(--proxy-server=127.0.0.1:<port>)` +
-  egress-proxy CONNECT (pin + ip_is_safe + strip args). Stealth de lancement actif.
-- `remote` (DIFFERE) : `connect_over_cdp(remote_cdp_url + token)`. Pin IP local
-  **indisponible** (le browser distant resout) -> stealth degrade + SSRF a
-  re-auditer. `page.route` + egress firewall = seul backstop. **Non active day one.**
-- `uc` : ignore ces modes, toujours local ; adopte l'egress-proxy pour sa garde SSRF.
+Il n'existe **aucune configuration YAML du navigateur**. Le mode `autonomous` est le
+seul construit, et les reglages d'exploitation passent par des variables
+d'environnement lues par la racine de composition (ADR 0002 Decision 2), dont
+`KERDOOS_BROWSER_MAX_CONCURRENT` (defaut 1, anti-OOM, tiers `browser` et `uc`
+confondus).
+- `autonomous` (seul mode) : patchright `chromium.launch(--proxy-server=127.0.0.1:<port>)`
+  + egress-proxy CONNECT (pin + ip_is_safe + strip args). Stealth de lancement actif.
+- `remote` : **non construit**, ecarte (carte 67c9a3b4). Pour memoire, le design
+  envisage etait `connect_over_cdp(remote_cdp_url + token)` : pin IP local
+  indisponible (le browser distant resout), donc stealth degrade et SSRF a
+  re-auditer, avec `page.route` + egress firewall comme seul backstop.
+- `uc` : toujours local. Sa garde SSRF reste le pin `--host-resolver-rules`
+  (deny-by-default), pas l'egress-proxy (voir la note de sequencage ci-dessus).
 
 ---
 
