@@ -1,16 +1,22 @@
-# ADR 0004 -- Tier `camoufox` (Firefox anti-detection) en variante d'image opt-in
+# ADR 0004 -- Tier `camoufox` (Firefox anti-detection) dans l'image `autonomous` par defaut
 
-- **Statut** : ACCEPTED (2026-09-11). Principe : decision operateur, citee plus bas.
-  Decisions 1 a 8 : ratifiees par le team-lead au titre de son mandat d'autonomie,
-  apres validation de la revue security-auditor (ratifiable apres les retouches R1 a
-  R3). Les conditions de securite C1 a C6 y sont integrees (table de tracabilite en fin
-  de document). Les trois questions operateur restent ouvertes.
-- **Date** : 2026-09-11
-- **Portee** : ajout d'un cinquieme tier de fetch, `camoufox`, et d'une troisieme
-  cible d'image, opt-in. Amende la Decision 5 de
-  [ADR 0002](./0002-productionisation.md) ("pas de 3e tier d'image"). Durcit au passage
+- **Statut** : ACCEPTED (2026-09-11), **revise le 2026-09-12** par decision operateur :
+  Camoufox n'est plus une variante d'image opt-in, il est livre et actif d'office dans
+  `kerdoos:autonomous`. Decisions 1 a 8 : ratifiees par le team-lead au titre de son
+  mandat d'autonomie, apres validation de la revue security-auditor (ratifiable apres
+  les retouches R1 a R3) ; la Decision 2 est reecrite par la revision, et la
+  **Decision 9** (tier `uc` deprecie) est une decision operateur directe. Les
+  conditions de securite C1 a C7 sont integrees (table de tracabilite en fin de
+  document) et **n'ont pas bouge a la revision** : elles ne dependaient pas de
+  l'opt-in.
+- **Date** : 2026-09-11, revise le 2026-09-12
+- **Portee** : ajout d'un cinquieme tier de fetch, `camoufox`, embarque dans la cible
+  `autonomous` existante. Amende la Decision 5 de
+  [ADR 0002](./0002-productionisation.md) sur deux points : le **contenu**
+  d'`autonomous` change (taille, pic memoire), et cette image ne s'execute plus en root
+  (Decision 8, condition C6) alors que l'ADR 0002 la decrit en root. Durcit au passage
   l'egress-proxy commun (Decision 4, condition C1), ce qui touche aussi le tier
-  `browser` existant.
+  `browser` existant. Tranche l'avenir du tier `uc` (Decision 9).
 - **Sources de verite** : cartes de la roadmap 5438dd0b (ce tier) et 5e84a704 (spike
   anti-Akamai), gates d8b7b8fd et 6521bbce (lecons de liveness), revue security-auditor
   de la premiere version de cet ADR, code de `main`.
@@ -44,14 +50,22 @@ Faits mesures pendant le spike 5e84a704 et la mesure de RAM qui l'a suivi :
   du spike) recoit la vraie fiche (1055964 octets, etat pre-charge de la page, JSON-LD
   Product avec un prix de 9434 BRL et la disponibilite InStock).
 
-**Decision operateur, citee telle quelle** : « B ; mais à condition de rendre facile
-l'activation de cette image. En tout cas on câble tout ce qu'il faut pour pouvoir
+**Premiere decision operateur, citee telle quelle** : « B ; mais à condition de rendre
+facile l'activation de cette image. En tout cas on câble tout ce qu'il faut pour pouvoir
 l'utiliser si l'utilisateur la veut. (Typiquement, moi j'en aurais besoin) ». Le cout
 disque avait ete accepte sans reserve au prealable.
 
-Consequence : une **variante d'image opt-in**, l'image `autonomous` par defaut reste
-inchangee, l'activation tient en une commande documentee, et tout est cable de bout
-en bout.
+**Decision operateur de revision, citee telle quelle** : « 1. Déprécie uc ; on ne sait
+jamais "demain", il se pourrait qu'une mise à jour le rende "meilleure" que Camoufox.
+2. On bascule Camoufox en obligatoire alors ; pas d'opt-in pour l'activer. Il est actif
+de base. 3. Kerdoos est fait pour être publique. 4. Il n'y a pas encore d'utilisateur de
+Kerdoos ; outil encore en conception ; donc pas besoin d'étapes manuelle documentée. Vu
+que ça sera livré par défaut. »
+
+Consequences retenues : Camoufox est **dans l'image `autonomous` par defaut**, sans
+variante ni profil d'activation ; le tier `uc` est **deprecie** (Decision 9) ; le depot
+est destine a etre **public**, donc la licence de Camoufox est traitee ici (Decision 2) ;
+il n'existe **aucun utilisateur**, donc aucune bascule ni migration a prevoir.
 
 ## Structure actuelle (cartographie, pas l'ideal)
 
@@ -78,17 +92,21 @@ en bout.
   les cibles (`ENTRYPOINT ["/usr/bin/tini", "-s", "--"]` du stage `base`, carte
   d8b7b8fd) ; le compose n'a pas d'`init: true`. L'image `slim` s'execute en
   non-root (`USER 10001`), l'image `autonomous` en root.
-- **WebUI** : l'indicateur d'echelle des tiers attend `uc_selenium` alors que le tier
-  rapporte `uc` ; il affiche aujourd'hui une profondeur 0 pour `uc` (defaut
-  preexistant, releve a cette occasion).
+- **WebUI** : l'indicateur d'echelle des tiers connait quatre barreaux
+  (`http`, `tls`, `browser`, `uc`), figes a trois endroits independants l'un de
+  l'autre : le tuple `_TIER_LADDER`, le nombre de pastilles de la macro `tier()`, et
+  le tuple d'options du `select` d'ajout de site. La cle `uc`, qui etait restee
+  `uc_selenium` et faisait afficher une profondeur 0, est corrigee sur `main`
+  (commit ffc2fb8) ; le barreau `camoufox` n'existe nulle part.
 
 ## Choix du support : un ADR 0004 plutot qu'un amendement de l'ADR 0002
 
-Un nouveau tier, une nouvelle cible d'image, une nouvelle licence tierce et une
-nouvelle classe de binaire epingle forment une decision a part entiere, qui merite sa
-propre trace. L'amender dans l'ADR 0002 (productionisation generale) le noierait. Le
-seul point de l'ADR 0002 contredit, "pas de 3e tier d'image" (Decision 5), recoit un
-renvoi explicite vers le present ADR.
+Un nouveau tier, une nouvelle licence tierce, une nouvelle classe de binaire epingle et
+un changement de gabarit de l'image par defaut forment une decision a part entiere, qui
+merite sa propre trace. L'amender dans l'ADR 0002 (productionisation generale) le
+noierait. La Decision 5 de l'ADR 0002 recoit un renvoi explicite vers le present ADR :
+son affirmation "pas de 3e tier d'image" reste vraie, mais le contenu, la taille et le
+durcissement de la cible `autonomous` changent.
 
 ---
 
@@ -108,41 +126,89 @@ Force decisive : le tier est deja une propriete du site, et l'invariant 6 est te
 catalogue (le tier le moins couteux qui passe). Pour Magalu en conteneur, `uc` ne passe
 pas (mesure), donc le moins couteux qui passe est `camoufox`.
 
-- Le catalogue livre declare `fetcher: camoufox` pour Magalu. Nom du tier et valeur de
-  `FetchResult.method` : `camoufox`.
-- MercadoLivre, declare aujourd'hui `fetcher: browser`, est candidat au meme tier sur
-  la foi d'une mesure unique (Contexte). Son routage vers `camoufox` dans le catalogue
-  se fait en T3, et sa confirmation sur plusieurs echantillons en T4 ; si T4 ne
-  confirme pas, MercadoLivre revient a `browser`.
-- **Sur l'image par defaut**, le tier est indisponible et suit le patron 3aeb8a19 :
+- Le catalogue livre declare `fetcher: camoufox` pour **Magalu et MercadoLivre**. Nom du
+  tier et valeur de `FetchResult.method` : `camoufox`. Aucun utilisateur n'existe
+  (decision operateur), donc il n'y a ni bascule ni migration d'un `config.db` deja
+  peuple a prevoir.
+- Le routage de MercadoLivre repose sur une mesure unique (Contexte) : il est pose dans
+  le catalogue en T3 et confirme sur plusieurs echantillons en T4 ; si T4 ne confirme
+  pas, MercadoLivre revient a `browser`.
+- **Sur l'image `slim`**, le tier est indisponible et suit le patron 3aeb8a19 :
   log au demarrage, ajout de source refuse, source ignoree au scrape sans ScrapeRecord.
+  C'est le seul deploiement sans Camoufox.
 - **Disponibilite = paquet + binaire + version** (renforcee par la condition C5) : le
   paquet est importable, le binaire est present a l'emplacement fixe par l'image, sa
   version installee est **egale a la version epinglee** et **compatible avec le
   plancher de version** exige par le paquet. Sinon, indisponible (fail-closed). Le tier
   ne telecharge jamais rien a l'execution (Decision 6).
-- **Indicateur WebUI** : ajouter le barreau `camoufox` (profondeur 5) et corriger la
-  cle `uc` dans la meme tranche.
+- **Indicateur WebUI** : ajouter le barreau `camoufox` (profondeur 5) en T3. La cle
+  `uc`, qui etait restee `uc_selenium` dans `_TIER_LADDER`, est **deja corrigee sur
+  `main`** (commit ffc2fb8) ; il reste donc le seul barreau `camoufox` a ajouter, a
+  trois endroits distincts : le tuple `_TIER_LADDER`, le nombre de pastilles de la
+  macro `tier()` (fige a quatre), et le tuple d'options du `select` d'ajout de site
+  (independant de `_TIER_LADDER`).
 
-## Decision 2 -- Activation et build : une cible, un profil, un build deterministe
+### Echelle d'escalade telle qu'elle devient (invariant 6)
+
+`http` < `tls` < `browser` < `uc` (deprecie, Decision 9) < `camoufox`
+
+Cinq barreaux, ordonnes par cout croissant. Deux precisions qui ne se lisent pas dans
+l'ordre seul :
+
+- **L'ordre est un cout, pas un parcours.** Il n'existe aucune escalade automatique
+  d'un barreau au suivant : le tier est declare par site dans le catalogue et resolu
+  par un routeur statique. L'invariant 6 se tient au catalogue, en declarant pour
+  chaque site le barreau le moins couteux qui passe.
+- **`uc` garde sa place de quatrieme barreau bien qu'il soit deprecie.** Sa position
+  mesure son cout, pas son usage : aucun site du catalogue ne le declare
+  (Decision 9), mais le barreau reste dans l'echelle, dans l'indicateur WebUI et
+  dans le `select` d'ajout de site, pour que la reevaluation prevue par la
+  Decision 9 ne demande aucune remise en place.
+
+Consequence documentaire (tranche T3) : l'invariant 6 de `CLAUDE.md` et la phrase
+d'architecture du `README.md` enumerent aujourd'hui quatre barreaux et s'arretent a
+`uc` ; les deux enonces doivent citer les cinq barreaux et la place de `camoufox`.
+
+## Decision 2 -- Livraison : camoufox dans `autonomous`, build deterministe, licence
 
 ### Options
-- **A -- Cible `autonomous-camoufox` + profil compose `camoufox`**, construits en local
-  comme les deux images actuelles.
-- **B -- Tag d'image publie sur un registre.** Aucune chaine de publication d'image
+- **A -- Cible `autonomous-camoufox` + profil compose `camoufox`** (variante d'image
+  opt-in), construits en local comme les deux images actuelles. *Cout* : une
+  troisieme cible et un troisieme profil a maintenir et a re-epingler. *Risque* : la
+  seule image qui franchit Akamai n'est pas celle que l'operateur lance par defaut ;
+  toute configuration de site en `camoufox` est fail-closed sur l'image standard.
+  **Retenue dans la premiere version de cet ADR, annulee par la revision operateur.**
+- **B -- Binaire toujours present dans `autonomous`, actif d'office.** *Cout* : environ
+  +1,5 a 2,5 Go (estimation, mesure due en T2) sur l'image par defaut, pour tous les
+  deploiements `autonomous`, y compris ceux qui ne surveillent aucun site Akamai.
+  *Risque* : la surface de securite de Firefox s'ajoute a celle de Chromium dans
+  l'image par defaut, ce qui rend le durcissement de la Decision 8 obligatoire et non
+  plus local a une variante. *Reversibilite* : bonne, la cible reste une cible du
+  meme Dockerfile.
+- **C -- Binaire present dans `autonomous`, active par une variable.** Cumule le cout
+  disque de B et la complexite d'activation de A, sans le benefice de l'un ni de
+  l'autre : le binaire est de toute facon telecharge et stocke. Rejetee.
+- **D -- Tag d'image publie sur un registre.** Aucune chaine de publication d'image
   n'existe dans le depot aujourd'hui ; hors perimetre.
-- **C -- Binaire toujours present dans `autonomous`, active par une variable.**
-  Contredit la decision operateur (image par defaut inchangee, 1,3 Go en plus pour
-  tous). Rejetee.
 
-### Decision : **A**
-- Cible `autonomous-camoufox`, construite **a partir de** `autonomous` : elle garde
-  `browser` et `uc`, ajoute l'extra `camoufox`, les bibliotheques systeme de Firefox et
-  le binaire. Tag local `kerdoos:autonomous-camoufox`.
-- Service compose `kerdoos-camoufox`, profil `camoufox`, exclusif des deux autres
-  (meme volume `/data`, memes regles de port que `kerdoos-autonomous`, durcissement de
-  la Decision 8).
-- **Commande documentee unique** : `docker compose --profile camoufox up -d --build`.
+### Decision : **B**
+Force decisive : la decision operateur de revision (« On bascule Camoufox en
+obligatoire alors ; pas d'opt-in pour l'activer. Il est actif de base. »), motivee par
+le fait que l'image `autonomous` n'a de raison d'etre que de franchir les protections.
+Une image `autonomous` qui echoue sur le seul site Akamai du catalogue n'est pas
+autonome.
+
+- **Aucune nouvelle cible, aucun nouveau profil.** Le Dockerfile garde les stages
+  `base`, `slim`, `autonomous` ; le compose garde ses deux profils exclusifs `slim` et
+  `autonomous`. Le stage `autonomous` ajoute l'extra `camoufox`, les bibliotheques
+  systeme de Firefox et le binaire epingle, a cote de `browser` et `uc`.
+- **Commande documentee, inchangee** : `docker compose --profile autonomous up -d
+  --build`.
+- **`kerdoos:slim` reste la seule image sans navigateur.** C'est le seul deploiement
+  ou le tier `camoufox` est indisponible, fail-closed selon le patron 3aeb8a19
+  (Decision 1).
+- **Aucune variable d'activation.** La disponibilite du tier est detectee
+  (Decision 1), jamais declaree.
 
 ### Build deterministe (condition C4)
 La commande `camoufox fetch` du paquet **n'est jamais utilisee**. Selon la revue
@@ -162,6 +228,31 @@ resolution dynamique, pas un epinglage.
 - Taille de l'image **mesuree** sur l'image reelle en tranche T2 (le delta de +1,5 a
   2,5 Go reste une estimation).
 
+### Licence MPL-2.0 du binaire embarque
+
+Camoufox est un fork de Firefox distribue sous MPL-2.0. Lecture d'ingenieur, pas un
+avis juridique :
+
+- **Copyleft par fichier**, pas par projet : l'obligation porte sur les fichiers de
+  Camoufox, pas sur ceux de Kerdoos. La licence du depot n'est pas affectee, et le
+  depot peut rester public sans contrainte supplementaire. **Kerdoos n'apporte aucune
+  modification a Camoufox** ; s'il en apportait un jour, les fichiers modifies
+  resteraient sous MPL-2.0, ce qui est un cout a payer au moment ou la modification
+  serait decidee, pas maintenant.
+- **Publier le depot ne redistribue pas Camoufox** : le depot contient un Dockerfile
+  qui telecharge le binaire au build, pas le binaire. Aucune obligation
+  supplementaire.
+- **Publier une IMAGE construite le redistribue** : joindre alors le texte de la
+  licence MPL-2.0 et les notices de copyright, et pointer les destinataires vers les
+  sources amont **au tag epingle** (le meme que celui du sha256 verifie au build).
+- **Etat de la trace** : la section du `README.md` qui porte cette lecture est
+  **deja sur `main`** (commit 9607172). Il reste du en T2 un fichier `NOTICE`
+  embarque dans l'image (texte de licence, copyright, URL des sources au tag
+  epingle), pour que l'obligation soit tenue par l'artefact lui-meme et pas seulement
+  par le depot.
+- Aucune chaine de publication d'image n'existe aujourd'hui (Decision 2, option D) :
+  l'obligation est donc dormante, et le `NOTICE` la rend tenue d'avance.
+
 ### Variables d'environnement
 - Partagees avec les autres navigateurs : `KERDOOS_BROWSER_MAX_CONCURRENT`,
   `KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS` (Decision 3).
@@ -173,8 +264,7 @@ resolution dynamique, pas un epinglage.
   (jamais un refus) si l'ordre n'est pas respecte, comme pour le tier `browser`.
   Le timeout de navigation est configurable des le depart (regle operateur : rien en
   dur).
-- Aucune variable d'activation en plus du profil : la disponibilite du tier est
-  detectee (Decision 1).
+- Aucune variable d'activation : la disponibilite du tier est detectee (Decision 1).
 
 ## Decision 3 -- Concurrence et memoire : la meme porte que Chromium
 
@@ -192,10 +282,17 @@ Force decisive : une seule porte memoire (ADR 0002 Decision 1). Avec le defaut
 `KERDOOS_BROWSER_MAX_CONCURRENT=1`, le pic est borne par l'instance la plus lourde, soit
 environ 1,26 Go mesure.
 
-- **Note pour l'operateur** (a porter dans `env.example`) : sur l'image camoufox,
-  compter environ 1,3 Go par place (pic mesure 1220 a 1258 Mo), en plus de la base de
-  l'application ; choisir `KERDOOS_BROWSER_MAX_CONCURRENT` selon la RAM libre de la
-  machine. Aucune valeur en dur au-dela du defaut de 1.
+- **Note pour l'operateur** (a porter dans `env.example`, a cote de
+  `KERDOOS_BROWSER_MAX_CONCURRENT=1`) : sur l'image `autonomous`, une place peut
+  desormais couter environ 1,3 Go (pic mesure 1220 a 1258 Mo pour Camoufox, contre
+  642 a 652 Mo pour Chromium), en plus de la base de l'application ; le pic a retenir
+  pour dimensionner est celui du navigateur le plus lourd, puisque la porte est
+  commune. Choisir `KERDOOS_BROWSER_MAX_CONCURRENT` selon la RAM libre de la machine.
+  Aucune valeur en dur au-dela du defaut de 1.
+- Consequence de la livraison par defaut (Decision 2) : ce plafond de RAM par place
+  concerne maintenant **tout** deploiement `autonomous`, plus seulement ceux qui
+  auraient choisi une variante. C'est la contrepartie assumee de la revision
+  operateur.
 - Reversible : si des operateurs montent le plafond et que le melange Chromium/Firefox
   devient un probleme mesure, l'option C se rouvre.
 
@@ -301,9 +398,8 @@ exigees ici des la tranche T1 :
   quand il est atteint, et une decrementation sur tous les chemins.
 - **psutil declare dans l'extra du tier**, et son import protege.
 - **Init en PID 1 dans l'image** (tini) : fait, herite du stage `base` par
-  `autonomous` puis par `autonomous-camoufox` (carte d8b7b8fd, merge 761bf17).
-  Sans init, 4 zombies par fetch Camoufox (mesure) ; la preuve en image reste due
-  en T4.
+  `autonomous` (carte d8b7b8fd, merge 761bf17). Sans init, 4 zombies par fetch
+  Camoufox (mesure) ; la preuve en image reste due en T4.
 - **Acceptation** (T4, dans l'image) : un Firefox fige (SIGSTOP) apres le lancement
   rend un FetchError dans l'echeance, la porte est liberee apres la mort des process,
   aucun process du lancement ne survit a 5 s, et 5 fetches consecutifs laissent
@@ -347,17 +443,29 @@ exigees ici des la tranche T1 :
 | T0 | **FAIT.** Prerequis : d8b7b8fd (tini dans le Dockerfile, cycle de fetch borne avec C1 a C3 de son gate fermes), merge 761bf17 ; 6521bbce (ensemble fige, pas de `create_time`), merge 733715a | -- |
 | T0.5 | **En cours** (carte 5806b7d7). Condition C1 : allowlist de domaines a l'autorite du CONNECT dans `egress_proxy.py`, appliquee au tier `browser` existant ; tests du proxy (hote hors allowlist refuse sans resolution, loopback) | T0 (levee : fait) |
 | T1 | Adaptateur autolycos : extra, import paresseux, zero telechargement (C5 cote code), preferences imposees (C2), garde de contexte (C3), liveness de la Decision 5, registre du routeur, disponibilite paquet + binaire + version, tests unitaires avec un faux Camoufox ; mesure des durees de lancement et de navigation pour fixer les defauts | T0, T0.5 (API du proxy) |
-| T2 | Dockerfile : cible `autonomous-camoufox`, bibliotheques systeme, telechargement deterministe epingle (C4), assertion de version au build (C5), durcissement (Decision 8) ; compose : profil `camoufox` durci ; `env.example` (variables, note de RAM) ; taille d'image mesuree | T0, T1 (l'extra existe dans `uv.lock`) |
-| T3 | Cablage kerdoos : variables dans `get_settings`, WARNING d'ordre, injection par la racine de composition (WebUI et CLI), tests de cablage par racine, indicateur WebUI (barreau `camoufox`, cle `uc` corrigee), catalogue Magalu et MercadoLivre -> `camoufox`, documentation d'exploitation (dont `CLAUDE.md` invariant 6 et `AGENTS.md`) | T1 ; en parallele de T2 |
-| T4 | Tests en image : preuves SSRF de la Decision 4 (dont T4-1 a T4-6), zero telechargement T4-7, durcissement T4-8, reproductibilite T4-9, liveness de la Decision 5, RAM re-mesuree sur l'image reelle, `MagaluParser` sur une vraie page Camoufox (fixture issue du spike), MercadoLivre confirme sur plusieurs echantillons avec son parser (sinon retour a `browser`) | T2, T3 |
+| T2 | Dockerfile, **stage `autonomous` existant, aucune nouvelle cible** : bibliotheques systeme de Firefox, telechargement deterministe epingle (C4), assertion de version au build (C5), durcissement de la Decision 8 (non-root, `HOME` inscriptible, propriete de `/data`), `NOTICE` MPL-2.0 embarque ; compose : durcissement du service `kerdoos-autonomous` deja present, aucun nouveau profil ; `env.example` (variables du tier, note de RAM) ; taille d'image mesuree | T0, T1 (l'extra existe dans `uv.lock`) |
+| T3 | Cablage kerdoos : variables dans `get_settings`, WARNING d'ordre, injection par la racine de composition (WebUI et CLI), tests de cablage par racine, indicateur WebUI (barreau `camoufox` dans `_TIER_LADDER`, nombre de pastilles de la macro `tier()`, tuple d'options du `select` d'ajout de site), catalogue Magalu et MercadoLivre -> `camoufox`, documentation d'exploitation (invariant 6 de `CLAUDE.md`, echelle du `README.md`, `AGENTS.md`) | T1 ; en parallele de T2 |
+| T4 | Tests en image : preuves SSRF de la Decision 4 (dont T4-1 a T4-6, la preuve anti-rebinding comprise), zero telechargement T4-7, durcissement T4-8, reproductibilite T4-9, liveness de la Decision 5, RAM re-mesuree sur l'image reelle, `MagaluParser` sur une vraie page Camoufox (fixture issue du spike), MercadoLivre confirme sur plusieurs echantillons avec son parser (sinon retour a `browser`) | T2, T3 |
 
 Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
 
-## Decision 8 -- Durcissement de l'image camoufox (condition C6)
+## Decision 8 -- Durcissement de l'image `autonomous` (condition C6)
 
-- **Utilisateur non-root** dans la cible `autonomous-camoufox`, avec un `HOME`
-  inscriptible (profil Firefox, cache). La propriete du volume `/data` pour cet
-  utilisateur est a traiter en T2 (le volume est aujourd'hui ecrit par root).
+La revision operateur deplace la portee de cette decision : elle visait une variante
+d'image, elle vise desormais **l'image `autonomous` elle-meme**, qui s'execute en root
+aujourd'hui (ADR 0002, Decision 5, section « Init en PID 1 »). C'est le changement au
+rayon d'action le plus large de cet ADR : il touche aussi les tiers `browser` et `uc`
+deja livres, et la propriete du volume `/data` ecrit par root. Il est indissociable de
+la Decision 2 : embarquer Firefox dans l'image par defaut sans la durcir reviendrait a
+elargir la surface de tous les deploiements.
+
+- **Utilisateur non-root** dans la cible `autonomous`, avec un `HOME` inscriptible
+  (profil Firefox, caches des navigateurs). La **propriete du volume `/data`** pour cet
+  utilisateur est a traiter en T2 : le volume est aujourd'hui ecrit par root, et un
+  deploiement existant porte des fichiers appartenant a root. Si le basculement ne peut
+  pas etre rendu sur, T2 le remonte comme un point de decision plutot que de le forcer.
+  Aucun utilisateur de Kerdoos n'existe (decision operateur), donc aucune procedure de
+  reprise de volume n'a a etre documentee, mais le cas doit etre teste dans l'image.
 - **Sandbox de contenu Firefox active** : aucune variable `MOZ_DISABLE_*SANDBOX` dans
   l'image ni dans le compose. `security.sandbox.content.level` n'est jamais abaisse (ni
   a 0, ni a une valeur reduite), ni par la liste figee de C2, ni par l'appelant.
@@ -374,6 +482,47 @@ Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
 - **Preuve T4-9** : le sha256 verifie au build est egal au digest GitHub de l'asset, et
   un second build produit le meme binaire.
 
+## Decision 9 -- Tier `uc` : deprecie, conserve
+
+Une fois Magalu declare en `camoufox`, plus aucun site du catalogue n'utilise `uc`, et
+le tier est **mesure bloque par Akamai dans le conteneur Linux** (Contexte). La
+question posee a l'operateur etait : le garder, le deprecier ou le retirer ?
+
+### Options
+- **A -- Retirer le tier** (adaptateur, extra, pre-fetch du chromedriver, entree de
+  registre, barreau WebUI). *Gain* : une dependance et une surface de moins dans
+  l'image. *Cout* : suppression d'un adaptateur fonctionnel et de ses tests, et perte
+  de l'option si une version amont le rend a nouveau meilleur. *Reversibilite* :
+  faible, il faudrait le reecrire.
+- **B -- Le deprecier sans le retirer** : code, tests, extra et barreau conserves,
+  aucun site du catalogue, aucune nouvelle fonctionnalite. *Cout* : une surface
+  maintenue sans usage. *Reversibilite* : totale.
+- **C -- Le maintenir a parite** avec les autres tiers (corrections, couverture,
+  evolutions). Cout de maintenance sans benefice mesure aujourd'hui. Rejetee.
+
+### Decision : **B**, par decision operateur
+Citee telle quelle : « Deprecie uc ; on ne sait jamais "demain", il se pourrait qu'une
+mise a jour le rende "meilleure" que Camoufox. »
+
+- **Conserve** : l'adaptateur, ses tests, son extra, son pre-fetch de chromedriver au
+  build (ADR 0002, correction Q-e), sa place de quatrieme barreau de l'echelle, son
+  option dans le `select` d'ajout de site. Retirer l'option du `select` couterait la
+  reversibilite que la depreciation cherche justement a garder.
+- **Deprecie** : aucun site du catalogue livre ne declare `uc` ; aucune nouvelle
+  fonctionnalite, aucune extension de couverture ni de preuve en image ne lui est due
+  par cet ADR. Les corrections de securite ou de liveness qui portent sur la porte
+  commune ou le proxy continuent de s'y appliquer, puisqu'elles ne lui sont pas
+  propres.
+- **Condition de reevaluation** : une version amont de SeleniumBase UC ou de Chromium
+  qui franchit Akamai en conteneur, mesuree comme Camoufox l'a ete. La reevaluation se
+  fait alors sur mesure, pas sur annonce.
+- **Etat de securite (condition C7)** : le pin SSRF du tier `uc` **tient**. Le constat
+  inverse de la premiere revue etait un faux positif, et le defaut reel de troncature
+  des arguments est corrige (carte dde2d243). Restent non testes les IP litterales et
+  les redirections 30x : la depreciation les laisse non testes, ce qui est acceptable
+  tant qu'aucun site ne declare ce tier, et redevient du le jour ou un site le
+  declare.
+
 ---
 
 ## Tracabilite des conditions de securite
@@ -386,35 +535,50 @@ Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
 | C4 | Build deterministe, provenance, secrets de build | Decision 2 (build deterministe) |
 | C5 | Zero telechargement a l'execution, par construction | Decision 1 (disponibilite), Decision 6 |
 | C6 | Durcissement de l'image | Decision 8 |
-| C7 | Correction factuelle sur le pin du tier `uc` | Questions ouvertes (1) |
+| C7 | Correction factuelle sur le pin du tier `uc` | Decision 9 (etat de securite) |
 
 ## Consequences
 
-- **Positives** : Magalu redevient accessible pour l'operateur qui en a besoin, sans
-  alourdir l'image par defaut ; le nouveau tier herite des protections deja mesurees
-  (porte unique, liveness) ; l'allowlist de domaines dans le proxy ferme aussi un trou
-  preexistant du tier `browser`.
-- **Negatives / dettes** : une troisieme cible d'image a maintenir et a re-epingler a
-  chaque release de securite amont ; un pic memoire presque double par place sur cette
-  image ; une dependance tierce MPL-2.0 de plus ; OCSP desactive sur ce tier.
-- **Ce qui ne change pas** : l'image `autonomous` (hors durcissement du proxy commun),
-  la semantique de `KERDOOS_BROWSER_MAX_CONCURRENT`, l'etat a trois valeurs (un echec
-  Camoufox donne INDETERMINATE, un tier absent ignore la source).
+- **Positives** : Magalu redevient accessible sur l'image `autonomous` standard, sans
+  qu'aucun operateur n'ait a choisir une variante ni a connaitre l'existence du tier ;
+  MercadoLivre gagne un chemin d'acces mesure (a confirmer en T4) ; le nouveau tier
+  herite des protections deja mesurees (porte unique, liveness) ; l'allowlist de
+  domaines dans le proxy ferme un trou preexistant du tier `browser` ; l'image
+  `autonomous` passe non-root, ce qu'elle aurait du etre de toute facon.
+- **Negatives / dettes** : environ +1,5 a 2,5 Go (estimation) sur l'image par defaut,
+  pour tous les deploiements `autonomous`, y compris ceux qui ne surveillent aucun
+  site protege ; un pic memoire par place qui passe d'environ 0,65 a environ 1,26 Go ;
+  un binaire de plus a re-epingler a chaque release de securite amont de Firefox ; une
+  dependance tierce MPL-2.0 dans l'image (obligation dormante tant qu'aucune image
+  n'est publiee) ; OCSP desactive sur ce tier ; un tier `uc` conserve sans usage
+  (Decision 9).
+- **Ce qui ne change pas** : le nombre de cibles d'image et de profils compose (deux et
+  deux) ; la commande de demarrage ; l'image `kerdoos:slim` ; la semantique de
+  `KERDOOS_BROWSER_MAX_CONCURRENT` ; l'etat a trois valeurs (un echec Camoufox donne
+  INDETERMINATE, un tier absent ignore la source sans ScrapeRecord) ; l'absence
+  d'escalade automatique entre tiers.
+- **Ce qui n'est pas fait et ne le sera pas** : aucune migration ni bascule d'un
+  `config.db` existant. Il n'y a aucun utilisateur de Kerdoos (decision operateur) : le
+  catalogue livre suffit, et ecrire un plan de migration pour une base qui n'existe
+  pas serait du code mort.
 
-## Questions ouvertes pour l'operateur
+## Questions ouvertes
 
-1. **Avenir du tier `uc`** : une fois Magalu declare en `camoufox`, plus aucun site du
-   catalogue n'utilise `uc`. Son pin SSRF **tient** (le constat inverse etait un faux
-   positif, corrige, et le defaut reel de troncature des arguments est corrige par la
-   carte dde2d243) ; restent non testes les IP litterales et les redirections 30x. Le
-   garder, le deprecier ou le retirer ?
-2. **Distribution de l'image** : si l'image camoufox est un jour publiee ou transmise a
-   un tiers, la licence MPL-2.0 impose d'y joindre sa notice et l'acces aux sources de
-   Camoufox. Est-ce envisage ?
-3. **Bascule d'un `config.db` existant** : le catalogue livre declare `camoufox` pour
-   Magalu, mais une base deja peuplee garde `uc` tant que l'operateur ne repasse pas
-   par la porte admin du catalogue. Faut-il automatiser cette bascule, ou la documenter
-   comme une etape manuelle ?
+Les trois questions posees a l'operateur dans la version precedente sont **tranchees**
+(Decision 9 pour `uc`, Decision 2 pour la licence, Decisions 1 et 8 pour l'absence de
+migration). Restent des inconnues techniques, toutes bornees a une tranche et sans
+decision operateur requise :
+
+1. **Basculement de `autonomous` en non-root avec le volume `/data`** (T2) : si le
+   durcissement ne peut pas etre rendu sur sans casser l'ecriture du volume, T2 le
+   remonte comme point de decision au lieu de le forcer.
+2. **Cohabitation de Playwright (dependance de Camoufox) et de patchright** dans la
+   meme image : presumee sans conflit (noms de module distincts), a verifier par la
+   resolution de `uv.lock` en T1 et par les tests en image en T4.
+3. **Routage de MercadoLivre** : pose sur un seul echantillon, confirme ou infirme en
+   T4 ; retour a `browser` si T4 n'y confirme pas Camoufox.
+4. **Taille reelle de l'image** : l'estimation de +1,5 a 2,5 Go n'est pas une mesure ;
+   T2 la remplace par la mesure.
 
 ## Changelog
 
@@ -435,3 +599,19 @@ Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
 - **2026-09-11 -- T0 fait**. Cartes d8b7b8fd (merge 761bf17) et 6521bbce (merge
   733715a) mergees : tini en PID 1 dans l'image, cycle de fetch `browser` borne. La
   dependance de T0.5 est levee ; T0.5 est en cours (carte 5806b7d7).
+- **2026-09-12 -- REVISION operateur : camoufox par defaut**. Le fichier est renomme
+  `0004-tier-camoufox-par-defaut.md`. Camoufox est livre et actif d'office dans
+  `kerdoos:autonomous` : plus de cible `autonomous-camoufox`, plus de profil compose
+  `camoufox`, plus de commande d'activation (Decision 2, option B). La licence
+  MPL-2.0 est traitee dans la Decision 2 (obligation dormante, `NOTICE` du en T2 ; la
+  section du `README.md` est deja sur `main`, commit 9607172). Le tier `uc` est
+  deprecie et conserve (**Decision 9**, nouvelle), ce qui ferme la condition C7. Le
+  durcissement de la Decision 8 porte desormais sur l'image `autonomous` elle-meme,
+  qui tourne en root. Aucune migration de `config.db` : il n'existe aucun
+  utilisateur. Les trois questions operateur sont fermees ; les questions ouvertes
+  restantes sont des inconnues techniques bornees aux tranches. L'echelle
+  d'escalade de l'invariant 6 est enoncee explicitement sous la Decision 1
+  (`http` < `tls` < `browser` < `uc` deprecie < `camoufox`), et sa reprise dans
+  `CLAUDE.md` et `README.md` est portee par la tranche T3. La correction de la cle
+  `uc` de l'indicateur WebUI, encore due dans la version precedente, est faite sur
+  `main` (commit ffc2fb8).

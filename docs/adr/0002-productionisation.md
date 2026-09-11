@@ -284,9 +284,11 @@ partage (deps), deux targets finaux -> deux tags :
 
 Pas de sur-decoupage (pas de 3e tier base->slim->autonomous) : le plus petit
 changement, deja valide au gate Phase 0, conforme ADR 0001 S8. **Amende par
-[ADR 0004](./0004-tier-camoufox-image-opt-in.md)** : une troisieme cible opt-in,
-`autonomous-camoufox`, construite a partir de `autonomous` ; l'image
-`autonomous` par defaut reste inchangee.
+[ADR 0004](./0004-tier-camoufox-par-defaut.md)** : les deux cibles restent les
+seules, et c'est le CONTENU d'`autonomous` qui change. Elle embarque le tier
+`camoufox` (Firefox anti-detection) par defaut, ce qui l'alourdit d'environ 1,5
+a 2,5 Go (estimation, mesure due en T2) et porte le pic memoire par place a
+environ 1,26 Go (mesure). `kerdoos:slim` reste l'image sans navigateur.
 
 ### Init en PID 1 (carte d8b7b8fd)
 - tini est installe dans le stage `base` et sert d'`ENTRYPOINT`
@@ -296,7 +298,10 @@ changement, deja valide au gate Phase 0, conforme ADR 0001 S8. **Amende par
   zygotes zombies a chaque fetch `browser`, meme reussi) ;
 - l'image porte cette garantie seule : le compose n'a plus d'`init: true` ;
 - `kerdoos:slim` s'execute en non-root (`USER 10001`), `kerdoos:autonomous` en
-  root.
+  root. **Amende par [ADR 0004](./0004-tier-camoufox-par-defaut.md) Decision 8** :
+  `kerdoos:autonomous` passe non-root (tranche T2 de cet ADR), avec un `HOME`
+  inscriptible et la propriete du volume `/data` a traiter. Tant que T2 n'est pas
+  livree, la description ci-dessus reste l'etat reel de l'image.
 
 ### Correction Q-e -- pre-fetch de l'undetected-chromedriver au build
 Le tier `uc` (seleniumbase) telecharge son `undetected-chromedriver` **au runtime**
