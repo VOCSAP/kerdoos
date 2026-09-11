@@ -12,11 +12,14 @@ elsewhere, not re-tested here).
 
 from __future__ import annotations
 
+import logging
 import os
 import unittest
+from unittest import mock
 
 from kerdoos.config import (
     DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS,
+    DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS,
     DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
     DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
     DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS,
@@ -46,6 +49,7 @@ _SMTP_ENV_VARS = (
     "KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS",
     "KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP",
     "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
+    "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS",
 )
 
 
@@ -717,6 +721,75 @@ class UcOrphanSweepDelayUpperBoundTest(_SettingsTestBase):
         self.assertGreater(settings.uc_orphan_sweep_delay_seconds, 0)
         self.assertTrue(
             any("clamping" in msg for msg in cm.output), cm.output)
+
+
+class BrowserFetchTimeoutFloorTest(_SettingsTestBase):
+    """Roadmap d8b7b8fd: a malformed KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS
+    warns and floors to the default instead of crashing at settings-read
+    time, and an unset one uses the browser tier's own default
+    (browser.BROWSER_FETCH_TIMEOUT_SECONDS)."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.browser_fetch_timeout_seconds,
+            DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS"] = "75"
+        settings = get_settings()
+        self.assertEqual(settings.browser_fetch_timeout_seconds, 75.0)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.browser_fetch_timeout_seconds,
+                    DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS)
+                self.assertTrue(
+                    any("KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS" in msg
+                        for msg in cm.output), cm.output)
+
+
+class BrowserFetchTimeoutOrderingWarningTest(_SettingsTestBase):
+    """Roadmap d8b7b8fd: an out-of-order KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS
+    (vs. the launch+navigation budget it wraps, or vs.
+    KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS) WARNS but never refuses to
+    start -- a misconfigured deployment must still boot."""
+
+    def test_fetch_timeout_below_launch_plus_nav_budget_warns(self) -> None:
+        os.environ["KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS"] = "40"
+        os.environ["KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS"] = "50"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.browser_fetch_timeout_seconds, 50.0)
+        self.assertTrue(
+            any("not above the browser tier's own launch" in msg
+                for msg in cm.output), cm.output)
+
+    def test_fetch_timeout_above_acquire_timeout_warns(self) -> None:
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "60"
+        os.environ["KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS"] = "90"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.browser_fetch_timeout_seconds, 90.0)
+        self.assertTrue(
+            any("not below KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS" in msg
+                for msg in cm.output), cm.output)
+
+    def test_well_ordered_values_do_not_warn(self) -> None:
+        os.environ["KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS"] = "20"
+        os.environ["KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS"] = "90"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+        spy.assert_not_called()
 
 
 if __name__ == "__main__":

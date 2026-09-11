@@ -14,6 +14,9 @@ from __future__ import annotations
 import importlib.util
 import os
 import socket
+import subprocess
+import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -36,6 +39,16 @@ _POLICY = DomainPolicy(frozenset({
 def _addrinfo(ip: str, port: int = 443):
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
     return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))]
+
+
+def _marker_from_kwargs(kwargs: dict) -> str:
+    # Mirrors how a real Chrome process receives the fetch-id: as a literal
+    # entry of the args list _run() injects, which a fake factory must
+    # thread into its own spawned process's argv the same way patchright
+    # threads it into Chrome's argv.
+    return next(
+        arg for arg in kwargs["args"]
+        if arg.startswith(browser._LAUNCH_ID_ARG_PREFIX))
 
 
 class LooksChallengedTest(unittest.TestCase):
@@ -192,8 +205,12 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         # pin flag; the proxy does the pinning at the network layer).
         proxy_server = chromium.launch_kwargs["proxy"]["server"]
         self.assertTrue(proxy_server.startswith("http://127.0.0.1:"))
-        # No egress-weakening launch flags survive the scrub.
-        self.assertEqual(chromium.launch_kwargs["args"], [])
+        # No egress-weakening launch flags survive the scrub -- only the
+        # per-fetch --kerdoos-launch-id marker (roadmap d8b7b8fd) remains.
+        self.assertEqual(len(chromium.launch_kwargs["args"]), 1)
+        self.assertTrue(
+            chromium.launch_kwargs["args"][0].startswith(
+                browser._LAUNCH_ID_ARG_PREFIX))
         # No host-resolver pin re-introduced by the patchright swap.
         self.assertNotIn("proxy_bypass", chromium.launch_kwargs)
         for a in chromium.launch_kwargs["args"]:
@@ -371,6 +388,285 @@ class BrowserLaunchTimeoutWiringTest(unittest.TestCase):
         gate._semaphore.release()
 
 
+class BrowserLaunchGenericExceptionTest(unittest.TestCase):
+    """Roadmap 1d72b1e5 NIT (f): a launch failure that is NOT a patchright
+    timeout must propagate as the SAME exception object (type, cause,
+    traceback untouched), and the gate must still be released -- proven
+    WITHOUT patchright needing to be installed at all, since the contract
+    under test is "anything _is_patchright_launch_timeout doesn't recognize
+    is re-raised unchanged", not patchright's own behavior.
+    """
+
+    def test_arbitrary_exception_propagates_unchanged_and_releases_gate(
+            self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        original = RuntimeError("boom -- launch corrupted profile dir")
+        chromium = _FakeChromium(browser_obj=None, error=original)
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                fetcher = browser.BrowserFetcher(_POLICY, gate=gate)
+                with self.assertRaises(RuntimeError) as ctx:
+                    fetcher.fetch("https://mercadolivre.com.br/p/MLB1")
+        self.assertIs(ctx.exception, original)
+
+        acquired_promptly = gate._semaphore.acquire(timeout=1.0)
+        self.assertTrue(acquired_promptly, "gate slot was not released")
+        gate._semaphore.release()
+
+
+class _HangingBrowser:
+    """A launched Chromium standing in: new_page() never returns (mirrors
+    the roadmap d8b7b8fd measurement -- a real frozen Chromium blocks
+    new_page() indefinitely), after spawning a REAL child process tagged
+    with the fetch's own marker so the kill mechanism is proven against a
+    genuine OS process, not asserted from reading psutil's API alone.
+    """
+
+    def __init__(self, marker: str, spawned: list) -> None:
+        self._marker = marker
+        self._spawned = spawned
+        self.closed = False
+
+    def new_page(self):  # noqa: ANN201
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", self._marker])
+        self._spawned.append(proc)
+        threading.Event().wait()  # never set: blocks this thread forever
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _HangingThenUnblockedBrowser:
+    """Simulates a real frozen Chromium's pipe read: new_page() blocks until
+    `unblock_event` is set (standing in for the OS finally reporting the
+    killed process, well after the deadline already fired and the gate was
+    already released), then raises -- letting _run()'s OWN abandonment
+    cleanup branch run LATE, exactly the "passe différée" scenario measured
+    on the sibling uc-tier card 6521bbce.
+    """
+
+    def __init__(self, marker: str, spawned: list,
+                 unblock_event: threading.Event) -> None:
+        self._marker = marker
+        self._spawned = spawned
+        self._unblock_event = unblock_event
+
+    def new_page(self):  # noqa: ANN201
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", self._marker])
+        self._spawned.append(proc)
+        self._unblock_event.wait(timeout=10)
+        raise RuntimeError("connection reset (simulated post-kill unblock)")
+
+    def close(self) -> None:
+        pass
+
+
+class BrowserFetchDeferredCleanupTest(unittest.TestCase):
+    """Roadmap d8b7b8fd, lesson measured on sibling card 6521bbce: a
+    deferred cleanup pass (the abandoned thread's OWN kill, running long
+    after the deadline already fired and the gate was already released)
+    must stay scoped to its OWN marker and never touch a DIFFERENT,
+    concurrent-or-later fetch's live process, even with max_concurrent=1.
+    """
+
+    def test_late_cleanup_from_a_previous_fetch_spares_the_next_fetch(
+            self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        unblock_event = threading.Event()
+        prev_spawned: list = []
+
+        chromium_prev = _FakeChromium(browser_obj=None)
+
+        def _launch_prev(**kwargs):  # noqa: ANN003
+            chromium_prev.launch_kwargs = kwargs
+            marker = _marker_from_kwargs(kwargs)
+            return _HangingThenUnblockedBrowser(
+                marker, prev_spawned, unblock_event)
+
+        chromium_prev.launch = _launch_prev
+        fake_pw_prev = lambda: _FakePW(chromium_prev)  # noqa: E731
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_pw_prev), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                fetcher_prev = browser.BrowserFetcher(
+                    _POLICY, gate=gate, fetch_timeout_seconds=0.2)
+                with self.assertRaises(FetchError):
+                    fetcher_prev.fetch("https://mercadolivre.com.br/p/prev")
+        # Deadline already fired, gate already released -- prev's own
+        # process was already killed by the MAIN thread's timeout branch.
+        prev_spawned[0].wait(timeout=5)
+        self.assertIsNotNone(
+            prev_spawned[0].poll(), "prev's own process was not killed")
+
+        # A NEXT fetch starts and succeeds normally, on the SAME gate slot
+        # prev's release just freed -- its own process must stay alive
+        # throughout the deferred cleanup that follows.
+        next_spawned: list = []
+        next_page = _FakePage("<html>ok</html>", 200)
+        chromium_next = _FakeChromium(browser_obj=None)
+
+        def _launch_next(**kwargs):  # noqa: ANN003
+            chromium_next.launch_kwargs = kwargs
+            marker = _marker_from_kwargs(kwargs)
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)", marker])
+            next_spawned.append(proc)
+            return _FakeBrowser(next_page)
+
+        chromium_next.launch = _launch_next
+        fake_pw_next = lambda: _FakePW(chromium_next)  # noqa: E731
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_pw_next), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                fetcher_next = browser.BrowserFetcher(_POLICY, gate=gate)
+                fetcher_next.fetch("https://mercadolivre.com.br/p/next")
+
+        try:
+            # NOW let prev's abandoned thread finally "notice" the kill
+            # (simulated) and run its own late, deferred cleanup pass --
+            # well after the next fetch's own process already exists.
+            unblock_event.set()
+            time.sleep(0.5)
+            self.assertIsNone(
+                next_spawned[0].poll(),
+                "the next fetch's live process was killed by a deferred, "
+                "differently-marked cleanup pass")
+        finally:
+            for proc in prev_spawned + next_spawned:
+                if proc.poll() is None:
+                    proc.kill()
+
+
+class BrowserFetchFreezeWiringTest(unittest.TestCase):
+    """Roadmap d8b7b8fd: a step AFTER the launch (new_page, in this fake --
+    the real measurement froze a genuine Chromium the same way) that never
+    returns must still raise FetchError within fetch_timeout_seconds,
+    release the gate only after cleanup, and kill ONLY its own process
+    tree, never a concurrent unrelated fetch's.
+    """
+
+    def _hanging_chromium(self, spawned: list) -> _FakeChromium:
+        chromium = _FakeChromium(browser_obj=None)
+
+        def _launch(**kwargs):  # noqa: ANN003
+            chromium.launch_kwargs = kwargs
+            marker = _marker_from_kwargs(kwargs)
+            return _HangingBrowser(marker, spawned)
+
+        chromium.launch = _launch  # noqa: SLF001 -- test-only override
+        return chromium
+
+    def _fetch_with_frozen_step(self, gate, spawned: list,
+                                 fetch_timeout_seconds: float = 0.3):
+        chromium = self._hanging_chromium(spawned)
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        raised = None
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                fetcher = browser.BrowserFetcher(
+                    _POLICY, gate=gate,
+                    fetch_timeout_seconds=fetch_timeout_seconds)
+                try:
+                    fetcher.fetch("https://mercadolivre.com.br/p/MLB1")
+                except FetchError as exc:
+                    raised = exc
+        return chromium, raised
+
+    def test_frozen_step_becomes_a_fetch_error_within_the_deadline(
+            self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        t0 = time.monotonic()
+        _, raised = self._fetch_with_frozen_step(gate, spawned)
+        elapsed = time.monotonic() - t0
+        self.assertIsInstance(raised, FetchError)
+        self.assertLess(elapsed, 5.0)  # bounded by the 0.3s deadline
+        spawned[0].wait(timeout=5)
+
+    def test_gate_released_after_a_frozen_fetch(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        self._fetch_with_frozen_step(gate, spawned)
+        acquired_promptly = gate._semaphore.acquire(timeout=1.0)
+        self.assertTrue(acquired_promptly, "gate slot was not released")
+        gate._semaphore.release()
+        spawned[0].wait(timeout=5)
+
+    def test_no_zombie_process_survives_a_frozen_fetch(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        self._fetch_with_frozen_step(gate, spawned)
+        proc = spawned[0]
+        proc.wait(timeout=5)
+        self.assertIsNotNone(
+            proc.poll(), "the spawned child process was not killed")
+
+    def test_frozen_fetch_kills_only_its_own_process_tree(self) -> None:
+        gate = BrowserGate(max_concurrent=2)
+        own_spawned: list = []
+        other_spawned: list = []
+        other_marker_holder: dict = {}
+
+        def _other_launch() -> None:
+            time.sleep(0.1)  # starts inside the frozen fetch's window
+            marker = f"{browser._LAUNCH_ID_ARG_PREFIX}deadbeef"
+            other_marker_holder["marker"] = marker
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)", marker])
+            other_spawned.append(proc)
+
+        other_thread = threading.Thread(target=_other_launch, daemon=True)
+        other_thread.start()
+        try:
+            self._fetch_with_frozen_step(gate, own_spawned)
+            other_thread.join(timeout=5)
+            self.assertFalse(other_thread.is_alive())
+            own_spawned[0].wait(timeout=5)
+            self.assertIsNotNone(
+                own_spawned[0].poll(),
+                "the frozen fetch's own process was not killed")
+            self.assertIsNone(
+                other_spawned[0].poll(),
+                "an unrelated concurrent process was killed")
+        finally:
+            for proc in own_spawned + other_spawned:
+                if proc.poll() is None:
+                    proc.kill()
+
+    def test_ceiling_refuses_new_fetches_without_launching(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        with mock.patch.object(
+            browser, "_abandoned_fetch_thread_count",
+            browser.MAX_ABANDONED_FETCH_THREADS,
+        ):
+            with mock.patch.object(safety.socket, "getaddrinfo",
+                                   return_value=_addrinfo("104.18.0.1")):
+                with mock.patch.object(browser, "_load_playwright") as load_pw:
+                    with self.assertRaises(FetchError):
+                        browser.BrowserFetcher(_POLICY, gate=gate).fetch(
+                            "https://mercadolivre.com.br/p/MLB1")
+                    load_pw.assert_not_called()
+
+
 _HAS_POSIX_SHELL = os.name == "posix" and Path("/bin/sh").exists()
 _NEUTRAL_POLICY = DomainPolicy(frozenset({"example.com"}))
 
@@ -435,6 +731,81 @@ class RealBrowserLaunchTimeoutTest(unittest.TestCase):
         self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
 
 
+class RealBrowserFreezeTest(unittest.TestCase):
+    """Roadmap d8b7b8fd acceptance test: a REAL Chromium (patchright's own
+    bundled binary, not an executable_path substitute), frozen with SIGSTOP
+    right after a successful launch(), must still make fetch() raise
+    FetchError within fetch_timeout_seconds, release the gate only after
+    cleanup, and leave zero survivors -- the exact scenario measured
+    (45s observation, no return, no exception) before this fix existed.
+    POSIX only (SIGSTOP); runs for real inside the autonomous image.
+    """
+
+    def setUp(self) -> None:
+        if _HAS_PATCHRIGHT and _HAS_POSIX_SHELL:
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but patchright or a POSIX "
+                "shell is unavailable -- run inside the autonomous image")
+        self.skipTest(
+            "needs patchright and a POSIX shell (autonomous image), not "
+            "just patchright")
+
+    def test_frozen_chromium_raises_fetch_error_releases_gate_no_leftover(
+            self) -> None:
+        import signal
+
+        import psutil
+        from patchright.sync_api import BrowserType
+
+        original_launch = BrowserType.launch
+        before = {p.pid for p in psutil.Process().children(recursive=True)}
+
+        def _patched_launch(self_bt, **kwargs):  # noqa: ANN001, ANN003
+            result = original_launch(self_bt, **kwargs)
+            # Freeze the newly-launched browser's own top-level OS process
+            # (not a zygote/renderer/gpu child) right after launch() itself
+            # succeeds, so every call the adapter makes AFTER this point
+            # hangs -- exactly what was measured against a real Chromium.
+            candidates = [p for p in psutil.Process().children(recursive=True)
+                          if p.pid not in before]
+            for p in candidates:
+                try:
+                    cmdline = " ".join(p.cmdline())
+                    name = (p.name() or "").lower()
+                except psutil.Error:
+                    continue
+                if "--type=" in cmdline:
+                    continue
+                if "chrome" in name or "headless" in cmdline:
+                    os.kill(p.pid, signal.SIGSTOP)
+                    break
+            return result
+
+        gate = BrowserGate(max_concurrent=1)
+        with mock.patch.object(BrowserType, "launch", _patched_launch), \
+             mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            fetcher = browser.BrowserFetcher(
+                _NEUTRAL_POLICY, gate=gate, fetch_timeout_seconds=5.0)
+            t0 = time.monotonic()
+            with self.assertRaises(FetchError):
+                fetcher.fetch("https://example.com/")
+            elapsed = time.monotonic() - t0
+        # Bounded by the 5s deadline, not an indefinite hang.
+        self.assertLess(elapsed, 20.0)
+
+        acquired_promptly = gate._semaphore.acquire(timeout=1.0)
+        self.assertTrue(acquired_promptly, "gate slot was not released")
+        gate._semaphore.release()
+
+        time.sleep(1.0)
+        leftover = [p for p in psutil.Process().children(recursive=True)
+                    if p.pid not in before and p.is_running()]
+        self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
+
+
 class StaticRouterBrowserLaunchTimeoutTest(unittest.TestCase):
     """Roadmap b3213f3c: KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS is injected
     by the kerdoos composition root through StaticRouter/_make_browser --
@@ -458,6 +829,33 @@ class StaticRouterBrowserLaunchTimeoutTest(unittest.TestCase):
         router = StaticRouter(_POLICY, browser_launch_timeout_seconds=5.0)
         http_fetcher = router.select("http")
         self.assertEqual(http_fetcher.method_name, "http")
+
+
+class StaticRouterBrowserFetchTimeoutTest(unittest.TestCase):
+    """Roadmap d8b7b8fd: KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS is injected
+    by the kerdoos composition root through StaticRouter/_make_browser --
+    never read by autolycos itself (invariant 2).
+    """
+
+    def test_injected_value_reaches_the_built_browser_fetcher(self) -> None:
+        router = StaticRouter(_POLICY, browser_fetch_timeout_seconds=42.0)
+        fetcher = router.select("browser")
+        self.assertEqual(fetcher._fetch_timeout_seconds, 42.0)
+
+    def test_no_value_injected_keeps_the_tier_s_own_default(self) -> None:
+        router = StaticRouter(_POLICY)
+        fetcher = router.select("browser")
+        self.assertEqual(
+            fetcher._fetch_timeout_seconds,
+            browser.BROWSER_FETCH_TIMEOUT_SECONDS)
+
+    def test_both_browser_overrides_apply_together(self) -> None:
+        router = StaticRouter(
+            _POLICY, browser_launch_timeout_seconds=7.0,
+            browser_fetch_timeout_seconds=42.0)
+        fetcher = router.select("browser")
+        self.assertEqual(fetcher._launch_timeout_seconds, 7.0)
+        self.assertEqual(fetcher._fetch_timeout_seconds, 42.0)
 
 
 if __name__ == "__main__":

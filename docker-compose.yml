@@ -34,6 +34,16 @@ services:
       target: slim
     restart: unless-stopped
     stop_grace_period: 30s
+    # Roadmap d8b7b8fd: the Dockerfile CMD execs uvicorn directly as PID 1
+    # (no init process). Measured: patchright's Chromium leaves 2 zombie
+    # zygote children behind after EVERY browser-tier fetch, even a normal,
+    # successful one -- PID 1 never reaps them, so the count grows without
+    # bound (2, 4, 6, 8, 10 confirmed over 5 fetches). `init: true` uses
+    # Docker's own tini-based init as PID 1 instead, which reaps orphaned
+    # zombies -- confirmed (same probe) this drops the count to 0 after
+    # every fetch. Harmless on the slim profile (no Chromium, no zombies to
+    # reap), kept symmetric with autonomous below.
+    init: true
     env_file:
       - .env
     volumes:
@@ -48,6 +58,7 @@ services:
       target: autonomous
     restart: unless-stopped
     stop_grace_period: 30s
+    init: true  # roadmap d8b7b8fd -- see kerdoos-slim above, reaps zygote zombies
     env_file:
       - .env
     volumes:

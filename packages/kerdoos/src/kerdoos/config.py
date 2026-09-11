@@ -91,6 +91,25 @@ no upper bound of its own: _safe_uc_orphan_sweep_delay clamps it (with a
 warning) so a single timed-out launch cannot occupy the gate for as long as
 KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS, same discipline as digest.factory.
 _safe_smtp_timeout.
+
+KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS (roadmap d8b7b8fd): bounds the WHOLE
+browser-tier launch-to-close cycle (BrowserFetcher's fetch_timeout_seconds),
+not just the launch -- new_page/apply_stealth_sync/page.content/
+browser.close accept no timeout of their own and a real frozen Chromium
+measured to block them indefinitely. Same floor-with-warning discipline and
+StaticRouter injection path. get_settings() also WARNS (never refuses --a
+misconfigured deployment must still start) when this value is not
+comfortably above browser_launch_timeout_seconds + the browser tier's own
+navigation timeout, or not below browser_acquire_timeout_seconds: either
+ordering violation degrades other waiting callers instead of failing loud
+at boot.
+
+KERDOOS_BROWSER_MAX_ABANDONED_FETCHES (roadmap d8b7b8fd): the ceiling on
+browser-tier fetches abandoned at browser_fetch_timeout_seconds whose
+process tree could not be confirmed dead, past which new browser fetches
+are refused outright rather than launching another Chromium on top of an
+unbounded pile of stuck ones. Same floor-with-warning discipline and
+StaticRouter injection path; each refusal is also logged at ERROR.
 """
 
 from __future__ import annotations
@@ -105,7 +124,9 @@ from typing import TypeVar
 # kerdoos may import autolycos (composition root -> tool), never the reverse
 # (invariant 2) -- this is the ALLOWED direction.
 from autolycos.adapters.browser import (
+    BROWSER_FETCH_TIMEOUT_SECONDS as _BROWSER_TIER_FETCH_TIMEOUT_SECONDS,
     BROWSER_LAUNCH_TIMEOUT_SECONDS as _BROWSER_TIER_LAUNCH_TIMEOUT_SECONDS,
+    NAV_TIMEOUT_MS as _BROWSER_TIER_NAV_TIMEOUT_MS,
 )
 from autolycos.adapters.uc import (
     ORPHAN_SWEEP_DELAY_SECONDS as _UC_TIER_ORPHAN_SWEEP_DELAY_SECONDS,
@@ -211,6 +232,11 @@ DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS = float(
 DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS = float(
     _UC_TIER_ORPHAN_SWEEP_DELAY_SECONDS)
 
+# Roadmap d8b7b8fd: single source of truth shared with the browser tier
+# itself (same rationale as DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS above).
+DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS = float(
+    _BROWSER_TIER_FETCH_TIMEOUT_SECONDS)
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -241,6 +267,7 @@ class Settings:
     login_rate_limit_max_attempts: int
     login_rate_limit_row_cap: int
     uc_orphan_sweep_delay_seconds: float
+    browser_fetch_timeout_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -331,13 +358,67 @@ def _safe_uc_orphan_sweep_delay(
     return clamped
 
 
+def _warn_if_browser_fetch_timeout_out_of_order(
+    browser_fetch_timeout_seconds: float,
+    browser_launch_timeout_seconds: float,
+    browser_acquire_timeout_seconds: float,
+) -> None:
+    """Roadmap d8b7b8fd: WARNS (never refuses) when
+    KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS is not comfortably above the
+    launch + navigation budget it wraps, or not below
+    KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS -- either ordering violation
+    degrades OTHER waiting callers instead of failing loud at boot, so a
+    deployment must still start with the misconfigured value rather than
+    crash. get_settings() may be called many times per process (e.g. once
+    per request in some interfaces); each of the two conditions below warns
+    at most once per process, not once per call."""
+    global _browser_fetch_timeout_below_launch_warned
+    global _browser_fetch_timeout_above_acquire_warned
+    nav_seconds = _BROWSER_TIER_NAV_TIMEOUT_MS / 1000
+    min_expected = browser_launch_timeout_seconds + nav_seconds
+    if (browser_fetch_timeout_seconds <= min_expected
+            and not _browser_fetch_timeout_below_launch_warned):
+        logger.warning(
+            "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=%s is not above the "
+            "browser tier's own launch (%.1fs) + navigation (%.1fs) budget "
+            "(%.1fs) -- a fetch could be abandoned before the launch or "
+            "navigation timeout it wraps ever gets a chance to fire.",
+            browser_fetch_timeout_seconds, browser_launch_timeout_seconds,
+            nav_seconds, min_expected)
+        _browser_fetch_timeout_below_launch_warned = True
+    if (browser_fetch_timeout_seconds >= browser_acquire_timeout_seconds
+            and not _browser_fetch_timeout_above_acquire_warned):
+        logger.warning(
+            "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=%s is not below "
+            "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- another caller "
+            "waiting for the browser gate could time out its own wait "
+            "before this fetch ever abandons its stuck launch and frees "
+            "the gate.", browser_fetch_timeout_seconds,
+            browser_acquire_timeout_seconds)
+        _browser_fetch_timeout_above_acquire_warned = True
+
+
+_browser_fetch_timeout_below_launch_warned = False
+_browser_fetch_timeout_above_acquire_warned = False
+
+
 def get_settings() -> Settings:
     uc_launch_timeout_seconds = _env_number(
         "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
         DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    browser_launch_timeout_seconds = _env_number(
+        "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS",
+        DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
     browser_acquire_timeout_seconds = _env_number(
         "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
-        float(DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS), float, lambda v: v > 0)
+        float(DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS), float,
+        lambda v: v > 0)
+    browser_fetch_timeout_seconds = _env_number(
+        "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS",
+        DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    _warn_if_browser_fetch_timeout_out_of_order(
+        browser_fetch_timeout_seconds, browser_launch_timeout_seconds,
+        browser_acquire_timeout_seconds)
     return Settings(
         session_secret=os.environ.get("KERDOOS_SESSION_SECRET"),
         config_db=os.environ.get("KERDOOS_CONFIG_DB", "config.db"),
@@ -388,9 +469,8 @@ def get_settings() -> Settings:
             "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
             DEFAULT_RUN_NOW_COOLDOWN_SECONDS, float, lambda v: v >= 0),
         uc_launch_timeout_seconds=uc_launch_timeout_seconds,
-        browser_launch_timeout_seconds=_env_number(
-            "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS",
-            DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
+        browser_launch_timeout_seconds=browser_launch_timeout_seconds,
+        browser_fetch_timeout_seconds=browser_fetch_timeout_seconds,
         login_rate_limit_window_seconds=_env_number(
             "KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS",
             DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS, float, lambda v: v > 0),
