@@ -146,6 +146,9 @@ RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc
 # versions match at BUILD time, through UcFetcher's own runtime resolver.
 # LAST instruction of this stage on purpose: it must run under the stage's
 # FINAL effective user, so it stays HOME-sensitive to any future USER change.
+# Bare redeclare (no new default): keeps the ARG from Decision 5 above in
+# scope for this instruction's shell substitution.
+ARG UC_DRIVER_SHA256
 RUN set -eu; \
     CHROME_BIN=$(python3 -c \
       "from autolycos.adapters.uc import _find_patchright_chromium as f; print(f() or '')"); \
@@ -169,4 +172,6 @@ RUN set -eu; \
       echo "BUILD FAIL: chromium major $CHROME_MAJOR (patchright, $CHROME_VER) != chromedriver major $CHROMEDRIVER_MAJOR ($CHROMEDRIVER_VER) -- the copied chromedriver drifted from uc_driver (ADR 0002 Decision 5)." >&2; \
       exit 1; \
     fi; \
-    echo "OK: chromium major $CHROME_MAJOR matches uc_driver major $UC_MAJOR and chromedriver major $CHROMEDRIVER_MAJOR"
+    echo "${UC_DRIVER_SHA256}  $UC_DRIVER_BIN" | sha256sum -c -; \
+    echo "${UC_DRIVER_SHA256}  $CHROMEDRIVER_BIN" | sha256sum -c -; \
+    echo "OK: chromium major $CHROME_MAJOR matches uc_driver major $UC_MAJOR and chromedriver major $CHROMEDRIVER_MAJOR, both sha256-verified on final bytes"
