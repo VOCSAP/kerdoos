@@ -37,8 +37,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
@@ -64,19 +65,94 @@ class _RotatingSendExecutor:
     after a stuck send: callers share ONE instance of this wrapper across
     ticks, so rotating `.current` is visible to everyone holding the
     wrapper, unlike a bare ThreadPoolExecutor reference a callee has no way
-    to reseat in its caller's scope."""
+    to reseat in its caller's scope.
+
+    roadmap 3c0b1c80 (b): a retired pool's orphaned thread can outlive the
+    rotation that replaced it, and nothing bounded how many could pile up
+    over this executor's unboundedly long lifetime (run_evaluator_loop
+    shares ONE instance for as long as the process runs). `can_submit()`
+    refuses a new send once too many retired pools still have a live
+    (not-yet-finished) orphan; `rotate()` tracks each retirement against
+    the future that timed out so a later `can_submit()` can prune the ones
+    that have since completed."""
 
     def __init__(self, max_workers: int) -> None:
         self._max_workers = max_workers
         self.current = ThreadPoolExecutor(max_workers=max_workers)
+        self._retired: list[tuple[ThreadPoolExecutor, Future]] = []
+        self._max_live_orphans = max_workers * 3
 
-    def rotate(self) -> None:
+    def _prune_retired(self) -> None:
+        still_live = []
+        for pool, orphan_future in self._retired:
+            if orphan_future.done():
+                pool.shutdown(wait=False)
+            else:
+                still_live.append((pool, orphan_future))
+        self._retired = still_live
+
+    def can_submit(self) -> bool:
+        self._prune_retired()
+        return len(self._retired) < self._max_live_orphans
+
+    def rotate(self, orphan_future: Future | None = None) -> None:
         stuck = self.current
         self.current = ThreadPoolExecutor(max_workers=self._max_workers)
-        stuck.shutdown(wait=False)
+        if orphan_future is not None:
+            self._retired.append((stuck, orphan_future))
+            self._prune_retired()
+        else:
+            stuck.shutdown(wait=False)
 
     def shutdown(self) -> None:
         self.current.shutdown(wait=False)
+        for pool, _orphan_future in self._retired:
+            pool.shutdown(wait=False)
+        self._retired = []
+
+
+class _DaemonThreadSendExecutor:
+    """evaluate_tick's default (per-call) send executor -- one DAEMON
+    thread per send, never a ThreadPoolExecutor (roadmap 3c0b1c80 a).
+    concurrent.futures registers every ThreadPoolExecutor worker thread it
+    ever starts and an atexit hook joins ALL of them at interpreter
+    shutdown, regardless of executor.shutdown(wait=False) already having
+    been called -- a short-lived process (the CLI's `kerdoos digest` cron
+    path, the only production caller of this default) then hangs at exit
+    on an orphaned send. A daemon thread is joined by neither that hook
+    nor CPython's own shutdown, so an orphan here can still delay THIS
+    tick's own completion (bounded by send_timeout_seconds, unchanged) but
+    can never block the process from exiting afterward. No pool, so no
+    orphan-count ceiling either -- out of scope for a single short-lived
+    tick (unlike run_evaluator_loop's unboundedly long-lived executor)."""
+
+    def __init__(self) -> None:
+        self.current = self
+
+    def submit(self, fn, *args) -> Future:
+        future: Future = Future()
+
+        def _run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                result = fn(*args)
+            except BaseException as exc:  # noqa: BLE001 -- propagate via the Future, not the thread
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return future
+
+    def can_submit(self) -> bool:
+        return True
+
+    def rotate(self, orphan_future: Future | None = None) -> None:
+        pass  # no shared pool -- each send already has its own thread
+
+    def shutdown(self) -> None:
+        pass  # daemon threads need no teardown, they die with the process
 
 
 @dataclass(slots=True)
@@ -227,7 +303,7 @@ async def _run_plan_b(
     tick_now: datetime,
     summary: EvaluationSummary,
     send_semaphore: asyncio.Semaphore,
-    send_executor: _RotatingSendExecutor,
+    send_executor: _RotatingSendExecutor | _DaemonThreadSendExecutor,
     send_timeout_seconds: int,
 ) -> None:
     for job in jobs:
@@ -245,6 +321,19 @@ async def _run_plan_b(
                 summary.skipped_jobs += 1  # already recorded this window
                 continue
             state_store.update_job_run(job.id, window_start, status="running")
+            if not send_executor.can_submit():
+                # roadmap 3c0b1c80 (b): too many retired pools still have a
+                # live orphan -- refuse rather than dispatch into an
+                # already-overloaded executor.
+                logger.error(
+                    "evaluator: job %s send refused -- live-orphan ceiling "
+                    "reached on this executor", job.name)
+                state_store.update_job_run(
+                    job.id, window_start, status="error",
+                    error="send refused: live-orphan ceiling reached",
+                )
+                summary.errors += 1
+                continue
             cf_future = None
             try:
                 records, tier2_labels = _collect_job_digest(
@@ -275,7 +364,9 @@ async def _run_plan_b(
                         "evaluator: job %s send() future was cancelled "
                         "before it started running (send pool congested, "
                         "no thread orphaned by this timeout)", job.name)
-                send_executor.rotate()
+                    send_executor.rotate()
+                else:
+                    send_executor.rotate(cf_future)
                 state_store.update_job_run(
                     job.id, window_start, status="error",
                     error=f"{type(exc).__name__}: {exc}"[:500],
@@ -354,7 +445,7 @@ async def evaluate_tick(
     now: datetime | None = None,
     max_concurrent_sends: int = 1,
     send_semaphore: asyncio.Semaphore | None = None,
-    send_executor: _RotatingSendExecutor | None = None,
+    send_executor: _RotatingSendExecutor | _DaemonThreadSendExecutor | None = None,
     reaper_timeout_seconds: int = 300,
 ) -> EvaluationSummary:
     """Run exactly ONE evaluation tick: a reaper sweep, then Plan A (scrape
@@ -391,10 +482,13 @@ async def evaluate_tick(
     workers<=1 guard-rail plus the per-job DB-level has_active_job_run
     singleton, which IS cross-process).
 
-    send_executor (roadmap 1c67e5b2): the dedicated, self-rotating pool
-    Plan B's sends run on, isolated from Plan A's scrape pool. By default a
-    fresh one is built per call and shut down after; run_evaluator_loop
-    shares ONE instance across every tick, same contract as send_semaphore."""
+    send_executor (roadmap 1c67e5b2): the dedicated pool Plan B's sends run
+    on, isolated from Plan A's scrape pool. By default a fresh, per-send
+    daemon-thread executor is built and shut down after (roadmap 3c0b1c80 a
+    -- never a ThreadPoolExecutor here, or an orphaned send would block
+    process exit on the CLI's short-lived `kerdoos digest` path).
+    run_evaluator_loop instead passes its own long-lived, self-rotating
+    _RotatingSendExecutor, shared across every tick like send_semaphore."""
     tick_now = now if now is not None else datetime.now(timezone.utc)
     if tick_now.tzinfo is None:
         tick_now = tick_now.replace(tzinfo=timezone.utc)
@@ -440,7 +534,7 @@ async def evaluate_tick(
     owns_executor = send_executor is None
     executor = (
         send_executor if send_executor is not None
-        else _RotatingSendExecutor(max_workers=max(max_concurrent_sends, 1)))
+        else _DaemonThreadSendExecutor())
     try:
         await _run_plan_b(
             jobs=jobs, source_index=source_index, state_store=state_store,

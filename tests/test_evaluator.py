@@ -12,6 +12,8 @@ on digest_job_sources) or awkward to trigger end-to-end.
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1038,6 +1040,105 @@ class SharedSendExecutorRotationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary2.notified_jobs, 1)
         self.assertIn("job-fast", sender.calls)
         self.assertEqual(summary2.skipped_jobs, 1)  # job-slow, same window
+
+
+class CliProcessExitTest(unittest.TestCase):
+    """roadmap 3c0b1c80 (a): evaluate_tick's default (CLI-style) send
+    executor must never block PROCESS EXIT on an orphaned send thread --
+    concurrent.futures' atexit hook joins every ThreadPoolExecutor worker
+    it ever started, regardless of executor.shutdown(wait=False). Measured
+    via a real child process: an in-process test cannot observe this, the
+    hang only manifests at actual interpreter shutdown."""
+
+    def test_process_exits_promptly_despite_a_hanging_send(self) -> None:
+        probe = Path(__file__).parent / "_cli_exit_probe.py"
+        hang_seconds = 6.0
+        start = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, str(probe), "0.3", str(hang_seconds)],
+            capture_output=True, text=True, timeout=hang_seconds + 30,
+        )
+        elapsed = time.monotonic() - start
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ASYNCIO_RUN_RETURNED", result.stdout)
+        # If the process were blocked joining the orphaned thread at exit,
+        # elapsed would be >= hang_seconds. A generous margin below that
+        # tolerates process-startup overhead without becoming a tight race.
+        self.assertLess(elapsed, hang_seconds - 2.0)
+
+
+class _AlwaysHangingSender:
+    """DigestSender double whose send() blocks FOREVER for every job --
+    records which jobs actually got DISPATCHED (send() entered) vs any
+    refused before ever reaching the executor."""
+
+    def __init__(self, never_set: threading.Event) -> None:
+        self._never_set = never_set
+        self.dispatched: list[str] = []
+
+    def send(self, job, records, generated_at, tier2_labels) -> bool:
+        self.dispatched.append(job.name)
+        self._never_set.wait()
+        return True
+
+
+class LiveOrphanCeilingTest(unittest.IsolatedAsyncioTestCase):
+    """roadmap 3c0b1c80 (b): _RotatingSendExecutor must refuse a new send
+    once too many retired pools still have a live orphaned thread -- an
+    unboundedly long-lived loop would otherwise accumulate unbounded
+    concurrent orphans, one rotation at a time."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._never_set = threading.Event()
+        self.addCleanup(self._never_set.set)
+
+    async def test_fourth_send_is_refused_once_the_ceiling_is_reached(
+        self,
+    ) -> None:
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        config = SqliteConfigStore(Path(self._tmp.name) / "config.db")
+        state = SqliteStateStore(Path(self._tmp.name) / "state.db")
+        self.addCleanup(config.close)
+        self.addCleanup(state.close)
+        domain_policy = CatalogueDomainPolicy(config)
+        router = _StubRouter({"http": _FakeFetcher()})
+        service = AppService(config, state, router, domain_policy, build_parser)
+        config.add_site(_SITE)
+
+        # 4 distinct owners/jobs so no idempotence-window collision needs
+        # managing -- the default ceiling for max_workers=1 is 3, so
+        # exactly 3 of these must be dispatched (and time out, each
+        # rotating the executor) before the 4th is refused outright.
+        for i in range(4):
+            owner = f"owner-{i}"
+            service.add_product(owner, ProductSpec("p1"))
+            source = service.add_source(
+                owner, "p1", "kabum", f"https://www.kabum.com.br/p/{i}")
+            service.create_job(
+                Principal(owner_id=owner),
+                DigestJobSpec(name=f"job-{i}", frequency_kind="hourly",
+                              source_ids=(source.source_id,)))
+            state.record(owner, ScrapeRecord(
+                source_id=source.source_id, ts=(tick_now - _minutes(1)).isoformat(),
+                status=ScrapeStatus.OK, price_pix_cents=100, price_card_cents=110,
+                currency="BRL", availability=Availability.IN_STOCK, method="http",
+                error=None,
+            ))
+
+        sender = _AlwaysHangingSender(self._never_set)
+        shared_executor = _RotatingSendExecutor(max_workers=1)
+
+        summary = await evaluate_tick(
+            config_store=config, state_store=state, router=router,
+            parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+            max_concurrent_sends=1, reaper_timeout_seconds=0.05,
+            send_executor=shared_executor,
+        )
+
+        self.assertEqual(len(sender.dispatched), 3)
+        self.assertEqual(summary.errors, 4)
 
 
 if __name__ == "__main__":

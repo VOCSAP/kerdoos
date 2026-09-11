@@ -10,6 +10,11 @@
 # guard then refuses in every one of those processes -- pair that change
 # with KERDOOS_DIGEST_EVALUATOR_ENABLED=false and an external cron instead,
 # never both on at once (breaks the scheduler's exactly-once guarantee).
+# That external cron should wrap `kerdoos digest` with a lock and a hard
+# deadline, e.g.:
+#   flock -n /data/digest.lock timeout 600 kerdoos digest
+# so an overrunning invocation (a slow-draining SMTP relay, disk pressure)
+# can never stack a second one on top of it.
 # Every KERDOOS_* value below comes ONLY from `.env` (no `environment:`
 # block here) so this coupling cannot be silently defeated by compose
 # precedence -- the one thing that CAN still defeat it is an operator
