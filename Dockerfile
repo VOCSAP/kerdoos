@@ -30,7 +30,10 @@ RUN pip install --no-cache-dir uv==0.10.4
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/*
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# -s: register tini as a subreaper explicitly, so it keeps reaping orphaned
+# descendants (not just direct children) even if an operator later adds
+# --init/init: true on top of an image whose own PID 1 is already tini.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 
 WORKDIR /app
 
@@ -67,7 +70,8 @@ EXPOSE 8000
 # the intra-process evaluator both on" is unreachable by construction --
 # raising KERDOOS_WORKERS also raises the actual process count, and every
 # one of those processes reads the same env var and refuses the evaluator.
-# `exec` keeps uvicorn as PID 1 for correct SIGTERM handling. The value is
+# tini (ENTRYPOINT) is PID 1 and relays SIGTERM to uvicorn; `exec` makes
+# uvicorn tini's direct child instead of an idle shell's. The value is
 # validated (falls back to 1 on empty/non-numeric input, clamped to 32) --
 # an unquoted `${VAR:-1}` word-splits on whitespace, and an unclamped huge
 # value forks enough processes to take the host down, typo or not.
