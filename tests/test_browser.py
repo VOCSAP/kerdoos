@@ -95,6 +95,21 @@ class BrowserFetcherContractTest(unittest.TestCase):
                 browser.BrowserFetcher(_POLICY).fetch(
                     "https://mercadolivre.com.br/p/X")
 
+    def test_host_allowed_covers_navigation_domain_and_subresource_cdn(
+            self) -> None:
+        # This predicate is what the egress-proxy's domain check (ADR 0004
+        # D4/C1) now runs on every CONNECT authority -- it must accept the
+        # SAME hosts the context-level route guard always accepted,
+        # including declared render-critical sub-resource CDNs, or a
+        # legitimate render would start failing at the network layer.
+        fetcher = browser.BrowserFetcher(
+            _POLICY, subresource_domains=("http2.mlstatic.com",))
+        self.assertTrue(fetcher._host_allowed("mercadolivre.com.br"))
+        self.assertTrue(fetcher._host_allowed("www.mercadolivre.com.br"))
+        self.assertTrue(fetcher._host_allowed("http2.mlstatic.com"))
+        self.assertFalse(fetcher._host_allowed("evil.com"))
+        self.assertFalse(fetcher._host_allowed(""))
+
 
 # ----- navigation wiring, driven with a FAKE Playwright (no real browser) -----
 
@@ -107,13 +122,13 @@ class _FakePage:
     def __init__(self, content: str, status: int) -> None:
         self._content = content
         self._status = status
+        # Set by _FakeContext.route(): the guard is attached to the
+        # CONTEXT now (ADR 0004 D4/C3), but mirrored here so every existing
+        # test reading page.route_pattern/route_handler keeps working --
+        # it is the SAME callable either way.
         self.route_pattern: str | None = None
         self.route_handler = None
         self.goto_args: tuple | None = None
-
-    def route(self, pattern, handler):  # noqa: ANN001
-        self.route_pattern = pattern
-        self.route_handler = handler
 
     def goto(self, url, wait_until, timeout):  # noqa: ANN001
         self.goto_args = (url, wait_until, timeout)
@@ -123,13 +138,37 @@ class _FakePage:
         return self._content
 
 
+class _FakeContext:
+    def __init__(self, page: _FakePage, **kwargs) -> None:  # noqa: ANN003
+        self._page = page
+        self.kwargs = kwargs
+        self.route_pattern: str | None = None
+        self.route_handler = None
+
+    def route(self, pattern, handler):  # noqa: ANN001
+        self.route_pattern = pattern
+        self.route_handler = handler
+        self._page.route_pattern = pattern
+        self._page.route_handler = handler
+
+    def new_page(self) -> _FakePage:
+        return self._page
+
+    def close(self) -> None:
+        pass
+
+
 class _FakeBrowser:
     def __init__(self, page: _FakePage) -> None:
         self._page = page
         self.closed = False
+        self.context_kwargs: dict | None = None
+        self.context: _FakeContext | None = None
 
-    def new_page(self) -> _FakePage:
-        return self._page
+    def new_context(self, **kwargs):  # noqa: ANN003
+        self.context_kwargs = kwargs
+        self.context = _FakeContext(self._page, **kwargs)
+        return self.context
 
     def close(self) -> None:
         self.closed = True
@@ -224,6 +263,47 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         self.assertEqual(result.status, 200)
         self.assertFalse(result.challenged)
         self.assertIn("xxxxx", result.html)
+
+    def test_context_created_with_service_workers_blocked(self) -> None:
+        # ADR 0004 D4/C3: a service worker must not be able to make ANY
+        # request, through any channel.
+        page = _FakePage("<html>" + "x" * 5000, 200)
+        chromium = _FakeChromium(_FakeBrowser(page))
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                browser.BrowserFetcher(_POLICY).fetch(
+                    "https://mercadolivre.com.br/p/MLB1")
+        self.assertEqual(
+            chromium._browser.context_kwargs, {"service_workers": "block"})
+
+    def test_proxy_constructed_with_the_host_allowed_predicate(self) -> None:
+        # ADR 0004 D4/C1: the proxy's domain check must be the SAME
+        # predicate as the context-level route guard, not a second,
+        # independently-maintained copy.
+        page = _FakePage("<html>" + "x" * 5000, 200)
+        chromium = _FakeChromium(_FakeBrowser(page))
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        fetcher = browser.BrowserFetcher(_POLICY)
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth), \
+                 mock.patch.object(browser, "PinningProxy",
+                                   wraps=browser.PinningProxy) as proxy_cls:
+                fetcher.fetch("https://mercadolivre.com.br/p/MLB1")
+        _, kwargs = proxy_cls.call_args
+        # Bound methods are not cached: two separate accesses of
+        # fetcher._host_allowed yield distinct objects that still compare
+        # equal (same __self__, same __func__) -- assertIs would be too
+        # strict here for a correct wiring.
+        self.assertEqual(kwargs["domain_allowed"], fetcher._host_allowed)
 
     def test_route_guard_allows_allowlisted_aborts_others(self) -> None:
         page = _FakePage("<html>" + "x" * 5000, 200)
@@ -432,6 +512,12 @@ class _HangingBrowser:
         self._spawned = spawned
         self.closed = False
 
+    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
+        return self
+
+    def route(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
+
     def new_page(self):  # noqa: ANN201
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", self._marker])
@@ -448,6 +534,12 @@ class _NeverReturningBrowser:
     the kill is irrelevant to what is being tested (e.g. psutil itself
     being unavailable, roadmap d8b7b8fd).
     """
+
+    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
+        return self
+
+    def route(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
 
     def new_page(self):  # noqa: ANN201
         threading.Event().wait()  # never set: blocks this thread forever
@@ -470,6 +562,12 @@ class _HangingThenUnblockedBrowser:
         self._marker = marker
         self._spawned = spawned
         self._unblock_event = unblock_event
+
+    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
+        return self
+
+    def route(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
 
     def new_page(self):  # noqa: ANN201
         proc = subprocess.Popen(

@@ -617,5 +617,169 @@ class EgressProxyTest(unittest.TestCase):
         self.assertFalse(_is_loopback("not-an-ip"))
 
 
+class EgressProxyDomainAllowlistTest(unittest.TestCase):
+    """ADR 0004 Decision 4 condition C1: the proxy becomes the primary
+    domain-allowlist control, checked BEFORE any resolution."""
+
+    def test_connect_to_disallowed_domain_refused_without_resolving(self) -> None:
+        from autolycos.egress_proxy import PinningProxy
+
+        dialed: list[tuple[str, int]] = []
+        resolved: list[str] = []
+
+        def _tracking_resolver(host, port, *args, **kwargs):  # type: ignore[no-untyped-def]
+            # Only track resolution of the TARGET host: the test's own
+            # client socket also resolves 127.0.0.1 to reach the proxy
+            # itself, which must not be mistaken for a resolution of the
+            # refused target (same pitfall as _host_aware_resolver above).
+            if host == "evil.example":
+                resolved.append(host)
+            return _REAL_GETADDRINFO(host, port, *args, **kwargs)
+
+        proxy = PinningProxy(
+            dialer=lambda ip, p: dialed.append((ip, p)),  # type: ignore[arg-type,return-value]
+            domain_allowed=lambda host: host == "kabum.com.br")
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               side_effect=_tracking_resolver):
+            client = socket.create_connection(
+                (proxy.bound_host, proxy.bound_port), timeout=5)
+            client.settimeout(5)
+            client.sendall(b"CONNECT evil.example:443 HTTP/1.1\r\n\r\n")
+            resp = client.recv(1024)
+            client.close()
+
+        self.assertIn(b"403", resp)
+        self.assertEqual(resolved, [])   # zero resolution attempts
+        self.assertEqual(dialed, [])     # zero dial attempts
+
+    def test_connect_to_allowed_domain_still_reaches_resolution(self) -> None:
+        from autolycos.egress_proxy import PinningProxy
+
+        upstream = _EchoUpstream()
+        upstream.start()
+        self.addCleanup(upstream.stop)
+
+        dialed: list[tuple[str, int]] = []
+
+        def _dialer(ip: str, port: int) -> socket.socket:
+            dialed.append((ip, port))
+            return socket.create_connection((upstream.host, upstream.port),
+                                            timeout=5)
+
+        proxy = PinningProxy(
+            dialer=_dialer, domain_allowed=lambda host: host == "kabum.com.br")
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               side_effect=_host_aware_resolver(
+                                   "kabum.com.br", "104.18.0.1")):
+            client = socket.create_connection(
+                (proxy.bound_host, proxy.bound_port), timeout=5)
+            client.settimeout(5)
+            client.sendall(b"CONNECT kabum.com.br:443 HTTP/1.1\r\n\r\n")
+            resp = client.recv(1024)
+            client.close()
+
+        self.assertIn(b"200", resp)
+        self.assertEqual(dialed, [("104.18.0.1", 443)])
+
+    def test_no_predicate_injected_preserves_ip_and_port_only_behavior(self) -> None:
+        # Backward compat: a caller that does not pass domain_allowed (the
+        # default) keeps the pre-C1 behavior -- any domain that resolves
+        # safely is accepted, only IP/port are checked.
+        from autolycos.egress_proxy import PinningProxy
+
+        upstream = _EchoUpstream()
+        upstream.start()
+        self.addCleanup(upstream.stop)
+        dialed: list[tuple[str, int]] = []
+
+        def _dialer(ip: str, port: int) -> socket.socket:
+            dialed.append((ip, port))
+            return socket.create_connection((upstream.host, upstream.port),
+                                            timeout=5)
+
+        proxy = PinningProxy(dialer=_dialer)
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               side_effect=_host_aware_resolver(
+                                   "kabum.com.br", "104.18.0.1")):
+            client = socket.create_connection(
+                (proxy.bound_host, proxy.bound_port), timeout=5)
+            client.settimeout(5)
+            client.sendall(b"CONNECT kabum.com.br:443 HTTP/1.1\r\n\r\n")
+            resp = client.recv(1024)
+            client.close()
+
+        self.assertIn(b"200", resp)
+        self.assertEqual(dialed, [("104.18.0.1", 443)])
+
+    def test_allowlisted_domain_rebinding_to_private_ip_still_refused(self) -> None:
+        # ADR 0004 revision R1: the domain check must not SHORT-CIRCUIT the
+        # IP-layer guard. An attacker who controls DNS for an allowlisted
+        # host (or a compromised CDN record) points it at a private address;
+        # ip_is_safe is the only thing left standing, so it must still run
+        # and still refuse.
+        from autolycos.egress_proxy import PinningProxy
+
+        dialed: list[tuple[str, int]] = []
+
+        proxy = PinningProxy(
+            dialer=lambda ip, p: dialed.append((ip, p)),  # type: ignore[arg-type,return-value]
+            domain_allowed=lambda host: host == "kabum.com.br")
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               side_effect=_host_aware_resolver(
+                                   "kabum.com.br", "169.254.169.254")):
+            client = socket.create_connection(
+                (proxy.bound_host, proxy.bound_port), timeout=5)
+            client.settimeout(5)
+            client.sendall(b"CONNECT kabum.com.br:443 HTTP/1.1\r\n\r\n")
+            resp = client.recv(1024)
+            client.close()
+
+        self.assertIn(b"403", resp)
+        self.assertEqual(dialed, [])
+
+    def test_ip_literal_authority_refused_before_resolution(self) -> None:
+        # An IP literal is never a name in the allowlist, so the domain check
+        # refuses it first -- including the IPv6 literal form, whose brackets
+        # the authority parser strips before the predicate sees it.
+        from autolycos.egress_proxy import PinningProxy
+
+        for authority in (b"127.0.0.1:443", b"169.254.169.254:443",
+                          b"[::1]:443"):
+            with self.subTest(authority=authority):
+                dialed: list[tuple[str, int]] = []
+                seen: list[str] = []
+
+                proxy = PinningProxy(
+                    dialer=lambda ip, p: dialed.append((ip, p)),  # type: ignore[arg-type,return-value]
+                    domain_allowed=lambda host: (seen.append(host)
+                                                 or host == "kabum.com.br"))
+                proxy.start()
+                self.addCleanup(proxy.stop)
+
+                client = socket.create_connection(
+                    (proxy.bound_host, proxy.bound_port), timeout=5)
+                client.settimeout(5)
+                client.sendall(b"CONNECT " + authority + b" HTTP/1.1\r\n\r\n")
+                resp = client.recv(1024)
+                client.close()
+
+                self.assertIn(b"403", resp)
+                self.assertEqual(dialed, [])
+                self.assertEqual(len(seen), 1)
+                self.assertNotIn("[", seen[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,15 +9,23 @@ load-bearing and which caused real Magalu breakage (Kleos #11001, #10996).
 
 This proxy is the real control. Chromium is pointed at it (launch proxy
 config), so it never resolves the target itself: it asks us to CONNECT
-host:port. We run the single egress rule (safety.resolve_and_pin: resolve
-once, reject any non-global IP via ip_is_safe, pin one IP), dial the PINNED IP
-ourselves, and splice raw bytes. TLS stays end-to-end (we tunnel ciphertext;
-Chromium verifies the cert/SNI against the real host -- no MITM, so a
-stealth-mode browser's own TLS fingerprint is preserved).
+host:port. We check the CONNECT authority's DOMAIN against the fetch's own
+allowlist FIRST, before any resolution (ADR 0004 Decision 4 condition C1) --
+this proxy is the ONLY point ALL of the browser's egress traffic passes
+through (navigation, sub-resources, service workers, WebSockets, popups),
+unlike a page-level route guard, which only sees requests Playwright's
+page-routing API is told about. Once the domain passes, we run the IP-layer
+egress rule (safety.resolve_and_pin: resolve once, reject any non-global IP
+via ip_is_safe, pin one IP), dial the PINNED IP ourselves, and splice raw
+bytes. TLS stays end-to-end (we tunnel ciphertext; Chromium verifies the
+cert/SNI against the real host -- no MITM, so a stealth-mode browser's own
+TLS fingerprint is preserved).
 
-Hardening contract (gate, ADR 0001 S9):
+Hardening contract (gate, ADR 0001 S9; domain check added ADR 0004 D4/C1):
   * binds loopback-only (127.0.0.1) on an ephemeral port;
   * rejects any non-loopback client (defence in depth on top of the bind);
+  * an optional per-instance domain_allowed predicate refuses a CONNECT
+    authority outside the fetch's allowlist BEFORE any resolution;
   * restricts CONNECT target ports to 80/443 (no CONNECT to arbitrary ports);
   * resolve-once + pin closes the DNS-rebind TOCTOU at the network layer;
   * strip_dangerous_browser_args scrubs proxy/resolver/TLS-weakening launch
@@ -32,12 +40,15 @@ bridge, and concurrent fetches each get an independent proxy on its own port.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
 import threading
 from collections.abc import Callable, Iterable
 
 from .errors import FetchError, SSRFError
 from .safety import resolve_and_pin
+
+logger = logging.getLogger(__name__)
 
 _CONNECT_OK = b"HTTP/1.1 200 Connection established\r\n\r\n"
 _BLOCKED = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 11\r\n\r\nURL blocked"
@@ -59,6 +70,12 @@ _DANGEROUS_BROWSER_ARGS = (
 # Upstream dialer: (ip, port) -> connected socket. Injectable for tests.
 Dialer = Callable[[str, int], socket.socket]
 
+# Domain-allowlist predicate: normalized host -> allowed. None (the
+# constructor default) means no domain check at this layer -- callers that
+# do not pass one keep the pre-C1 behavior (IP/port checks only), which
+# existing non-browser callers of PinningProxy may still rely on.
+DomainAllowed = Callable[[str], bool]
+
 
 def strip_dangerous_browser_args(args: Iterable[str]) -> list[str]:
     """Drop any egress-weakening Chromium launch flag (prefix match)."""
@@ -74,13 +91,23 @@ def _is_loopback(host: str) -> bool:
 
 
 class PinningProxy:
-    """Loopback HTTP CONNECT forward-proxy that dials only pinned, safe IPs."""
+    """Loopback HTTP CONNECT forward-proxy that dials only pinned, safe IPs.
+
+    `domain_allowed`, when given, is consulted on the CONNECT authority
+    BEFORE any resolution (ADR 0004 D4/C1) -- a non-allowlisted host is
+    refused with zero DNS lookups and zero upstream connection attempts.
+    One instance is created per fetch (the caller's allowlist is fixed for
+    that fetch's lifetime), so this is a constructor argument, not a
+    per-request parameter.
+    """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 0, *,
-                 dialer: Dialer | None = None) -> None:
+                 dialer: Dialer | None = None,
+                 domain_allowed: DomainAllowed | None = None) -> None:
         self._host = host
         self._port = port
         self._dialer = dialer or self._default_dial
+        self._domain_allowed = domain_allowed
         self._srv: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
@@ -158,6 +185,17 @@ class PinningProxy:
             host, port = self._parse_authority(parts[1])
             if host is None or port is None:
                 self._reply(client, _BAD)
+                return
+            domain = host.lower().rstrip(".")
+            if self._domain_allowed is not None and not self._domain_allowed(domain):
+                # Refused on the DOMAIN alone: no resolution, no dial, no IP
+                # check even attempted (ADR 0004 D4/C1) -- this authorization
+                # decision must not depend on what the name happens to
+                # resolve to right now.
+                logger.warning(
+                    "egress-proxy: CONNECT %s:%d refused, domain not in "
+                    "this fetch's allowlist", domain, port)
+                self._reply(client, _BLOCKED)
                 return
             if port not in _ALLOWED_CONNECT_PORTS:
                 self._reply(client, _BLOCKED)

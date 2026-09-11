@@ -159,12 +159,13 @@ def resolve_and_pin(host: str, port: int) -> PinnedAddress:
 
     Unlike validate_target this takes an already-parsed host:port (a proxy
     CONNECT gives "host:port", not a URL) and does NOT apply the domain
-    allowlist: the proxy's job is the network-layer SSRF guard (ip_is_safe +
-    pin + loopback-only + port restriction), while the navigation-domain
-    allowlist stays with the browser layer (page.route / host-resolver
-    EXCLUDE), which must also permit render-critical CDN sub-resources the
-    DomainPolicy does not list. Raises SSRFError / FetchError like
-    validate_target.
+    allowlist itself: PinningProxy (ADR 0004 D4/C1) checks the CONNECT
+    authority's domain BEFORE ever calling this function, so a
+    non-allowlisted host is refused with zero resolution and never reaches
+    here at all. This function stays IP-layer-only by design (ip_is_safe +
+    pin), a second, independent line of defense against a host that IS
+    allowlisted but resolves to a non-global address (DNS rebind). Raises
+    SSRFError / FetchError like validate_target.
     """
     ip = _resolve_and_check(host, port)
     return PinnedAddress(host=host, port=port, ip=ip)

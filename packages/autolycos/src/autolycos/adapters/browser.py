@@ -15,22 +15,26 @@ sync_api surface as playwright, so the egress-proxy wiring below is unchanged.
 Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
   * validate_target runs FIRST, before Playwright is even imported and before
     any navigation, so a non-allowlisted / rebinding / private target is refused
-    even when the optional dependency is absent (the guard raises first). This
-    enforces the navigation-domain allowlist on the PRIMARY target (the proxy
-    below does not: it is the network-layer IP guard, not the domain guard).
-  * anti-rebind (ADR 0001 S9): Chromium is launched behind a loopback
-    egress-proxy (PinningProxy) via proxy_config; Chromium NEVER resolves the
-    target itself -- it CONNECTs through the proxy, which resolves once, rejects
-    any non-global IP (ip_is_safe) and dials the PINNED IP. This closes the DNS
-    rebind TOCTOU at the network layer for BOTH the primary navigation AND every
-    sub-resource, replacing the fragile --host-resolver-rules launch flag. TLS
-    stays end-to-end (the proxy tunnels ciphertext; SNI/cert/Host verification
-    stay bound to the hostname). Egress-weakening launch flags are scrubbed
+    even when the optional dependency is absent (the guard raises first).
+  * PRIMARY control (ADR 0004 D4/C1): Chromium is launched behind a loopback
+    egress-proxy (PinningProxy) via proxy_config and NEVER resolves any
+    target itself -- it CONNECTs through the proxy for everything (pages,
+    sub-resources, service workers, WebSockets, popups). The proxy checks
+    the CONNECT authority's DOMAIN against this fetch's allowlist (navigation
+    DomainPolicy + declared sub-resource CDNs) BEFORE any resolution, refusing
+    a non-allowlisted host with zero DNS lookups. Once the domain passes, the
+    proxy resolves once, rejects any non-global IP (ip_is_safe) and dials the
+    PINNED IP -- closing the DNS-rebind TOCTOU at the network layer. This
+    replaces the fragile --host-resolver-rules launch flag. TLS stays
+    end-to-end (the proxy tunnels ciphertext; SNI/cert/Host verification stay
+    bound to the hostname). Egress-weakening launch flags are scrubbed
     (strip_dangerous_browser_args).
-  * sub-resource fan-out is gated: page.route("**/*") aborts any request whose
-    host is not in the domain allowlist (a rendered page pulls many hosts; only
-    the target sites' domains may load). The proxy's IP pin backstops every host
-    that page.route does permit.
+  * DEFENSE IN DEPTH, not the primary control: context.route("**/*") (bound to
+    the browser CONTEXT, not just the page, so it also covers popups/new pages
+    opened via window.open) aborts any request whose host the proxy would
+    also refuse. Service workers cannot make any request at all
+    (service_workers="block" on the context) -- the domain check above
+    already covers this traffic too, this just removes the channel entirely.
   * the rendered HTML is size-capped (anti-OOM, CWE-400).
 
 Playwright is imported lazily INSIDE fetch(), so this module -- and the whole
@@ -275,6 +279,17 @@ class BrowserFetcher:
         return any(host == d or host.endswith("." + d)
                    for d in self._subresource_domains)
 
+    def _host_allowed(self, host: str) -> bool:
+        """A request/CONNECT target host is allowed iff it is a navigation
+        domain OR a declared render-critical sub-resource CDN. Single
+        predicate shared by the egress-proxy's domain check (ADR 0004 D4/C1,
+        the PRIMARY control) and the context-level route guard (defense in
+        depth), so the two can never drift apart. Fail-closed: an empty or
+        unparseable host is never allowed."""
+        host = host.lower().rstrip(".")
+        return bool(host) and (self._domain_policy.domain_allowed(host)
+                                or self._subresource_allowed(host))
+
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using Playwright, so a
         # non-allowlisted or rebinding target is refused even if the optional
@@ -329,9 +344,13 @@ class BrowserFetcher:
             global _abandoned_fetch_thread_count
             try:
                 # Loopback IP-pinning egress-proxy: Chromium routes every
-                # connection through it and never resolves the target itself,
-                # closing the DNS-rebind TOCTOU at the network layer (ADR S9).
-                with PinningProxy() as proxy, sync_playwright() as pw:
+                # connection through it and never resolves the target itself.
+                # The proxy is the PRIMARY control (ADR 0004 D4/C1): it
+                # checks the CONNECT authority's domain against this fetch's
+                # own allowlist before any resolution, then closes the
+                # DNS-rebind TOCTOU at the network layer for whatever passes.
+                with PinningProxy(domain_allowed=self._host_allowed) as proxy, \
+                     sync_playwright() as pw:
                     try:
                         browser = pw.chromium.launch(
                             headless=True,
@@ -348,25 +367,30 @@ class BrowserFetcher:
                         raise
                     try:
                         stealth = stealth_cls()
-                        page = browser.new_page()
-                        # JS-level stealth on top of patchright's launch
-                        # patches, applied BEFORE any routing/navigation.
-                        stealth.apply_stealth_sync(page)
+                        # service_workers="block": a service worker cannot
+                        # make ANY request, through any channel (ADR 0004
+                        # D4/C3) -- the proxy's domain check already covers
+                        # this traffic too, this removes the channel outright.
+                        context = browser.new_context(service_workers="block")
 
                         def _guard(route) -> None:  # type: ignore[no-untyped-def]
-                            # Allow a request iff its host is a navigation
-                            # domain OR a declared render-critical
-                            # sub-resource CDN; abort the rest. Fail-closed:
-                            # an empty/unparseable host is aborted.
-                            host = (urlsplit(route.request.url).hostname
-                                    or "").lower().rstrip(".")
-                            if host and (self._domain_policy.domain_allowed(host)
-                                         or self._subresource_allowed(host)):
+                            # Defense in depth on top of the proxy's own
+                            # domain check: abort anything the proxy would
+                            # also refuse.
+                            host = urlsplit(route.request.url).hostname or ""
+                            if self._host_allowed(host):
                                 route.continue_()
                             else:
                                 route.abort()
 
-                        page.route("**/*", _guard)
+                        # Bound to the CONTEXT, not just the page, so it also
+                        # covers popups/new pages opened via window.open
+                        # (ADR 0004 D4/C3).
+                        context.route("**/*", _guard)
+                        page = context.new_page()
+                        # JS-level stealth on top of patchright's launch
+                        # patches, applied BEFORE any navigation.
+                        stealth.apply_stealth_sync(page)
                         response = page.goto(
                             url, wait_until=_WAIT_UNTIL, timeout=NAV_TIMEOUT_MS)
                         if response is None:
