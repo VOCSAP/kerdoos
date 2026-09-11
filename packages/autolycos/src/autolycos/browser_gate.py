@@ -1,41 +1,23 @@
-"""Cross-tier, cross-process browser concurrency gate (card ca30b736).
+"""Cross-tier, cross-process Chromium concurrency gate (card ca30b736).
 
-Bounds the number of Chromium processes alive at once -- the patchright
-`browser` tier AND the seleniumbase `uc` tier, which reuses the SAME
-Chromium binary -- to KERDOOS_BROWSER_MAX_CONCURRENT. This is the OOM
-coherence guarantee ADR 0002 Decision 1 picked the intra-process scheduler
-FOR, that no code previously enforced. Lives in autolycos, never core
-(invariant 1), and never reads the environment itself (invariant 2): the
-composition root reads KERDOOS_BROWSER_MAX_CONCURRENT and injects the value
-(plus a lock directory) when it builds the router/fetchers.
-
-Two layers, both bounded by the SAME max_concurrent, both acquired around a
-fetch's launch-to-close cycle:
-
-  * in-process: a threading.BoundedSemaphore, always active. Bounds every
-    caller in THIS process (the sync WebUI route's threadpool thread, the
-    evaluator's asyncio.to_thread worker, a future MCP call) without any of
-    them having to remember to take it themselves -- the fetcher's fetch()
-    does, once (card 3aeb8a19's lesson: a guard duplicated per call site
-    eventually misses one).
-  * inter-process (Option A, best-effort): N `browser-slot-<i>.lock` files
-    in a shared directory (KERDOOS_STATE_DB's directory in production, so
-    every process sharing that volume shares the gate), each guarded by a
-    non-blocking fcntl.flock retried in a poll loop. The kernel releases a
-    flock automatically when the holding process dies -- no orphaned-lock
-    cleanup, unlike a DB-backed counter. Windows (dev) has no fcntl: this
-    layer no-ops with one explicit warning, degrading to the in-process-only
-    bound -- never promising more than the code holds.
+Bounds how many Chromium processes run at once -- `browser` and `uc` share
+ONE gate. In-process via threading.BoundedSemaphore; cross-process, when
+lock_dir is given, via N `browser-slot-<i>.lock` files (fcntl.flock,
+POSIX-only, Windows falls back in-process-only). Never reads the
+environment (invariant 2): all parameters are injected by the caller.
 """
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import threading
 import time
 from pathlib import Path
 from types import TracebackType
+
+from .errors import FetchError
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +27,10 @@ except ImportError:  # Windows (dev) -- no advisory file locking.
     fcntl = None  # type: ignore[assignment]
 
 _POLL_INTERVAL_SECONDS = 0.05
+# O_NOFOLLOW is POSIX-only (CWE-59 symlink guard); Windows never reaches
+# this code path for real (fcntl is None there), but a 0 no-op keeps the
+# constant safe to reference under test mocking on any platform.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 class BrowserGate:
@@ -54,12 +40,14 @@ class BrowserGate:
     def __init__(
         self, max_concurrent: int = 1,
         lock_dir: str | os.PathLike | None = None,
+        acquire_timeout_seconds: float | None = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError(
                 f"max_concurrent must be >= 1, got {max_concurrent!r}")
         self._semaphore = threading.BoundedSemaphore(max_concurrent)
         self._max_concurrent = max_concurrent
+        self._acquire_timeout_seconds = acquire_timeout_seconds
         self._slot_paths: tuple[Path, ...] | None = None
         if lock_dir is None:
             return
@@ -77,22 +65,41 @@ class BrowserGate:
             lock_path / f"browser-slot-{i}.lock" for i in range(max_concurrent))
 
     def acquire(self) -> "_BrowserGateHold":
-        self._semaphore.acquire()
-        fd = self._acquire_slot() if self._slot_paths else None
+        timeout = self._acquire_timeout_seconds
+        if not self._semaphore.acquire(timeout=timeout):
+            raise FetchError(
+                f"browser gate: no slot freed within {timeout}s "
+                f"(max_concurrent={self._max_concurrent})")
+        try:
+            fd = self._acquire_slot(timeout) if self._slot_paths else None
+        except BaseException:
+            # A slot-side failure (EMFILE, ENOLCK, a timeout) must not leak
+            # the semaphore permit -- without this, ONE bad acquisition
+            # blocks every future browser/uc fetch in this process forever.
+            self._semaphore.release()
+            raise
         return _BrowserGateHold(self, fd)
 
-    def _acquire_slot(self) -> int:
+    def _acquire_slot(self, timeout: float | None) -> int:
         assert self._slot_paths is not None
         assert fcntl is not None
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             for path in self._slot_paths:
-                fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+                fd = os.open(
+                    str(path), os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o600)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
+                except OSError as exc:
                     os.close(fd)
-                    continue
+                    if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        continue  # held by someone else -- try the next slot
+                    raise  # unexpected (e.g. ENOLCK on a network FS): do not spin
                 return fd
+            if deadline is not None and time.monotonic() >= deadline:
+                raise FetchError(
+                    f"browser gate: no lock slot freed within {timeout}s "
+                    f"(max_concurrent={self._max_concurrent})")
             time.sleep(_POLL_INTERVAL_SECONDS)
 
     def _release(self, fd: int | None) -> None:
@@ -122,10 +129,17 @@ _default_gate: BrowserGate | None = None
 
 
 def default_browser_gate() -> BrowserGate:
-    """Lazy in-process-only singleton (max_concurrent=1, no lock_dir): the
-    fallback for any Fetcher constructed without an explicit gate, so it is
-    never possible to build one that is not bounded AT ALL."""
+    """Lazy in-process-only singleton (max_concurrent=1, no lock_dir, no
+    acquire timeout): the fallback for any Fetcher constructed without an
+    explicit gate. Logs ONE warning on first use, so a composition root that
+    forgets to inject a real gate (e.g. a future MCP door) does not lose the
+    bound silently."""
     global _default_gate
     if _default_gate is None:
+        logger.warning(
+            "browser_gate: no gate was injected -- falling back to the "
+            "default in-process-only, max_concurrent=1 gate. If this is a "
+            "production composition root, it forgot to inject one."
+        )
         _default_gate = BrowserGate(max_concurrent=1)
     return _default_gate

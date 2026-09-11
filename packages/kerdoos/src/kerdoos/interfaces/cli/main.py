@@ -45,20 +45,24 @@ def _build_browser_gate(state_db: str) -> BrowserGate:
     # ADR 0002 Decision 1/2 (card ca30b736): ONE gate shared by the browser
     # AND uc tiers, inter-process via the state-db directory (the shared
     # /data volume in production) -- injected here, autolycos never reads
-    # KERDOOS_BROWSER_MAX_CONCURRENT itself (invariant 2). state_db is the
-    # CLI's own --db arg (may diverge from KERDOOS_STATE_DB), not settings.
+    # KERDOOS_BROWSER_MAX_CONCURRENT/ACQUIRE_TIMEOUT_SECONDS itself
+    # (invariant 2). state_db is the CLI's own --db arg (may diverge from
+    # KERDOOS_STATE_DB), not settings.
+    settings = get_settings()
     return BrowserGate(
-        max_concurrent=get_settings().browser_max_concurrent,
-        lock_dir=Path(state_db).parent)
+        max_concurrent=settings.browser_max_concurrent,
+        lock_dir=Path(state_db).parent,
+        acquire_timeout_seconds=settings.browser_acquire_timeout_seconds)
 
 
 def _build_app_service(
-    config_db: str, db: str,
+    config_db: str, db: str, browser_gate: BrowserGate | None = None,
 ) -> tuple[AppService, SqliteConfigStore, SqliteStateStore]:
     config_store = SqliteConfigStore(config_db)
     state_store = SqliteStateStore(db)
     domain_policy = CatalogueDomainPolicy(config_store)
-    router = StaticRouter(domain_policy, browser_gate=_build_browser_gate(db))
+    gate = browser_gate if browser_gate is not None else _build_browser_gate(db)
+    router = StaticRouter(domain_policy, browser_gate=gate)
     service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
     return service, config_store, state_store
@@ -82,10 +86,14 @@ def cmd_digest(args: argparse.Namespace) -> int:
     intra-process evaluator (kerdoos.core.evaluator) -- the CLI is the
     external-cron trigger for KERDOOS_WORKERS > 1 deployments, never a
     second implementation of the tick logic."""
-    _service, config_store, state_store = _build_app_service(args.config_db, args.db)
+    # ONE gate, shared by the (unused) service's router AND the tick's
+    # router below -- two separate BrowserGate instances would each bound
+    # their own callers independently, defeating the single-door guarantee.
+    browser_gate = _build_browser_gate(args.db)
+    _service, config_store, state_store = _build_app_service(
+        args.config_db, args.db, browser_gate=browser_gate)
     domain_policy = CatalogueDomainPolicy(config_store)
-    router = StaticRouter(
-        domain_policy, browser_gate=_build_browser_gate(args.db))
+    router = StaticRouter(domain_policy, browser_gate=browser_gate)
     settings = get_settings()
     try:
         log_unavailable_fetcher_tiers(config_store)

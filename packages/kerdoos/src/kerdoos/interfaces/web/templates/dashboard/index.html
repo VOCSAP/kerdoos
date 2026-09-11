@@ -12,7 +12,7 @@
     <span class="run-status run-status--{{ run_status.state.value }}">
       {% if run_status.state.value == "queued" %}En file
       {% elif run_status.state.value == "running" %}Vérification en cours
-      {% elif run_status.state.value == "done" %}Terminé à {{ run_status.finished_at[11:16] }}
+      {% elif run_status.state.value == "done" %}Terminé à {{ run_status.finished_at[11:16] }} UTC
       {% elif run_status.state.value == "error" %}Erreur
       {% endif %}
     </span>

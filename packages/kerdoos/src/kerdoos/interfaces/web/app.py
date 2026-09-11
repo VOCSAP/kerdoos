@@ -84,19 +84,19 @@ def create_app() -> FastAPI:
     # ADR 0002 Decision 1/2 (card ca30b736): ONE gate shared by the browser
     # AND uc tiers, inter-process via the STATE_DB directory (the shared
     # /data volume in production) -- injected here, autolycos never reads
-    # KERDOOS_BROWSER_MAX_CONCURRENT itself (invariant 2).
+    # KERDOOS_BROWSER_MAX_CONCURRENT/ACQUIRE_TIMEOUT_SECONDS itself
+    # (invariant 2).
     browser_gate = BrowserGate(
         max_concurrent=settings.browser_max_concurrent,
-        lock_dir=Path(settings.state_db).parent)
+        lock_dir=Path(settings.state_db).parent,
+        acquire_timeout_seconds=settings.browser_acquire_timeout_seconds)
     router = StaticRouter(domain_policy, browser_gate=browser_gate)
     log_unavailable_fetcher_tiers(config_store)
     app_service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
-    # Card ca30b736: POST /run enqueues here instead of calling
-    # AppService.run_now directly, so the request never blocks on a scrape
-    # (browser/uc sources can take tens of seconds, more now that they also
-    # wait on the gate above). Started unconditionally in the lifespan below,
-    # not behind a flag: a synchronous POST /run is the bug being fixed.
+    # Card ca30b736: POST /run enqueues here instead of blocking on a scrape
+    # (now also gated by the browser gate above). Started unconditionally
+    # below, not behind a flag.
     run_queue = RunQueue(app_service)
 
     @asynccontextmanager
@@ -104,6 +104,7 @@ def create_app() -> FastAPI:
         run_queue_stop = asyncio.Event()
         run_queue_task = asyncio.create_task(
             run_queue.run_forever(run_queue_stop))
+        run_queue_task.add_done_callback(run_queue.handle_consumer_crash)
 
         # Default OFF (KERDOOS_DIGEST_EVALUATOR_ENABLED unset/false): this
         # branch is a true no-op, so the 3 pre-existing TestClient(create_app())

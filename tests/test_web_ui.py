@@ -497,12 +497,8 @@ class ProfileIntegrationTest(_WebUITestBase):
 
 
 class RunQueueWebUITest(_WebUITestBase):
-    """Card ca30b736 tranche 2: POST /run must not block on the scrape.
-    The lifespan (where the run-queue consumer starts) only runs inside
-    `with TestClient(...) as client:` (pytest.md rule -- see
-    DigestEvaluatorLifespanTest in test_web_app.py for the same pattern),
-    so each test here opens its OWN `with`-scoped client rather than using
-    the bare self.client from _WebUITestBase.setUp."""
+    """Lifespan (and its run-queue consumer) only runs inside
+    `with TestClient(...) as client:`, so each test opens its own."""
 
     def setUp(self):
         super().setUp()
@@ -519,6 +515,12 @@ class RunQueueWebUITest(_WebUITestBase):
                 return text
             time.sleep(0.02)
         return client.get("/").text
+
+    def test_post_run_without_csrf_is_403(self):
+        with TestClient(create_app()) as client:
+            self._login_on(client, "alice", "s3cret")
+            resp = client.post("/run")  # no csrf_token field
+            self.assertEqual(resp.status_code, 403)
 
     def test_post_run_does_not_block_while_run_now_is_slow(self):
         import threading
@@ -583,11 +585,15 @@ class RunQueueWebUITest(_WebUITestBase):
                 self.assertTrue(entered.wait(timeout=2))
                 client.post("/run", data={"csrf_token": token})
                 release.set()
-                for _ in range(200):
-                    if "run-status--done" in client.get("/").text:
-                        break
                 import time
-                time.sleep(0.02)
+
+                text = client.get("/").text
+                for _ in range(200):
+                    text = client.get("/").text
+                    if "run-status--done" in text:
+                        break
+                    time.sleep(0.02)
+                self.assertIn("run-status--done", text)
         self.assertEqual(calls, ["o1"])  # exactly one run_now call
 
     def test_run_status_is_isolated_per_owner(self):

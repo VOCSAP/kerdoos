@@ -42,13 +42,15 @@ would fail the whole WebUI startup, not just the digest path. The TOTAL
 send deadline (beyond a single smtplib operation) is enforced separately in
 core.evaluator._run_plan_b via asyncio.wait_for(..., timeout=digest_reaper_timeout_seconds).
 
-KERDOOS_BROWSER_MAX_CONCURRENT (card ca30b736, ADR 0002 Decision 1/2): the
-max number of Chromium processes (browser tier patchright + uc tier
-seleniumbase, ONE shared gate) alive at once. Default 1; a non-positive or
-non-integer value floors to the default with a warning (never crashes at
-import, same discipline as _safe_workers). Read here and INJECTED into
-autolycos.BrowserGate at composition-root time -- autolycos never reads this
-env var itself (invariant 2).
+KERDOOS_BROWSER_MAX_CONCURRENT / KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS
+(card ca30b736, ADR 0002 Decision 1/2): the max number of Chromium processes
+(browser tier patchright + uc tier seleniumbase, ONE shared gate) alive at
+once, and the max seconds a caller waits for that gate before the source
+fails as a retryable FetchError instead of blocking forever. Both floor to
+their default (with a warning, never a crash at import) on a non-positive or
+non-numeric value, same discipline as _safe_workers. Read here and INJECTED
+into autolycos.BrowserGate at composition-root time -- autolycos never reads
+either env var itself (invariant 2).
 """
 
 from __future__ import annotations
@@ -87,6 +89,14 @@ DEFAULT_WORKERS = 1
 # patchright + uc tier seleniumbase, sharing ONE gate) alive at once.
 DEFAULT_BROWSER_MAX_CONCURRENT = 1
 
+# Card ca30b736 C2a: max wait for the browser gate before a source is
+# reported as a (retryable) FetchError instead of blocking forever. A
+# contending fetch's own worst case is roughly one retry cycle at the uc
+# tier's UC_PAGE_LOAD_TIMEOUT_SECONDS (45s) plus RECONNECT_TIME/RENDER_WAIT
+# (~9s); 120s covers that with headroom while still recovering the process
+# in a bounded time if a holder is genuinely stuck.
+DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS = 120
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -105,6 +115,7 @@ class Settings:
     smtp_timeout_seconds: float
     digest_reaper_timeout_seconds: int
     browser_max_concurrent: int
+    browser_acquire_timeout_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -205,4 +216,8 @@ def get_settings() -> Settings:
         browser_max_concurrent=_env_number(
             "KERDOOS_BROWSER_MAX_CONCURRENT",
             DEFAULT_BROWSER_MAX_CONCURRENT, int, lambda v: v > 0),
+        browser_acquire_timeout_seconds=_env_number(
+            "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
+            float(DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS), float,
+            lambda v: v > 0),
     )

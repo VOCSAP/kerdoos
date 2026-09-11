@@ -145,6 +145,10 @@ class _FakeDriver:
         self.opened: tuple | None = None
         self.slept: float | None = None
         self.quit_called = False
+        self.page_load_timeout: float | None = None
+
+    def set_page_load_timeout(self, seconds):  # noqa: ANN001
+        self.page_load_timeout = seconds
 
     def uc_open_with_reconnect(self, url, reconnect_time):  # noqa: ANN001
         self.opened = (url, reconnect_time)
@@ -213,6 +217,12 @@ class UcFetcherWiringTest(unittest.TestCase):
         self.assertIn("xxxxx", result.html)
         self.assertTrue(driver.quit_called)       # closed in finally
         self.assertEqual(driver.opened[0], _MAGALU_URL)
+
+    def test_page_load_timeout_is_set_before_navigation(self) -> None:
+        # Card ca30b736 C2b: a frozen Chrome must not hold the browser gate
+        # forever -- set_page_load_timeout is what bounds the navigation.
+        _, driver = self._run("<html>ok</html>")
+        self.assertEqual(driver.page_load_timeout, uc.UC_PAGE_LOAD_TIMEOUT_SECONDS)
 
     def test_akamai_challenge_page_marks_challenged(self) -> None:
         akamai = (_FIXTURES / "magalu_cffi.html").read_text(

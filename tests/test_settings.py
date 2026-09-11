@@ -16,9 +16,9 @@ import os
 import unittest
 
 from kerdoos.config import (
-    DEFAULT_BROWSER_MAX_CONCURRENT, DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
-    DEFAULT_SMTP_PORT, DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS,
-    get_settings,
+    DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
+    DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_SMTP_PORT,
+    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS, get_settings,
 )
 
 _SMTP_ENV_VARS = (
@@ -26,6 +26,7 @@ _SMTP_ENV_VARS = (
     "KERDOOS_SMTP_USERNAME", "KERDOOS_SMTP_PASSWORD", "KERDOOS_SMTP_USE_TLS",
     "KERDOOS_SMTP_TIMEOUT_SECONDS", "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
     "KERDOOS_WORKERS", "KERDOOS_BROWSER_MAX_CONCURRENT",
+    "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
 )
 
 
@@ -248,6 +249,38 @@ class BrowserMaxConcurrentFloorTest(_SettingsTestBase):
                 self.assertEqual(settings.browser_max_concurrent, 1)
                 self.assertTrue(
                     any("KERDOOS_BROWSER_MAX_CONCURRENT" in msg
+                        for msg in cm.output), cm.output)
+
+
+class BrowserAcquireTimeoutFloorTest(_SettingsTestBase):
+    """Card ca30b736 C2a: a malformed KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS
+    warns and floors to the default instead of crashing at settings-read
+    time."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.browser_acquire_timeout_seconds,
+            DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "45"
+        settings = get_settings()
+        self.assertEqual(settings.browser_acquire_timeout_seconds, 45.0)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.browser_acquire_timeout_seconds,
+                    DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS)
+                self.assertTrue(
+                    any("KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS" in msg
                         for msg in cm.output), cm.output)
 
 

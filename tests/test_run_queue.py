@@ -119,6 +119,22 @@ class RunQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.queue.status_for("owner1").state, RunState.QUEUED)
 
+    async def test_consumer_crash_clears_in_flight_set(self) -> None:
+        # A genuinely unexpected crash (not an owner's own run_now failure,
+        # already isolated inside run_forever) must not leave every
+        # coalesced owner stuck 'running' against a dead consumer forever.
+        self.queue._queued_or_running.add("stuck-owner")
+        crashed: asyncio.Future = asyncio.get_event_loop().create_future()
+
+        async def _boom() -> None:
+            raise RuntimeError("simulated consumer crash")
+
+        task = asyncio.create_task(_boom())
+        task.add_done_callback(self.queue.handle_consumer_crash)
+        task.add_done_callback(lambda t: crashed.set_result(True))
+        await crashed
+        self.assertNotIn("stuck-owner", self.queue._queued_or_running)
+
 
 if __name__ == "__main__":
     unittest.main()

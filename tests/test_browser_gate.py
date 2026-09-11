@@ -9,6 +9,7 @@ observed deterministically.
 
 from __future__ import annotations
 
+import errno
 import multiprocessing
 import tempfile
 import threading
@@ -19,6 +20,7 @@ from unittest import mock
 
 from autolycos import browser_gate as gate_mod
 from autolycos.browser_gate import BrowserGate
+from autolycos.errors import FetchError
 
 
 def _mp_hold(
@@ -215,6 +217,93 @@ class GateConstructionTest(unittest.TestCase):
             self.assertTrue(target.is_dir())
 
 
+def _fake_fcntl(flock_side_effect=None):
+    fake = mock.Mock(LOCK_EX=1, LOCK_NB=2, LOCK_UN=4)
+    fake.flock = mock.Mock(side_effect=flock_side_effect, return_value=None)
+    return fake
+
+
+class GateFailureModesTest(unittest.TestCase):
+    """Card ca30b736 gate conditions C1 (semaphore leak) and C2a (no
+    acquisition deadline), reviewer+security+architect, both MEASURED on
+    Linux via a probe reproduced here deterministically with a fake fcntl."""
+
+    def test_os_open_failure_does_not_leak_the_semaphore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(gate_mod, "fcntl", _fake_fcntl()):
+            gate = BrowserGate(max_concurrent=1, lock_dir=Path(tmp))
+            with mock.patch.object(
+                gate_mod.os, "open",
+                side_effect=OSError(errno.EMFILE, "too many open files"),
+            ):
+                with self.assertRaises(OSError):
+                    gate.acquire()
+            # os.open restored: the failed attempt above must not have
+            # leaked the semaphore permit.
+            acquired = threading.Event()
+
+            def worker() -> None:
+                with gate.acquire():
+                    acquired.set()
+
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join(timeout=2)
+            self.assertTrue(acquired.is_set())
+
+    def test_unexpected_flock_error_raises_instead_of_spinning(self) -> None:
+        broken_fcntl = _fake_fcntl(
+            flock_side_effect=OSError(errno.ENOLCK, "no locks available"))
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(gate_mod, "fcntl", broken_fcntl):
+                gate = BrowserGate(max_concurrent=1, lock_dir=Path(tmp))
+                start = time.monotonic()
+                with self.assertRaises(OSError):
+                    gate.acquire()
+                self.assertLess(time.monotonic() - start, 1.0)
+            # fcntl restored to a working fake: the failed attempt above
+            # must not have leaked the SAME gate's semaphore permit.
+            acquired = threading.Event()
+
+            def worker() -> None:
+                with mock.patch.object(gate_mod, "fcntl", _fake_fcntl()):
+                    with gate.acquire():
+                        acquired.set()
+
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join(timeout=2)
+            self.assertTrue(acquired.is_set())
+
+    def test_acquire_timeout_raises_fetch_error_promptly(self) -> None:
+        gate = BrowserGate(max_concurrent=1, acquire_timeout_seconds=0.2)
+        gate.acquire()  # held forever (no `with`, no release) -- simulates a stuck holder
+        start = time.monotonic()
+        with self.assertRaises(FetchError):
+            gate.acquire()
+        elapsed = time.monotonic() - start
+        self.assertGreaterEqual(elapsed, 0.15)
+        self.assertLess(elapsed, 2.0)
+
+    def test_slot_polling_also_honors_the_timeout(self) -> None:
+        # The semaphore alone (max_concurrent=2) would let a 2nd acquirer
+        # through -- only the SLOT is exhausted (max_concurrent slots too),
+        # proving the deadline applies to the flock-polling loop, not just
+        # the semaphore wait.
+        fake_fcntl = _fake_fcntl(
+            flock_side_effect=OSError(errno.EAGAIN, "locked"))
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(gate_mod, "fcntl", fake_fcntl):
+            gate = BrowserGate(
+                max_concurrent=2, lock_dir=Path(tmp), acquire_timeout_seconds=0.2)
+            start = time.monotonic()
+            with self.assertRaises(FetchError):
+                gate.acquire()
+            elapsed = time.monotonic() - start
+            self.assertGreaterEqual(elapsed, 0.15)
+            self.assertLess(elapsed, 2.0)
+
+
 @unittest.skipIf(gate_mod.fcntl is None, "fcntl unavailable on this platform")
 class GateInterProcessTest(unittest.TestCase):
     def test_two_processes_never_hold_the_slot_at_the_same_instant(self) -> None:
@@ -282,6 +371,19 @@ class GateInterProcessTest(unittest.TestCase):
             t.start()
             t.join(timeout=2)
             self.assertTrue(acquired.is_set())
+
+
+class DefaultGateWarningTest(unittest.TestCase):
+    def test_warns_once_on_first_use_and_reuses_the_singleton(self) -> None:
+        # Architect F3: a composition root that forgets to inject a gate
+        # must not lose the bound silently.
+        with mock.patch.object(gate_mod, "_default_gate", None):
+            with self.assertLogs(
+                "autolycos.browser_gate", level="WARNING") as cm:
+                gate1 = gate_mod.default_browser_gate()
+                gate2 = gate_mod.default_browser_gate()
+            self.assertEqual(len(cm.output), 1)
+            self.assertIs(gate1, gate2)
 
 
 class GateWindowsFallbackTest(unittest.TestCase):

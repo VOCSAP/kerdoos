@@ -1,17 +1,11 @@
-"""Background run_now queue (card ca30b736 tranche 2).
-
-POST /run must return immediately regardless of scrape duration (invariant
-9: the route stays a thin enqueue + redirect) -- especially now that a
-browser/uc source also waits on tranche 1's shared BrowserGate. ONE consumer,
-started in the WebUI lifespan (same placement as core.evaluator's
-run_evaluator_loop), single-process in-memory state -- same workers=1
-assumption as the digest evaluator (ADR 0003 Decision 4): a restart simply
-forgets in-flight status, the ScrapeRecords a completed run already wrote
-are unaffected (durable in state.db).
-
-RunState is a run-JOB lifecycle axis (queued/running/done/error), entirely
-orthogonal to ScrapeStatus's 3-valued product-availability axis -- this is
-NOT a 4th value on that enum (invariant 3 untouched).
+"""Background run_now queue (card ca30b736): POST /run enqueues and returns
+immediately (invariant 9) instead of blocking on a scrape. ONE consumer,
+started in the WebUI lifespan alongside core.evaluator's run_evaluator_loop.
+Single-process in-memory state (same workers=1 assumption as the digest
+evaluator, ADR 0003 Decision 4): a restart forgets in-flight status, not the
+already-written ScrapeRecords. RunState is a run-JOB lifecycle axis
+(queued/running/done/error), orthogonal to ScrapeStatus -- not a 4th value
+on that enum (invariant 3 untouched).
 """
 
 from __future__ import annotations
@@ -67,6 +61,19 @@ class RunQueue:
 
     def status_for(self, owner_id: str) -> RunStatus | None:
         return self._status.get(owner_id)
+
+    def handle_consumer_crash(self, task: asyncio.Task) -> None:
+        """asyncio.Task.add_done_callback target for run_forever. Each
+        owner's own exception is already isolated inside the loop, so this
+        only fires on a genuinely unexpected crash -- log it and clear the
+        in-flight set, or every coalesced owner would stay stuck 'running'
+        forever against a consumer that no longer exists."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("run_queue consumer crashed: %s", exc, exc_info=exc)
+            self._queued_or_running.clear()
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         """Consumer loop. Polls with a short timeout (rather than blocking
