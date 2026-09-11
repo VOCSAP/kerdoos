@@ -271,7 +271,10 @@ partage (deps), deux targets finaux -> deux tags :
   Embarque le Chromium **de patchright** (pas celui de playwright vanilla).
 
 Pas de sur-decoupage (pas de 3e tier base->slim->autonomous) : le plus petit
-changement, deja valide au gate Phase 0, conforme ADR 0001 S8.
+changement, deja valide au gate Phase 0, conforme ADR 0001 S8. **Amende par
+[ADR 0004](./0004-tier-camoufox-image-opt-in.md)** : une troisieme cible opt-in,
+`autonomous-camoufox`, construite a partir de `autonomous` ; l'image
+`autonomous` par defaut reste inchangee.
 
 ### Correction Q-e -- pre-fetch de l'undetected-chromedriver au build
 Le tier `uc` (seleniumbase) telecharge son `undetected-chromedriver` **au runtime**
