@@ -64,6 +64,10 @@ class BrowserGate:
         self._slot_paths = tuple(
             lock_path / f"browser-slot-{i}.lock" for i in range(max_concurrent))
 
+    @property
+    def max_concurrent(self) -> int:
+        return self._max_concurrent
+
     def acquire(self) -> "_BrowserGateHold":
         timeout = self._acquire_timeout_seconds
         if not self._semaphore.acquire(timeout=timeout):

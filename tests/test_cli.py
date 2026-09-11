@@ -236,5 +236,39 @@ class CliStateDbDefaultTest(unittest.TestCase):
             "config.db")
 
 
+class CompositionRootUcOrphanSweepDelayTest(unittest.TestCase):
+    """Roadmap 6521bbce F3-gap closing test (card b3213f3c's own gate
+    finding): a StaticRouter-level unit test only proves the wiring works
+    when a test constructs the StaticRouter directly with a literal value.
+    This drives the REAL composition root (_build_app_service, reused by
+    both `kerdoos run` and cmd_digest's tick router) so a regression that
+    forgets to forward the setting from get_settings() is actually caught.
+    """
+
+    def setUp(self) -> None:
+        self._saved = os.environ.pop(
+            "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS", None)
+
+    def tearDown(self) -> None:
+        if self._saved is None:
+            os.environ.pop("KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS", None)
+        else:
+            os.environ["KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS"] = self._saved
+
+    def test_env_var_reaches_the_uc_fetcher_built_by_the_composition_root(
+            self) -> None:
+        os.environ["KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS"] = "17"
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            service, config_store, state_store = cli._build_app_service(
+                str(d / "config.db"), str(d / "state.db"))
+            try:
+                fetcher = service._router.select("uc")
+                self.assertEqual(fetcher._orphan_sweep_delay_seconds, 17.0)
+            finally:
+                config_store.close()
+                state_store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

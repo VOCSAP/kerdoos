@@ -55,7 +55,8 @@ def _make_browser(domain_policy: DomainPolicy,
 def _make_uc(domain_policy: DomainPolicy,
              subresource_domains: Iterable[str],
              browser_gate: BrowserGate,
-             launch_timeout_seconds: float | None = None) -> Fetcher:
+             launch_timeout_seconds: float | None = None,
+             orphan_sweep_delay_seconds: float | None = None) -> Fetcher:
     # Deferred import: SeleniumBase is optional and only needed for the uc tier
     # (sites behind Akamai Bot Manager; Magalu). The per-site render-CDN
     # sub-resource allowlist feeds the DNS-level host-resolver rule.
@@ -64,6 +65,8 @@ def _make_uc(domain_policy: DomainPolicy,
     kwargs = {}
     if launch_timeout_seconds is not None:
         kwargs["launch_timeout_seconds"] = launch_timeout_seconds
+    if orphan_sweep_delay_seconds is not None:
+        kwargs["orphan_sweep_delay_seconds"] = orphan_sweep_delay_seconds
     return UcFetcher(domain_policy, subresource_domains, browser_gate, **kwargs)
 
 
@@ -133,6 +136,7 @@ class StaticRouter:
         browser_gate: BrowserGate | None = None,
         uc_launch_timeout_seconds: float | None = None,
         browser_launch_timeout_seconds: float | None = None,
+        uc_orphan_sweep_delay_seconds: float | None = None,
     ) -> None:
         self._domain_policy = domain_policy
         # Defaults to the SAME module-level singleton as a directly-
@@ -150,6 +154,9 @@ class StaticRouter:
             self._launch_timeout_overrides["uc"] = uc_launch_timeout_seconds
         if browser_launch_timeout_seconds is not None:
             self._launch_timeout_overrides["browser"] = browser_launch_timeout_seconds
+        # uc-only (roadmap 6521bbce): no browser-tier equivalent exists, so
+        # this stays a separate field rather than joining the dict above.
+        self._uc_orphan_sweep_delay_seconds = uc_orphan_sweep_delay_seconds
         self._cache: dict[tuple[str, frozenset[str]], Fetcher] = {}
 
     def select(
@@ -164,16 +171,19 @@ class StaticRouter:
         # tier with different render CDNs get distinct instances.
         key = (fetcher_name, frozenset(subresource_domains))
         if key not in self._cache:
-            # Only browser/uc take the extra kwarg: http/tls's factories
-            # don't declare it, keeping their own call shape untouched.
+            # Only browser/uc take these extra kwargs: http/tls's factories
+            # don't declare them, keeping their own call shape untouched.
+            extra_kwargs: dict[str, float] = {}
             override = self._launch_timeout_overrides.get(fetcher_name)
             if override is not None:
-                self._cache[key] = _FACTORIES[fetcher_name](
-                    self._domain_policy, subresource_domains, self._browser_gate,
-                    launch_timeout_seconds=override)
-            else:
-                self._cache[key] = _FACTORIES[fetcher_name](
-                    self._domain_policy, subresource_domains, self._browser_gate)
+                extra_kwargs["launch_timeout_seconds"] = override
+            if (fetcher_name == "uc"
+                    and self._uc_orphan_sweep_delay_seconds is not None):
+                extra_kwargs["orphan_sweep_delay_seconds"] = (
+                    self._uc_orphan_sweep_delay_seconds)
+            self._cache[key] = _FACTORIES[fetcher_name](
+                self._domain_policy, subresource_domains, self._browser_gate,
+                **extra_kwargs)
         return self._cache[key]
 
     def tier_available(self, fetcher_name: str) -> bool:

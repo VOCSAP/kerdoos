@@ -81,6 +81,13 @@ Chromium LAUNCH itself for the browser tier (autolycos.adapters.browser.
 BrowserFetcher's launch_timeout_seconds), same floor-with-warning discipline
 and the same StaticRouter injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS
 above.
+
+KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce): the delay of the
+uc tier's second orphan-process sweep, which runs before the browser gate is
+released on a launch that exceeded uc_launch_timeout_seconds (autolycos.
+adapters.uc.UcFetcher's orphan_sweep_delay_seconds), same floor-with-warning
+discipline and the same StaticRouter injection path as
+KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above.
 """
 
 from __future__ import annotations
@@ -98,6 +105,7 @@ from autolycos.adapters.browser import (
     BROWSER_LAUNCH_TIMEOUT_SECONDS as _BROWSER_TIER_LAUNCH_TIMEOUT_SECONDS,
 )
 from autolycos.adapters.uc import (
+    ORPHAN_SWEEP_DELAY_SECONDS as _UC_TIER_ORPHAN_SWEEP_DELAY_SECONDS,
     UC_LAUNCH_TIMEOUT_SECONDS as _UC_TIER_LAUNCH_TIMEOUT_SECONDS,
 )
 
@@ -195,6 +203,11 @@ DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS = float(_UC_TIER_LAUNCH_TIMEOUT_SECONDS)
 DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS = float(
     _BROWSER_TIER_LAUNCH_TIMEOUT_SECONDS)
 
+# Roadmap 6521bbce: single source of truth shared with the uc tier itself,
+# so an unset env var falls back to exactly what UcFetcher would use anyway.
+DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS = float(
+    _UC_TIER_ORPHAN_SWEEP_DELAY_SECONDS)
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -224,6 +237,7 @@ class Settings:
     login_rate_limit_window_seconds: float
     login_rate_limit_max_attempts: int
     login_rate_limit_row_cap: int
+    uc_orphan_sweep_delay_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -359,4 +373,7 @@ def get_settings() -> Settings:
         login_rate_limit_row_cap=_env_number(
             "KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP",
             DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP, int, lambda v: v > 0),
+        uc_orphan_sweep_delay_seconds=_env_number(
+            "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
+            DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS, float, lambda v: v > 0),
     )

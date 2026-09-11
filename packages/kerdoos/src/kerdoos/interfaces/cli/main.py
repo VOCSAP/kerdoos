@@ -92,7 +92,8 @@ def _build_app_service(
     router = StaticRouter(
         domain_policy, browser_gate=gate,
         uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds,
-        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds)
+        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds,
+        uc_orphan_sweep_delay_seconds=settings.uc_orphan_sweep_delay_seconds)
     service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
     return service, config_store, state_store
@@ -127,7 +128,8 @@ def cmd_digest(args: argparse.Namespace) -> int:
     router = StaticRouter(
         domain_policy, browser_gate=browser_gate,
         uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds,
-        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds)
+        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds,
+        uc_orphan_sweep_delay_seconds=settings.uc_orphan_sweep_delay_seconds)
     try:
         log_unavailable_fetcher_tiers(config_store)
         sender = build_sender(

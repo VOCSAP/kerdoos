@@ -88,19 +88,11 @@ _JS_SAFE_URL_CHARS = ":/?#[]@!$&()*+,;=%"
 UC_LAUNCH_TIMEOUT_SECONDS = 30.0
 # Roadmap 6521bbce: a launch whose driver_cls(**kwargs) call never returns
 # at all can still spawn a process AFTER the deadline's own one-shot kill
-# already ran. A second, delayed sweep catches it. A few seconds is enough
-# to cover the gap between the deadline firing and a late spawn actually
-# landing in the process table, without meaningfully delaying cleanup.
-_ORPHAN_SWEEP_DELAY_SECONDS = 5.0
-# MEASURED (autonomous image, repeated real launches): a uc_driver
-# sibling's own psutil.create_time() can read a few milliseconds EARLIER
-# than the `launched_after` timestamp captured a couple of lines before
-# the launch thread even starts, presumably clock-read jitter between
-# this process's time.time() and the kernel's own process-start
-# accounting under load. A small backward margin absorbs that without
-# meaningfully widening the window a genuinely concurrent launch (beyond
-# KERDOOS_BROWSER_MAX_CONCURRENT=1) could be misattributed through.
-_LAUNCH_CLOCK_JITTER_MARGIN_SECONDS = 0.5
+# already ran. A second sweep, run before releasing the browser gate,
+# catches it -- see _launch_with_deadline. Public (no leading underscore,
+# like UC_LAUNCH_TIMEOUT_SECONDS): kerdoos.config imports it as the single
+# source of truth for KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS's own default.
+ORPHAN_SWEEP_DELAY_SECONDS = 5.0
 
 
 def _normalize_domains(domains: Iterable[str]) -> list[str]:
@@ -195,8 +187,22 @@ def _process_matches_launch(proc, marker: str) -> bool:  # type: ignore[no-untyp
     return any(marker in arg for arg in cmdline)
 
 
+def _snapshot_descendant_pids() -> frozenset[int]:
+    """PIDs of this process's live descendants right now. Taken before a
+    launch's own thread starts, this is the baseline `_launch_process_tree`
+    diffs against to find a later-spawned uc_driver sibling -- PID
+    membership only, never a process creation timestamp."""
+    import psutil
+
+    try:
+        me = psutil.Process(os.getpid())
+        return frozenset(p.pid for p in me.children(recursive=True))
+    except psutil.Error:
+        return frozenset()
+
+
 def _launch_process_tree(  # type: ignore[no-untyped-def]
-    marker: str, launched_after: float | None = None,
+    marker: str, pids_before: frozenset[int] | None = None,
 ) -> list:
     """The OS process tree belonging to the launch tagged with `marker`: any
     live process whose cmdline carries it, that process's parent when the
@@ -208,16 +214,14 @@ def _launch_process_tree(  # type: ignore[no-untyped-def]
     DIRECTLY from Python and runs uc_driver as Chrome's SIBLING in the
     process tree, not its parent -- the marker-walk above never finds it
     (uc_driver's own argv never carries the marker, and it is never
-    Chrome's ancestor in this mode). `launched_after` (a timestamp taken
-    right before this launch's own thread started) additionally matches
-    any descendant of the current process named uc_driver/chromedriver
-    born at or after that moment. Exact under the single-Chromium
-    concurrency bound (KERDOOS_BROWSER_MAX_CONCURRENT=1, ADR 0002
-    Decision 1's default): only one launch is ever in flight, so any such
-    process appearing during its window is unambiguously this one's.
-    Above that bound this is a heuristic (a concurrent launch's own
-    uc_driver could be misattributed) -- documented here rather than
-    resolved via a port-correlation check.
+    Chrome's ancestor in this mode). `pids_before`, a snapshot taken right
+    before this launch's own thread started, additionally matches any
+    descendant of the current process named uc_driver/chromedriver that is
+    ABSENT from that snapshot -- i.e. spawned since. The caller only passes
+    it when this launch holds the browser gate exclusively (see
+    UcFetcher._launch_with_deadline), which is what makes "new since my own
+    baseline" unambiguous: no other launch can be creating processes while
+    this one still holds the gate.
     """
     import psutil
 
@@ -242,20 +246,16 @@ def _launch_process_tree(  # type: ignore[no-untyped-def]
         if parent_name in _LAUNCH_PARENT_NAMES:
             roots.append(parent)
 
-    if launched_after is not None:
+    if pids_before is not None:
         known_pids = {r.pid for r in roots}
         for proc in candidates:
-            if proc.pid in known_pids:
+            if proc.pid in known_pids or proc.pid in pids_before:
                 continue
             try:
-                if proc.name().lower() not in _LAUNCH_PARENT_NAMES:
-                    continue
-                if (proc.create_time()
-                        < launched_after - _LAUNCH_CLOCK_JITTER_MARGIN_SECONDS):
-                    continue
+                if proc.name().lower() in _LAUNCH_PARENT_NAMES:
+                    roots.append(proc)
             except psutil.Error:
                 continue
-            roots.append(proc)
 
     tree: dict[int, object] = {}
     for root in roots:
@@ -269,7 +269,7 @@ def _launch_process_tree(  # type: ignore[no-untyped-def]
 
 
 def _kill_launch_processes(
-    marker: str, launched_after: float | None = None,
+    marker: str, pids_before: frozenset[int] | None = None,
 ) -> None:
     """Best-effort: kill only the process tree of the launch tagged with
     `marker`, so a launch abandoned at the deadline never leaves a process
@@ -279,14 +279,23 @@ def _kill_launch_processes(
 
     Roadmap 6521bbce, MEASURED in the autonomous image: uc_driver is
     routinely already a ZOMBIE (exited, never reaped) by the time cleanup
-    runs, not a live process -- kill() is then a genuine no-op (you cannot
-    signal something already dead), and psutil still reports it as
-    "running" (the PID slot survives until reaped), so it looked
-    unkillable. We are its direct parent, so os.waitpid(pid, WNOHANG)
-    reaps it; kill() is still attempted first for the case where it is
-    still genuinely alive at that moment.
+    runs, not a live process -- kill() is then a genuine no-op, and psutil
+    still reports it as "running" (the PID slot survives until reaped). We
+    are its direct parent, so os.waitpid(pid, WNOHANG) reaps it. Before
+    acting, each process's identity (pid + its OWN create_time, re-read a
+    moment apart on the same object -- not compared against any other
+    process or timestamp) is re-checked to guard against the pid having
+    been recycled between the scan above and here.
     """
-    for proc in _launch_process_tree(marker, launched_after):
+    import psutil
+
+    for proc in _launch_process_tree(marker, pids_before):
+        try:
+            pid, created = proc.pid, proc.create_time()
+            if psutil.Process(pid).create_time() != created:
+                continue  # pid recycled since the scan; not our process
+        except psutil.Error:
+            continue
         try:
             proc.kill()
         except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
@@ -328,11 +337,13 @@ class UcFetcher:
                  subresource_domains: Iterable[str] = (),
                  gate: BrowserGate | None = None,
                  launch_timeout_seconds: float = UC_LAUNCH_TIMEOUT_SECONDS,
+                 orphan_sweep_delay_seconds: float = ORPHAN_SWEEP_DELAY_SECONDS,
                  ) -> None:
         self._domain_policy = domain_policy
         self._subresource_domains = tuple(subresource_domains)
         self._gate = gate if gate is not None else default_browser_gate()
         self._launch_timeout_seconds = launch_timeout_seconds
+        self._orphan_sweep_delay_seconds = orphan_sweep_delay_seconds
 
     def _launch_with_deadline(self, driver_cls, driver_kwargs):  # type: ignore[no-untyped-def]
         """Runs driver_cls(**driver_kwargs) (the Chrome launch itself) under
@@ -353,10 +364,15 @@ class UcFetcher:
         driver_kwargs["chromium_arg"] = [
             *driver_kwargs.get("chromium_arg", []), marker,
         ]
-        # Roadmap 6521bbce: identifies THIS launch's own uc_driver sibling
-        # by create_time (see _launch_process_tree), since it never carries
-        # the marker itself and is never Chrome's parent in undetected mode.
-        launched_at = time.time()
+        # Roadmap 6521bbce: baseline _launch_process_tree diffs against to
+        # find THIS launch's own uc_driver sibling (it never carries the
+        # marker itself, and is never Chrome's parent, in undetected mode).
+        pids_before = _snapshot_descendant_pids()
+        # Only sound when no other launch can be creating processes at the
+        # same time -- see the sweep below, which relies on this being
+        # true for its whole duration, not just at this instant.
+        single_flight = self._gate.max_concurrent == 1
+        sibling_pids = pids_before if single_flight else None
 
         holder: dict = {}
         claim_lock = threading.Lock()
@@ -376,7 +392,7 @@ class UcFetcher:
                 if _claim():
                     holder["error"] = exc
                 else:
-                    _kill_launch_processes(marker, launched_at)
+                    _kill_launch_processes(marker, sibling_pids)
                 return
             if _claim():
                 holder["driver"] = driver
@@ -385,22 +401,25 @@ class UcFetcher:
                     driver.quit()
                 except Exception:  # noqa: BLE001 -- best-effort, caller is gone
                     pass
-                _kill_launch_processes(marker, launched_at)
+                _kill_launch_processes(marker, sibling_pids)
 
         launch_thread = threading.Thread(target=_construct, daemon=True)
         launch_thread.start()
         launch_thread.join(timeout=self._launch_timeout_seconds)
         if launch_thread.is_alive() and _claim():
-            _kill_launch_processes(marker, launched_at)
+            _kill_launch_processes(marker, sibling_pids)
             # The construction call may still be running (a launch that
             # never returns, roadmap 6521bbce) and spawn a process AFTER
-            # this pass -- a delayed second sweep catches it. Daemon: must
-            # never hold up process exit on its own.
-            sweep = threading.Timer(
-                _ORPHAN_SWEEP_DELAY_SECONDS, _kill_launch_processes,
-                args=(marker, launched_at))
-            sweep.daemon = True
-            sweep.start()
+            # this pass. A second pass catches it -- but ONLY while this
+            # launch still holds the browser gate (single_flight): once
+            # released, a different launch may be running, and a fresh
+            # by-name/by-PID scan could then hit ITS process instead of
+            # ours. The caller's `with self._gate.acquire():` still wraps
+            # this whole method, so blocking here simply delays the
+            # release rather than racing it.
+            if single_flight:
+                time.sleep(self._orphan_sweep_delay_seconds)
+                _kill_launch_processes(marker, sibling_pids)
             raise FetchError(
                 f"uc launch exceeded {self._launch_timeout_seconds}s timeout")
         # Either the thread had already finished by the deadline, or it won

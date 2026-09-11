@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -56,6 +58,18 @@ def _marker_from_kwargs(kwargs: dict) -> str:
     return next(
         arg for arg in kwargs["chromium_arg"]
         if arg.startswith(uc._LAUNCH_ID_ARG_PREFIX))
+
+
+def _fake_uc_driver_binary() -> str:
+    """A REAL executable psutil reports .name() == 'uc_driver' for --
+    /bin/sleep copied under that name (POSIX only). Mirrors the reviewer's
+    probe_orph2.py technique: only a real process proves attribution
+    against psutil's actual process table, not a mock of it."""
+    path = os.path.join(tempfile.gettempdir(), "uc_driver")
+    if not os.path.exists(path):
+        shutil.copy("/bin/sleep", path)
+        os.chmod(path, 0o755)
+    return path
 
 
 class HostResolverRulesTest(unittest.TestCase):
@@ -642,7 +656,8 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
         try:
             binary = _find_patchright_chromium()
             fetcher = uc.UcFetcher(
-                _NEUTRAL_POLICY, launch_timeout_seconds=0.01)
+                _NEUTRAL_POLICY, launch_timeout_seconds=0.01,
+                orphan_sweep_delay_seconds=1.0)
             with self.assertRaises(FetchError):
                 fetcher._launch_with_deadline(
                     Driver,
@@ -726,12 +741,13 @@ class UcLaunchDeadlineTest(unittest.TestCase):
                 return_value=self._hanging_factory(2.0, spawned),
             ):
                 fetcher = uc.UcFetcher(
-                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                    _POLICY, gate=gate, launch_timeout_seconds=0.3,
+                    orphan_sweep_delay_seconds=0.1)
                 t0 = time.monotonic()
                 with self.assertRaises(FetchError):
                     fetcher.fetch(_MAGALU_URL)
                 elapsed = time.monotonic() - t0
-        # Bounded by the 0.3s deadline, not the factory's 2.0s hang.
+        # Bounded by the deadline + sweep delay, not the factory's 2.0s hang.
         self.assertLess(elapsed, 1.5)
         spawned[0].wait(timeout=5)
 
@@ -745,7 +761,8 @@ class UcLaunchDeadlineTest(unittest.TestCase):
                 return_value=self._hanging_factory(2.0, spawned),
             ):
                 fetcher = uc.UcFetcher(
-                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                    _POLICY, gate=gate, launch_timeout_seconds=0.3,
+                    orphan_sweep_delay_seconds=0.1)
                 with self.assertRaises(FetchError):
                     fetcher.fetch(_MAGALU_URL)
             # A second acquire on the SAME gate must succeed promptly --
@@ -765,7 +782,8 @@ class UcLaunchDeadlineTest(unittest.TestCase):
                 return_value=self._hanging_factory(2.0, spawned),
             ):
                 fetcher = uc.UcFetcher(
-                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                    _POLICY, gate=gate, launch_timeout_seconds=0.3,
+                    orphan_sweep_delay_seconds=0.1)
                 with self.assertRaises(FetchError):
                     fetcher.fetch(_MAGALU_URL)
         proc = spawned[0]
@@ -848,7 +866,8 @@ class UcLaunchDeadlineTest(unittest.TestCase):
 
         try:
             fetcher = uc.UcFetcher(
-                _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                _POLICY, gate=gate, launch_timeout_seconds=0.3,
+                orphan_sweep_delay_seconds=0.1)
             with self.assertRaises(FetchError):
                 fetcher._launch_with_deadline(_late_factory, {})
             self.assertTrue(
@@ -869,10 +888,10 @@ class UcLaunchDeadlineTest(unittest.TestCase):
             self) -> None:
         """Roadmap 6521bbce: a launch whose factory call never returns at
         all can still spawn a process AFTER the deadline's own one-shot
-        kill already ran -- the delayed second sweep must catch it. The
+        kill already ran -- a second, later pass (run before the browser
+        gate is released, see _launch_with_deadline) must catch it. The
         factory spawns its marked child shortly after the 0.3s deadline
-        (so the FIRST pass alone finds nothing), well BEFORE the delayed
-        sweep fires (a wide margin so the two events never race).
+        (so the FIRST pass alone finds nothing).
         """
         gate = BrowserGate(max_concurrent=1)
         late_spawned: list = []
@@ -885,17 +904,15 @@ class UcLaunchDeadlineTest(unittest.TestCase):
             late_spawned.append(proc)
             time.sleep(60)  # the construction call itself never returns
 
+        fetcher = uc.UcFetcher(
+            _POLICY, gate=gate, launch_timeout_seconds=0.3,
+            orphan_sweep_delay_seconds=1.5)
         try:
-            with mock.patch.object(uc, "_ORPHAN_SWEEP_DELAY_SECONDS", 1.5):
-                fetcher = uc.UcFetcher(
-                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
-                with self.assertRaises(FetchError):
-                    fetcher._launch_with_deadline(
-                        _never_returns_factory, {})
+            with self.assertRaises(FetchError):
+                fetcher._launch_with_deadline(_never_returns_factory, {})
             self.assertTrue(
-                self._wait_until(
-                    lambda: late_spawned
-                    and late_spawned[0].poll() is not None, timeout=5),
+                self._wait_until(lambda: late_spawned
+                                  and late_spawned[0].poll() is not None),
                 "the process spawned after the first kill pass was not "
                 "caught by the delayed sweep")
         finally:
@@ -907,73 +924,182 @@ class UcLaunchDeadlineTest(unittest.TestCase):
 class UcDriverSiblingDiscoveryTest(unittest.TestCase):
     """Roadmap 6521bbce: in undetected mode SeleniumBase launches Chrome
     DIRECTLY from Python and runs uc_driver as Chrome's SIBLING, not its
-    parent (measured: 'children NOT in targeted tree: [\"uc_driver\"]') --
-    the marker-walk in _launch_process_tree never finds it. Exercises the
-    create_time-based matching logic directly against fake psutil.Process
-    objects (deterministic, no real uc_driver binary needed -- the
-    end-to-end proof against a real process runs in the image)."""
+    parent -- the marker-walk in _launch_process_tree never finds it, since
+    uc_driver's own argv never carries the marker. Exercises the PID-set-diff
+    matching against a REAL uc_driver-named process (a copy of /bin/sleep --
+    the reviewer's probe_orph2.py technique, since a fake psutil.Process
+    mock proves nothing about the real process table). POSIX only.
+    """
 
-    class _FakeProc:
-        def __init__(self, pid, name, create_time, cmdline=()):
-            self.pid = pid
-            self._name = name
-            self._create_time = create_time
-            self._cmdline = list(cmdline)
+    def setUp(self) -> None:
+        if os.name != "posix" or not os.path.exists("/bin/sleep"):
+            self.skipTest("needs /bin/sleep (POSIX)")
+        self._spawned: list = []
 
-        def name(self):
-            return self._name
+    def tearDown(self) -> None:
+        for proc in self._spawned:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
 
-        def cmdline(self):
-            return self._cmdline
+    def _spawn_fake_uc_driver(self) -> subprocess.Popen:
+        proc = subprocess.Popen([_fake_uc_driver_binary(), "60"])
+        self._spawned.append(proc)
+        return proc
 
-        def create_time(self):
-            return self._create_time
+    @staticmethod
+    def _wait_until_visible(pid: int, timeout: float = 5.0) -> None:
+        import psutil
 
-        def parent(self):
-            return None
+        deadline = time.monotonic() + timeout
+        me = psutil.Process(os.getpid())
+        while time.monotonic() < deadline:
+            if pid in {p.pid for p in me.children(recursive=True)}:
+                return
+            time.sleep(0.02)
 
-        def children(self, recursive=False):  # noqa: ARG002
-            return []
-
-    def test_sibling_uc_driver_born_after_launch_start_is_included(
+    def test_sibling_spawned_after_the_baseline_snapshot_is_attributed(
             self) -> None:
         marker = "--kerdoos-launch-id=abc123"
-        chrome = self._FakeProc(100, "chrome", 10.0, cmdline=["chrome", marker])
-        own_uc_driver = self._FakeProc(101, "uc_driver", 10.5)
-        stale_uc_driver = self._FakeProc(102, "uc_driver", 5.0)
-        unrelated = self._FakeProc(103, "python", 10.5)
-        all_children = [chrome, own_uc_driver, stale_uc_driver, unrelated]
+        pids_before = uc._snapshot_descendant_pids()
+        proc = self._spawn_fake_uc_driver()
+        self._wait_until_visible(proc.pid)
+        tree = uc._launch_process_tree(marker, pids_before)
+        self.assertIn(proc.pid, {p.pid for p in tree})
 
-        class _FakeMe:
-            def children(self, recursive=False):  # noqa: ARG002
-                return all_children
-
-        with mock.patch("psutil.Process", side_effect=lambda pid=None: _FakeMe()):
-            tree = uc._launch_process_tree(marker, launched_after=10.0)
-
-        pids = {p.pid for p in tree}
-        self.assertIn(100, pids)         # Chrome itself, marker match
-        self.assertIn(101, pids)         # uc_driver sibling, born after launch start
-        self.assertNotIn(102, pids)      # pre-existing uc_driver, born before
-        self.assertNotIn(103, pids)      # right timing window, wrong name
-
-    def test_no_launched_after_keeps_prior_behavior(self) -> None:
-        # launched_after=None (the default) must not pick up ANY sibling by
-        # name/create_time -- only the pre-existing marker/parentage walk.
+    def test_sibling_present_before_the_baseline_snapshot_is_not_attributed(
+            self) -> None:
         marker = "--kerdoos-launch-id=abc123"
-        chrome = self._FakeProc(100, "chrome", 10.0, cmdline=["chrome", marker])
-        sibling_uc_driver = self._FakeProc(101, "uc_driver", 10.5)
-        all_children = [chrome, sibling_uc_driver]
+        proc = self._spawn_fake_uc_driver()
+        self._wait_until_visible(proc.pid)
+        pids_before = uc._snapshot_descendant_pids()  # already includes proc
+        tree = uc._launch_process_tree(marker, pids_before)
+        self.assertNotIn(proc.pid, {p.pid for p in tree})
 
-        class _FakeMe:
-            def children(self, recursive=False):  # noqa: ARG002
-                return all_children
+    def test_without_pids_before_the_sibling_is_never_attributed(
+            self) -> None:
+        # max_concurrent > 1: the caller passes pids_before=None, so a real
+        # uc_driver sibling stays out of reach regardless of spawn timing --
+        # documented limitation above KERDOOS_BROWSER_MAX_CONCURRENT=1.
+        marker = "--kerdoos-launch-id=abc123"
+        uc._snapshot_descendant_pids()  # mirrors the caller's own baseline
+        proc = self._spawn_fake_uc_driver()
+        self._wait_until_visible(proc.pid)
+        tree = uc._launch_process_tree(marker, pids_before=None)
+        self.assertNotIn(proc.pid, {p.pid for p in tree})
 
-        with mock.patch("psutil.Process", side_effect=lambda pid=None: _FakeMe()):
-            tree = uc._launch_process_tree(marker)
+    def test_attribution_does_not_read_create_time(self) -> None:
+        # Roadmap 6521bbce gate finding: psutil.create_time() truncates to
+        # whole seconds (/proc/stat btime), making any timestamp-based
+        # decision unreliable. Proof of independence: force EVERY psutil
+        # Process's create_time() to a wrong, constant value (not an error --
+        # psutil.children() itself uses create_time for its own pid-recycle
+        # bookkeeping, so raising there would break unrelated plumbing, not
+        # just prove anything about OUR decision) and confirm attribution is
+        # unaffected -- it is driven by PID-set membership alone.
+        import psutil
 
-        pids = {p.pid for p in tree}
-        self.assertEqual(pids, {100})
+        marker = "--kerdoos-launch-id=abc123"
+        pids_before = uc._snapshot_descendant_pids()
+        proc = self._spawn_fake_uc_driver()
+        self._wait_until_visible(proc.pid)
+        with mock.patch.object(psutil.Process, "create_time",
+                                lambda self: 0.0):
+            tree = uc._launch_process_tree(marker, pids_before)
+        self.assertIn(proc.pid, {p.pid for p in tree})
+
+
+class UcOrphanSweepExclusiveGateTest(unittest.TestCase):
+    """Card 6521bbce, reviewer NO-GO (R1, probe_orph2.py): with
+    max_concurrent=1, a launch that never spawns anything and never
+    returns must NEVER, through its own delayed sweep, kill a DIFFERENT,
+    later, real launch's own uc_driver. The fix keeps the browser gate
+    held through the sweep, so no other launch can be running while it
+    scans -- this is what the timed sleep below is measuring. POSIX only.
+    """
+
+    def setUp(self) -> None:
+        if os.name != "posix" or not os.path.exists("/bin/sleep"):
+            self.skipTest("needs /bin/sleep (POSIX)")
+
+    @staticmethod
+    def _hanging_forever(**kwargs) -> None:  # noqa: ANN003, ARG004
+        time.sleep(60)  # never spawns anything, never returns
+
+    def test_next_launch_uc_driver_survives_the_previous_delayed_sweep(
+            self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        later_spawned: list = []
+        sweep_delay = 0.6
+
+        def _real_uc_driver_factory(**kwargs):  # noqa: ANN003
+            proc = subprocess.Popen([_fake_uc_driver_binary(), "60"])
+            later_spawned.append(proc)
+            return _FakeDriver("<html></html>", **kwargs)
+
+        fetcher_a = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, launch_timeout_seconds=0.2,
+            orphan_sweep_delay_seconds=sweep_delay)
+        with self.assertRaises(FetchError):
+            with gate.acquire():
+                fetcher_a._launch_with_deadline(self._hanging_forever, {})
+
+        fetcher_b = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, launch_timeout_seconds=5.0)
+        try:
+            with gate.acquire():
+                fetcher_b._launch_with_deadline(_real_uc_driver_factory, {})
+            # Past A's own sweep window: if attribution were unsound, A's
+            # delayed sweep would have fired by now and could have hit B.
+            time.sleep(sweep_delay + 0.3)
+            self.assertIsNone(
+                later_spawned[0].poll(),
+                "the NEXT launch's real uc_driver was killed by the "
+                "PREVIOUS launch's delayed sweep")
+        finally:
+            if later_spawned and later_spawned[0].poll() is None:
+                later_spawned[0].kill()
+
+
+class UcOrphanSweepAttributionTest(unittest.TestCase):
+    """Card 6521bbce acceptance test, reviewer NO-GO: must bite on the
+    attribution mechanism itself, not on driver.quit() -- the factory
+    below never returns, so quit() is provably never invoked; the only
+    thing that can clean up its sibling is the snapshot-diff mechanism
+    under test. POSIX only.
+    """
+
+    def setUp(self) -> None:
+        if os.name != "posix" or not os.path.exists("/bin/sleep"):
+            self.skipTest("needs /bin/sleep (POSIX)")
+
+    def test_sibling_spawned_by_a_launch_that_never_returns_is_cleaned_up(
+            self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+
+        def _never_returns_with_sibling(**kwargs):  # noqa: ANN003
+            proc = subprocess.Popen([_fake_uc_driver_binary(), "60"])
+            spawned.append(proc)
+            time.sleep(60)  # construct() never returns -> quit() never runs
+
+        fetcher = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, launch_timeout_seconds=0.2,
+            orphan_sweep_delay_seconds=0.5)
+        try:
+            with self.assertRaises(FetchError):
+                with gate.acquire():
+                    fetcher._launch_with_deadline(
+                        _never_returns_with_sibling, {})
+            self.assertTrue(spawned, "the sibling was never spawned")
+            self.assertIsNotNone(
+                spawned[0].poll(),
+                "the sibling uc_driver was not cleaned up -- quit() was "
+                "never callable here, since the factory never returned")
+        finally:
+            for proc in spawned:
+                if proc.poll() is None:
+                    proc.kill()
 
 
 class GateWiringTest(unittest.TestCase):
@@ -1030,6 +1156,30 @@ class StaticRouterUcLaunchTimeoutTest(unittest.TestCase):
         # http/tls/browser's factories don't declare launch_timeout_seconds;
         # injecting it must not break their construction.
         router = StaticRouter(_POLICY, uc_launch_timeout_seconds=5.0)
+        http_fetcher = router.select("http")
+        self.assertEqual(http_fetcher.method_name, "http")
+
+
+class StaticRouterUcOrphanSweepDelayTest(unittest.TestCase):
+    """Roadmap 6521bbce: KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS is injected
+    by the kerdoos composition root through StaticRouter/_make_uc -- never
+    read by autolycos itself (invariant 2).
+    """
+
+    def test_injected_value_reaches_the_built_uc_fetcher(self) -> None:
+        router = StaticRouter(_POLICY, uc_orphan_sweep_delay_seconds=42.0)
+        fetcher = router.select("uc")
+        self.assertIsInstance(fetcher, uc.UcFetcher)
+        self.assertEqual(fetcher._orphan_sweep_delay_seconds, 42.0)
+
+    def test_no_value_injected_keeps_the_tier_s_own_default(self) -> None:
+        router = StaticRouter(_POLICY)
+        fetcher = router.select("uc")
+        self.assertEqual(
+            fetcher._orphan_sweep_delay_seconds, uc.ORPHAN_SWEEP_DELAY_SECONDS)
+
+    def test_other_tiers_call_shape_is_unaffected(self) -> None:
+        router = StaticRouter(_POLICY, uc_orphan_sweep_delay_seconds=3.0)
         http_fetcher = router.select("http")
         self.assertEqual(http_fetcher.method_name, "http")
 
