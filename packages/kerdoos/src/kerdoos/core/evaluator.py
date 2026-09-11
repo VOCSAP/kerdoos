@@ -59,6 +59,26 @@ logger = logging.getLogger(__name__)
 ParserFactory = Callable[[ParserSpec], Parser]
 
 
+class _RotatingSendExecutor:
+    """A send-only thread pool slot that can be swapped for a fresh one
+    after a stuck send (roadmap gate ae0a343 C1): callers share ONE instance
+    of this wrapper across ticks, so rotating `.current` is visible to
+    everyone holding the wrapper, unlike a bare ThreadPoolExecutor reference
+    a callee has no way to reseat in its caller's scope."""
+
+    def __init__(self, max_workers: int) -> None:
+        self._max_workers = max_workers
+        self.current = ThreadPoolExecutor(max_workers=max_workers)
+
+    def rotate(self) -> None:
+        stuck = self.current
+        self.current = ThreadPoolExecutor(max_workers=self._max_workers)
+        stuck.shutdown(wait=False)
+
+    def shutdown(self) -> None:
+        self.current.shutdown(wait=False)
+
+
 @dataclass(slots=True)
 class EvaluationSummary:
     """Aggregate counters for one evaluate_tick call (CLI/log reporting)."""
@@ -207,10 +227,9 @@ async def _run_plan_b(
     tick_now: datetime,
     summary: EvaluationSummary,
     send_semaphore: asyncio.Semaphore,
-    send_executor: ThreadPoolExecutor,
+    send_executor: _RotatingSendExecutor,
     send_timeout_seconds: int,
 ) -> None:
-    loop = asyncio.get_running_loop()
     for job in jobs:
         try:
             if state_store.has_active_job_run(job.owner_id, job.id):
@@ -232,34 +251,36 @@ async def _run_plan_b(
                     source_index=source_index.get(job.owner_id, {}),
                     state_store=state_store,
                 )
-                # S4 (ADR 0003 Phase 6b tranche 4): an EXPLICIT ceiling on
-                # simultaneously in-flight sender.send calls, on top of the
-                # per-job DB singleton above (has_active_job_run). Dispatched
-                # via loop.run_in_executor on a DEDICATED send_executor
-                # (roadmap 1c67e5b2) -- never asyncio.to_thread, which shares
-                # asyncio's default executor with Plan A's
-                # to_thread(scrape_and_record). A real blocking SMTP call
-                # cannot stall the event loop while holding the semaphore
-                # slot, and an orphaned send thread (see below) can never
-                # starve the scrape path by competing for the same pool.
-                #
-                # roadmap 58d88fe0: wrapped in wait_for with a TOTAL deadline
-                # -- SmtpSettings.timeout_seconds only bounds each individual
-                # smtplib operation, not the whole send, so a relay that
-                # stays alive and trickles a response just under that
-                # per-operation timeout could otherwise hold the semaphore
-                # slot far longer than send_timeout_seconds. On timeout the
-                # `await` raises and the send_semaphore slot is released,
-                # unblocking the loop even though the underlying thread
-                # cannot itself be cancelled and may linger -- in the
-                # dedicated send_executor, never in the shared default one.
+                # Dedicated executor (roadmap 1c67e5b2): an orphaned send
+                # thread must not occupy the scrape pool. wait_for bounds
+                # the whole send (roadmap 58d88fe0), not just each smtplib
+                # op, so a slow-but-alive relay cannot hold the semaphore
+                # slot indefinitely. Dispatch happens INSIDE the semaphore:
+                # submitting before acquiring it would let two callers'
+                # threads run concurrently even under max_concurrent_sends=1.
                 async with send_semaphore:
+                    cf_future = send_executor.current.submit(
+                        sender.send, job, records, now_iso, tier2_labels)
                     sent = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            send_executor,
-                            sender.send, job, records, now_iso, tier2_labels),
+                        asyncio.wrap_future(cf_future),
                         timeout=send_timeout_seconds,
                     )
+            except asyncio.TimeoutError as exc:
+                # The stuck thread cannot be killed and may linger -- swap
+                # in a fresh executor (roadmap gate ae0a343 C1) so it alone
+                # absorbs the damage, never every later send too.
+                if cf_future.cancel():
+                    logger.warning(
+                        "evaluator: job %s send() future was cancelled "
+                        "before it started running (send pool congested, "
+                        "no thread orphaned by this timeout)", job.name)
+                send_executor.rotate()
+                state_store.update_job_run(
+                    job.id, window_start, status="error",
+                    error=f"{type(exc).__name__}: {exc}"[:500],
+                )
+                summary.errors += 1
+                continue
             except Exception as exc:  # noqa: BLE001 -- one job must not kill the tick
                 state_store.update_job_run(
                     job.id, window_start, status="error",
@@ -332,7 +353,7 @@ async def evaluate_tick(
     now: datetime | None = None,
     max_concurrent_sends: int = 1,
     send_semaphore: asyncio.Semaphore | None = None,
-    send_executor: ThreadPoolExecutor | None = None,
+    send_executor: _RotatingSendExecutor | None = None,
     reaper_timeout_seconds: int = 300,
 ) -> EvaluationSummary:
     """Run exactly ONE evaluation tick: a reaper sweep, then Plan A (scrape
@@ -367,18 +388,10 @@ async def evaluate_tick(
     workers<=1 guard-rail plus the per-job DB-level has_active_job_run
     singleton, which IS cross-process).
 
-    send_executor (roadmap 1c67e5b2): the thread pool Plan B's sender.send
-    calls run on, via loop.run_in_executor -- deliberately SEPARATE from
-    asyncio's default executor, which Plan A's to_thread(scrape_and_record)
-    uses. A send that overruns send_timeout_seconds leaves its OS thread
-    orphaned (Python cannot kill a running thread); isolating it in its own
-    pool means that orphan can only ever starve future sends, never a
-    scrape. By default a FRESH ThreadPoolExecutor(max_workers=
-    max_concurrent_sends) is built per call and shut down with
-    shutdown(wait=False) once _run_plan_b returns -- non-blocking, since
-    waiting would defeat the point on a still-stuck orphan. Same reuse
-    contract as send_semaphore: run_evaluator_loop builds ONE instance and
-    passes it to every tick."""
+    send_executor (roadmap 1c67e5b2): the dedicated, self-rotating pool
+    Plan B's sends run on, isolated from Plan A's scrape pool. By default a
+    fresh one is built per call and shut down after; run_evaluator_loop
+    shares ONE instance across every tick, same contract as send_semaphore."""
     tick_now = now if now is not None else datetime.now(timezone.utc)
     if tick_now.tzinfo is None:
         tick_now = tick_now.replace(tzinfo=timezone.utc)
@@ -424,7 +437,7 @@ async def evaluate_tick(
     owns_executor = send_executor is None
     executor = (
         send_executor if send_executor is not None
-        else ThreadPoolExecutor(max_workers=max(max_concurrent_sends, 1)))
+        else _RotatingSendExecutor(max_workers=max(max_concurrent_sends, 1)))
     try:
         await _run_plan_b(
             jobs=jobs, source_index=source_index, state_store=state_store,
@@ -434,10 +447,7 @@ async def evaluate_tick(
         )
     finally:
         if owns_executor:
-            # wait=False: an orphaned send thread cannot be killed anyway,
-            # so blocking teardown on it would just re-create the wedge
-            # this executor exists to avoid.
-            executor.shutdown(wait=False)
+            executor.shutdown()
     return summary
 
 
@@ -467,21 +477,26 @@ async def run_evaluator_loop(
     here and reuses both across every tick of this loop -- ticks of the SAME
     loop never overlap (each await blocks the next), but sharing one
     instance is simpler than rebuilding it every iteration and matches
-    run_evaluator_loop's role as a single persistent evaluator."""
+    run_evaluator_loop's role as a single persistent evaluator. The
+    send_executor may internally rotate itself after a stuck send (gate
+    ae0a343 C1); this loop only owns its final shutdown on exit."""
     event = stop_event if stop_event is not None else asyncio.Event()
     send_semaphore = asyncio.Semaphore(max_concurrent_sends)
-    send_executor = ThreadPoolExecutor(max_workers=max(max_concurrent_sends, 1))
-    while not event.is_set():
-        try:
-            await evaluate_tick(
-                config_store=config_store, state_store=state_store,
-                router=router, parser_factory=parser_factory, sender=sender,
-                send_semaphore=send_semaphore, send_executor=send_executor,
-                reaper_timeout_seconds=reaper_timeout_seconds,
-            )
-        except Exception:  # noqa: BLE001 -- one crashed tick must not kill the loop
-            logger.exception("evaluator: tick failed unexpectedly")
-        try:
-            await asyncio.wait_for(event.wait(), timeout=tick_seconds)
-        except asyncio.TimeoutError:
-            pass
+    send_executor = _RotatingSendExecutor(max_workers=max(max_concurrent_sends, 1))
+    try:
+        while not event.is_set():
+            try:
+                await evaluate_tick(
+                    config_store=config_store, state_store=state_store,
+                    router=router, parser_factory=parser_factory, sender=sender,
+                    send_semaphore=send_semaphore, send_executor=send_executor,
+                    reaper_timeout_seconds=reaper_timeout_seconds,
+                )
+            except Exception:  # noqa: BLE001 -- one crashed tick must not kill the loop
+                logger.exception("evaluator: tick failed unexpectedly")
+            try:
+                await asyncio.wait_for(event.wait(), timeout=tick_seconds)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        send_executor.shutdown()

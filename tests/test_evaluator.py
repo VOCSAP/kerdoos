@@ -31,6 +31,7 @@ from kerdoos.core.app.services import AppService, DigestJobSpec, Principal, Prod
 from kerdoos.core.domain import Availability, Extract, ScrapeStatus
 from kerdoos.core.evaluator import (
     _run_plan_a,
+    _RotatingSendExecutor,
     EvaluationSummary,
     evaluate_tick,
     should_start_intra_process_evaluator,
@@ -950,6 +951,92 @@ class PlanBDedicatedExecutorTest(unittest.IsolatedAsyncioTestCase):
             timeout=5.0,
         )
         self.assertEqual(summary2.scraped_sources, 1)  # job-scrape, tick2
+        self.assertEqual(summary2.skipped_jobs, 1)  # job-slow, same window
+
+
+class SharedSendExecutorRotationTest(unittest.IsolatedAsyncioTestCase):
+    """gate ae0a343 C1: run_evaluator_loop shares ONE send_executor across
+    every tick -- an orphaned send from an earlier tick must not
+    permanently occupy that executor's only worker and starve every later
+    tick's sends too. _run_plan_b rotates the executor on TimeoutError."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._never_set = threading.Event()
+        self.addCleanup(self._never_set.set)
+
+    async def test_tick2_job_is_notified_despite_tick1_orphan(self) -> None:
+        tick1 = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        tick2 = tick1 + timedelta(hours=1)
+
+        config = SqliteConfigStore(Path(self._tmp.name) / "config.db")
+        state = SqliteStateStore(Path(self._tmp.name) / "state.db")
+        self.addCleanup(config.close)
+        self.addCleanup(state.close)
+        domain_policy = CatalogueDomainPolicy(config)
+        router = _StubRouter({"http": _FakeFetcher()})
+        service = AppService(config, state, router, domain_policy, build_parser)
+        config.add_site(_SITE)
+
+        # Only job-slow exists for tick1 -- it alone occupies the shared,
+        # single-worker executor and times out.
+        service.add_product("slow-owner", ProductSpec("p1"))
+        slow_source = service.add_source(
+            "slow-owner", "p1", "kabum", "https://www.kabum.com.br/p/slow")
+        service.create_job(
+            Principal(owner_id="slow-owner"),
+            DigestJobSpec(name="job-slow", frequency_kind="daily",
+                          source_ids=(slow_source.source_id,)))
+        state.record("slow-owner", ScrapeRecord(
+            source_id=slow_source.source_id, ts=(tick1 - _minutes(1)).isoformat(),
+            status=ScrapeStatus.OK, price_pix_cents=100, price_card_cents=110,
+            currency="BRL", availability=Availability.IN_STOCK, method="http",
+            error=None,
+        ))
+
+        sender = _HangingThenFastSender(self._never_set)
+        shared_executor = _RotatingSendExecutor(max_workers=1)
+
+        summary1 = await evaluate_tick(
+            config_store=config, state_store=state, router=router,
+            parser_factory=_fake_parser_factory, sender=sender, now=tick1,
+            max_concurrent_sends=1, reaper_timeout_seconds=0.05,
+            send_executor=shared_executor,
+        )
+        self.assertEqual(summary1.errors, 1)  # job-slow's send timed out
+
+        # job-fast is created only NOW, so it never competed with job-slow
+        # for tick1's single worker -- it exists purely to prove tick2 can
+        # still notify SOMETHING through the same shared executor instance.
+        service.add_product("fast-owner", ProductSpec("p1"))
+        fast_source = service.add_source(
+            "fast-owner", "p1", "kabum", "https://www.kabum.com.br/p/fast")
+        service.create_job(
+            Principal(owner_id="fast-owner"),
+            DigestJobSpec(name="job-fast", frequency_kind="hourly",
+                          source_ids=(fast_source.source_id,)))
+        state.record("fast-owner", ScrapeRecord(
+            source_id=fast_source.source_id, ts=(tick2 - _minutes(1)).isoformat(),
+            status=ScrapeStatus.OK, price_pix_cents=200, price_card_cents=210,
+            currency="BRL", availability=Availability.IN_STOCK, method="http",
+            error=None,
+        ))
+
+        # job-slow is skipped (same idempotence window, daily); if rotation
+        # never happened, job-fast would time out too, still stuck behind
+        # tick1's orphan -- bound the assertion so a regression fails fast.
+        summary2 = await asyncio.wait_for(
+            evaluate_tick(
+                config_store=config, state_store=state, router=router,
+                parser_factory=_fake_parser_factory, sender=sender, now=tick2,
+                max_concurrent_sends=1, reaper_timeout_seconds=5.0,
+                send_executor=shared_executor,
+            ),
+            timeout=5.0,
+        )
+        self.assertEqual(summary2.notified_jobs, 1)
+        self.assertIn("job-fast", sender.calls)
         self.assertEqual(summary2.skipped_jobs, 1)  # job-slow, same window
 
 
