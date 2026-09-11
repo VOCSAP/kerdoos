@@ -244,10 +244,21 @@ periodiquement (resolution proposee : **60 s**). A chaque tick, l'**evaluateur**
    sequence via `asyncio.to_thread`, sans file. La borne memoire est la porte
    Chromium partagee (`KERDOOS_BROWSER_MAX_CONCURRENT`, ADR 0002 Decision 2), que le
    Plan A prend comme tout autre appelant des tiers `browser` et `uc`.
-2. **Plan B** (notify) : pour chaque job `enabled`, calcule sa **window_start** = la
-   plus recente occurrence planifiee <= now (cron + tz). **Idempotence** : si
-   `job_runs` contient deja une ligne `(job_id, window_start)`, **skip** (deja
-   traite). Sinon, rendre + envoyer + INSERT `job_runs`.
+2. **Plan B** (notify) : pour chaque job `enabled`, dans cet ordre :
+   - skip si le job a deja une ligne `job_runs` active (`queued`/`running`,
+     coalescing ci-dessous) ;
+   - collecte des releves de sa selection. S'il n'y a rien a envoyer, ou si l'envoi
+     est refuse pour capacite, aucune ligne n'est ecrite et la fenetre reste
+     rejouable ;
+   - calcul de sa **window_start** = la plus recente occurrence planifiee <= now
+     (cron + tz) ;
+   - **INSERT `job_runs` en `queued`, AVANT l'envoi**. C'est cet INSERT qui porte
+     l'**idempotence** : si la fenetre a deja ete traitee, la cle primaire
+     `(job_id, window_start)` fait qu'il n'insere rien (`ON CONFLICT DO NOTHING`),
+     et le job est saute. Il n'y a pas de lecture prealable separee ;
+   - passage en `running`, puis envoi (le digest est rendu par l'envoyeur, pendant
+     l'envoi) ;
+   - statut terminal : `sent`, `error` ou `skipped_no_email`.
 
 ### Idempotence et redemarrage
 La clef `(job_id, window_start)` rend chaque fenetre planifiee **exactement-une-fois**.
