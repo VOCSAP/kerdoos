@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 
 import yaml
+from autolycos.browser_gate import BrowserGate
 from autolycos.router import StaticRouter
 
 from kerdoos.core.app.services import AppService, Principal, ProductSpec
@@ -40,13 +41,24 @@ from kerdoos.registry.yaml_store import parse_products_yaml, parse_sites_yaml
 from kerdoos.persistence.sqlite_store import SqliteStateStore
 
 
+def _build_browser_gate(state_db: str) -> BrowserGate:
+    # ADR 0002 Decision 1/2 (card ca30b736): ONE gate shared by the browser
+    # AND uc tiers, inter-process via the state-db directory (the shared
+    # /data volume in production) -- injected here, autolycos never reads
+    # KERDOOS_BROWSER_MAX_CONCURRENT itself (invariant 2). state_db is the
+    # CLI's own --db arg (may diverge from KERDOOS_STATE_DB), not settings.
+    return BrowserGate(
+        max_concurrent=get_settings().browser_max_concurrent,
+        lock_dir=Path(state_db).parent)
+
+
 def _build_app_service(
     config_db: str, db: str,
 ) -> tuple[AppService, SqliteConfigStore, SqliteStateStore]:
     config_store = SqliteConfigStore(config_db)
     state_store = SqliteStateStore(db)
     domain_policy = CatalogueDomainPolicy(config_store)
-    router = StaticRouter(domain_policy)
+    router = StaticRouter(domain_policy, browser_gate=_build_browser_gate(db))
     service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
     return service, config_store, state_store
@@ -72,7 +84,8 @@ def cmd_digest(args: argparse.Namespace) -> int:
     second implementation of the tick logic."""
     _service, config_store, state_store = _build_app_service(args.config_db, args.db)
     domain_policy = CatalogueDomainPolicy(config_store)
-    router = StaticRouter(domain_policy)
+    router = StaticRouter(
+        domain_policy, browser_gate=_build_browser_gate(args.db))
     settings = get_settings()
     try:
         log_unavailable_fetcher_tiers(config_store)

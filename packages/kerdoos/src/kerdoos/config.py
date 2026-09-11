@@ -41,6 +41,14 @@ inside interfaces/web/app.py's ASGI lifespan where an uncaught exception
 would fail the whole WebUI startup, not just the digest path. The TOTAL
 send deadline (beyond a single smtplib operation) is enforced separately in
 core.evaluator._run_plan_b via asyncio.wait_for(..., timeout=digest_reaper_timeout_seconds).
+
+KERDOOS_BROWSER_MAX_CONCURRENT (card ca30b736, ADR 0002 Decision 1/2): the
+max number of Chromium processes (browser tier patchright + uc tier
+seleniumbase, ONE shared gate) alive at once. Default 1; a non-positive or
+non-integer value floors to the default with a warning (never crashes at
+import, same discipline as _safe_workers). Read here and INJECTED into
+autolycos.BrowserGate at composition-root time -- autolycos never reads this
+env var itself (invariant 2).
 """
 
 from __future__ import annotations
@@ -75,6 +83,10 @@ DEFAULT_SMTP_TIMEOUT_SECONDS = 30
 # Single-process default (ADR 0003 Decision 4).
 DEFAULT_WORKERS = 1
 
+# ADR 0002 Decision 1/2: at most this many Chromium processes (browser tier
+# patchright + uc tier seleniumbase, sharing ONE gate) alive at once.
+DEFAULT_BROWSER_MAX_CONCURRENT = 1
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -92,6 +104,7 @@ class Settings:
     smtp_use_tls: bool
     smtp_timeout_seconds: float
     digest_reaper_timeout_seconds: int
+    browser_max_concurrent: int
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -189,4 +202,7 @@ def get_settings() -> Settings:
         digest_reaper_timeout_seconds=_env_number(
             "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
             DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, int, lambda v: v > 0),
+        browser_max_concurrent=_env_number(
+            "KERDOOS_BROWSER_MAX_CONCURRENT",
+            DEFAULT_BROWSER_MAX_CONCURRENT, int, lambda v: v > 0),
     )

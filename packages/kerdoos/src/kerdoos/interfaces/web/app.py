@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from autolycos.browser_gate import BrowserGate
 from autolycos.router import StaticRouter
 
 from kerdoos.config import get_settings
@@ -79,7 +80,14 @@ def create_app() -> FastAPI:
     config_store = SqliteConfigStore(settings.config_db)
     state_store = SqliteStateStore(settings.state_db)
     domain_policy = CatalogueDomainPolicy(config_store)
-    router = StaticRouter(domain_policy)
+    # ADR 0002 Decision 1/2 (card ca30b736): ONE gate shared by the browser
+    # AND uc tiers, inter-process via the STATE_DB directory (the shared
+    # /data volume in production) -- injected here, autolycos never reads
+    # KERDOOS_BROWSER_MAX_CONCURRENT itself (invariant 2).
+    browser_gate = BrowserGate(
+        max_concurrent=settings.browser_max_concurrent,
+        lock_dir=Path(settings.state_db).parent)
+    router = StaticRouter(domain_policy, browser_gate=browser_gate)
     log_unavailable_fetcher_tiers(config_store)
 
     @asynccontextmanager

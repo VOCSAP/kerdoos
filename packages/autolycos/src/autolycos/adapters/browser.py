@@ -44,6 +44,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from urllib.parse import urlsplit
 
+from ..browser_gate import BrowserGate, default_browser_gate
 from ..challenge import looks_challenged
 from ..egress_proxy import PinningProxy, strip_dangerous_browser_args
 from ..errors import FetchError
@@ -99,9 +100,11 @@ class BrowserFetcher:
     method_name = "browser"
 
     def __init__(self, domain_policy: DomainPolicy,
-                 subresource_domains: Iterable[str] = ()) -> None:
+                 subresource_domains: Iterable[str] = (),
+                 gate: BrowserGate | None = None) -> None:
         self._domain_policy = domain_policy
         self._subresource_domains = _normalize_domains(subresource_domains)
+        self._gate = gate if gate is not None else default_browser_gate()
 
     def _subresource_allowed(self, host: str) -> bool:
         """Suffix-match a request host against the render-CDN allowlist."""
@@ -120,7 +123,9 @@ class BrowserFetcher:
         # Loopback IP-pinning egress-proxy: Chromium routes every connection
         # (primary + sub-resources) through it and never resolves the target
         # itself, closing the DNS-rebind TOCTOU at the network layer (ADR S9).
-        with PinningProxy() as proxy, sync_playwright() as pw:
+        # Gate acquired around the whole launch-to-close cycle (card ca30b736:
+        # ADR 0002 Decision 1's single-Chromium OOM-coherence guarantee).
+        with self._gate.acquire(), PinningProxy() as proxy, sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
                 proxy={"server": proxy.url},

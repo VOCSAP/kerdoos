@@ -267,5 +267,43 @@ class SubResourceGateTest(unittest.TestCase):
                 "https://http2.mlstatic.com/x")
 
 
+class GateWiringTest(unittest.TestCase):
+    """Card ca30b736: fetch() must acquire the browser gate around the
+    launch-to-close cycle, whether an explicit gate is injected or the
+    module-level default is used."""
+
+    def _fetch_with_spy_gate(self, gate) -> None:
+        page = _FakePage("<html>" + "x" * 5000, 200)
+        chromium = _FakeChromium(_FakeBrowser(page))
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                browser.BrowserFetcher(_POLICY, gate=gate).fetch(
+                    "https://mercadolivre.com.br/p/MLB1")
+
+    def test_fetch_acquires_the_injected_gate_exactly_once(self) -> None:
+        gate = mock.MagicMock()
+        self._fetch_with_spy_gate(gate)
+        gate.acquire.assert_called_once()
+        # The hold object's context-manager protocol was used (entered AND
+        # exited), not just gate.acquire() called and ignored.
+        hold = gate.acquire.return_value
+        hold.__enter__.assert_called_once()
+        hold.__exit__.assert_called_once()
+
+    def test_fetch_uses_the_default_gate_when_none_injected(self) -> None:
+        with mock.patch(
+            "autolycos.adapters.browser.default_browser_gate"
+        ) as default_gate_fn:
+            spy_gate = mock.MagicMock()
+            default_gate_fn.return_value = spy_gate
+            self._fetch_with_spy_gate(None)
+        spy_gate.acquire.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

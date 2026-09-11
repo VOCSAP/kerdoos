@@ -467,5 +467,37 @@ class UcPinExecutionTest(unittest.TestCase):
             driver.quit()
 
 
+class GateWiringTest(unittest.TestCase):
+    """Card ca30b736: fetch() must acquire the browser gate around the
+    launch-to-quit cycle -- the SAME gate type as the browser tier, since uc
+    reuses its Chromium."""
+
+    def _fetch_with_gate(self, gate) -> None:
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(
+                uc, "_load_seleniumbase",
+                return_value=lambda **kw: _FakeDriver("<html>ok</html>", **kw),
+            ):
+                uc.UcFetcher(_POLICY, gate=gate).fetch(_MAGALU_URL)
+
+    def test_fetch_acquires_the_injected_gate_exactly_once(self) -> None:
+        gate = mock.MagicMock()
+        self._fetch_with_gate(gate)
+        gate.acquire.assert_called_once()
+        hold = gate.acquire.return_value
+        hold.__enter__.assert_called_once()
+        hold.__exit__.assert_called_once()
+
+    def test_fetch_uses_the_default_gate_when_none_injected(self) -> None:
+        with mock.patch(
+            "autolycos.adapters.uc.default_browser_gate"
+        ) as default_gate_fn:
+            spy_gate = mock.MagicMock()
+            default_gate_fn.return_value = spy_gate
+            self._fetch_with_gate(None)
+        spy_gate.acquire.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

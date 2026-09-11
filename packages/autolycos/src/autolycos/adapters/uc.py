@@ -51,6 +51,7 @@ import os
 import re
 from collections.abc import Iterable
 
+from ..browser_gate import BrowserGate, default_browser_gate
 from ..challenge import looks_challenged
 from ..errors import FetchError
 from ..ports import FetchResult
@@ -154,9 +155,11 @@ class UcFetcher:
     method_name = "uc"
 
     def __init__(self, domain_policy: DomainPolicy,
-                 subresource_domains: Iterable[str] = ()) -> None:
+                 subresource_domains: Iterable[str] = (),
+                 gate: BrowserGate | None = None) -> None:
         self._domain_policy = domain_policy
         self._subresource_domains = tuple(subresource_domains)
+        self._gate = gate if gate is not None else default_browser_gate()
 
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using SeleniumBase, so a
@@ -180,23 +183,28 @@ class UcFetcher:
         binary_location = _find_patchright_chromium()
         if binary_location is not None:
             driver_kwargs["binary_location"] = binary_location
-        driver = driver_cls(**driver_kwargs)
-        try:
-            # UC open + reconnect lets the Akamai JS challenge auto-resolve.
-            driver.uc_open_with_reconnect(url, reconnect_time=RECONNECT_TIME)
-            driver.sleep(RENDER_WAIT)
-            html = driver.get_page_source()
-            if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
-                raise FetchError(
-                    f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
-            status = _read_status(driver)
-            return FetchResult(
-                html=html,
-                status=status,
-                method=self.method_name,
-                # challenged is derived from the RENDERED DOM (Akamai serves its
-                # challenge at 200), not the status (invariant #3 + retry).
-                challenged=looks_challenged(status, html),
-            )
-        finally:
-            driver.quit()
+        # Gate acquired around the whole launch-to-quit cycle (card ca30b736:
+        # ADR 0002 Decision 1's single-Chromium OOM-coherence guarantee --
+        # the SAME gate as the browser tier, since uc reuses its Chromium).
+        with self._gate.acquire():
+            driver = driver_cls(**driver_kwargs)
+            try:
+                # UC open + reconnect lets the Akamai JS challenge auto-resolve.
+                driver.uc_open_with_reconnect(url, reconnect_time=RECONNECT_TIME)
+                driver.sleep(RENDER_WAIT)
+                html = driver.get_page_source()
+                if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
+                    raise FetchError(
+                        f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
+                status = _read_status(driver)
+                return FetchResult(
+                    html=html,
+                    status=status,
+                    method=self.method_name,
+                    # challenged is derived from the RENDERED DOM (Akamai
+                    # serves its challenge at 200), not the status
+                    # (invariant #3 + retry).
+                    challenged=looks_challenged(status, html),
+                )
+            finally:
+                driver.quit()

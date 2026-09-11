@@ -16,15 +16,16 @@ import os
 import unittest
 
 from kerdoos.config import (
-    DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_SMTP_PORT,
-    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS, get_settings,
+    DEFAULT_BROWSER_MAX_CONCURRENT, DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
+    DEFAULT_SMTP_PORT, DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS,
+    get_settings,
 )
 
 _SMTP_ENV_VARS = (
     "KERDOOS_SMTP_HOST", "KERDOOS_SMTP_PORT", "KERDOOS_SMTP_FROM",
     "KERDOOS_SMTP_USERNAME", "KERDOOS_SMTP_PASSWORD", "KERDOOS_SMTP_USE_TLS",
     "KERDOOS_SMTP_TIMEOUT_SECONDS", "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
-    "KERDOOS_WORKERS",
+    "KERDOOS_WORKERS", "KERDOOS_BROWSER_MAX_CONCURRENT",
 )
 
 
@@ -222,6 +223,32 @@ class WorkersFloorTest(_SettingsTestBase):
                 with self.assertLogs("kerdoos.config", level="WARNING"):
                     settings = get_settings()
                 self.assertEqual(settings.workers, DEFAULT_WORKERS)
+
+
+class BrowserMaxConcurrentFloorTest(_SettingsTestBase):
+    """Card ca30b736: a malformed KERDOOS_BROWSER_MAX_CONCURRENT warns and
+    falls back to 1 instead of crashing at settings-read time."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.browser_max_concurrent, DEFAULT_BROWSER_MAX_CONCURRENT)
+
+    def test_valid_positive_integer_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_BROWSER_MAX_CONCURRENT"] = "3"
+        settings = get_settings()
+        self.assertEqual(settings.browser_max_concurrent, 3)
+
+    def test_invalid_or_non_positive_values_float_to_one_with_warning(self) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_BROWSER_MAX_CONCURRENT"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(settings.browser_max_concurrent, 1)
+                self.assertTrue(
+                    any("KERDOOS_BROWSER_MAX_CONCURRENT" in msg
+                        for msg in cm.output), cm.output)
 
 
 if __name__ == "__main__":
