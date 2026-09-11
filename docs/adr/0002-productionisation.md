@@ -188,8 +188,11 @@ On garde la structure reelle actuelle : **un** Dockerfile multi-stage, stage `ba
 partage (deps), deux targets finaux -> deux tags :
 
 - **`kerdoos:slim`** : tiers `http` + `tls` + extra `web` (uvicorn). Image legere,
-  cold start rapide. L'escalade s'arrete a `tls` ; `browser.mode=autonomous` sur
-  cette image echoue proprement (fail-closed a la construction du fetcher).
+  cold start rapide. Un site configure avec `fetcher: browser` ou `fetcher: uc`
+  sur cette image est fail-closed PAR SOURCE : signale une fois au demarrage
+  (log), refuse tout ajout d'une nouvelle source vers ce site, et chaque source
+  deja configuree est ignoree au scrape (aucun ScrapeRecord ecrit) au lieu
+  d'etre rejouee indefiniment en INDETERMINATE (card 3aeb8a19).
 - **`kerdoos:autonomous`** : + tiers `browser` (patchright) + `uc` (seleniumbase).
   Embarque le Chromium **de patchright** (pas celui de playwright vanilla).
 

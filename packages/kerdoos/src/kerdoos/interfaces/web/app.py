@@ -37,6 +37,7 @@ from kerdoos.core.app.services import AppService
 from kerdoos.core.evaluator import (
     run_evaluator_loop, should_start_intra_process_evaluator)
 from kerdoos.digest.factory import build_sender
+from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
 from kerdoos.interfaces.web import health
 from kerdoos.interfaces.web.routers import admin, protected, public, web
 from kerdoos.interfaces.web.security import SessionCookie
@@ -79,6 +80,7 @@ def create_app() -> FastAPI:
     state_store = SqliteStateStore(settings.state_db)
     domain_policy = CatalogueDomainPolicy(config_store)
     router = StaticRouter(domain_policy)
+    log_unavailable_fetcher_tiers(config_store)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:

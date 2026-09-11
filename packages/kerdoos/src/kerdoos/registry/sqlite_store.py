@@ -487,6 +487,18 @@ class SqliteConfigStore:
             ]
         return tuple(jobs)
 
+    def list_referenced_fetcher_tiers(self) -> frozenset[str]:
+        # Owner-anonymous by construction: only sites.fetcher comes back, no
+        # owner_id/source_id/url (card 3aeb8a19). Joins sources -> sites so a
+        # catalogued site with zero configured sources never counts (nothing
+        # will ever try to scrape it).
+        with self._op() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT sites.fetcher FROM sources "
+                "JOIN sites ON sites.name = sources.site"
+            ).fetchall()
+        return frozenset(row["fetcher"] for row in rows)
+
     def get_job(self, owner: str, job_id: str) -> DigestJob:
         with self._op() as conn:
             row = conn.execute(

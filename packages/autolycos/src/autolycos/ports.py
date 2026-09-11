@@ -52,3 +52,12 @@ class Router(Protocol):
         self, fetcher_name: str, subresource_domains: Iterable[str] = ()
     ) -> Fetcher:
         ...
+
+    def tier_available(self, fetcher_name: str) -> bool:
+        """True if this tier's optional dependency is importable HERE.
+
+        A cheap presence check (no import executed): lets a caller in core/
+        (which cannot import router.py, a concrete module) ask "would select()
+        succeed" without triggering the very deferred import it is trying to
+        avoid on a deployment image that lacks the tier's tool."""
+        ...

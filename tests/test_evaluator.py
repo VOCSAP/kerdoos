@@ -74,6 +74,12 @@ class _StubRouter:
             raise target
         return target
 
+    def tier_available(self, fetcher_name: str) -> bool:
+        # This double models routing (select), never deployment-tier
+        # availability (card 3aeb8a19) -- always report available so
+        # AppService.add_source/run_now's new guard is a no-op here.
+        return True
+
 
 class _FakeParser:
     def extract(self, html: str) -> Extract:

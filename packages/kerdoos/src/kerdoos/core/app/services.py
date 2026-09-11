@@ -24,6 +24,7 @@ from kerdoos.core.domain import Availability, ScrapeStatus
 from kerdoos.core.orchestrator import scrape_and_record
 from kerdoos.parsers.ports import Parser, ParserSpec
 from kerdoos.persistence.ports import ScrapeRecord, StateStore
+from kerdoos.registry.errors import FetcherTierUnavailableError
 from kerdoos.registry.ports import (
     DigestJob,
     MutableConfigStore,
@@ -174,6 +175,16 @@ class AppService:
         registry = self._config.load(owner)
         if site not in registry.sites:
             raise KeyError(f"unknown site {site!r}")
+        # Deployment-mismatch guard (card 3aeb8a19): a site's fetcher tier can
+        # be unimportable on THIS image (e.g. a browser/uc site on slim). Reject
+        # here, at the single choke point every interface (CLI/WebUI/future MCP)
+        # goes through, instead of letting it surface only at the first scrape.
+        fetcher = registry.sites[site].fetcher
+        if not self._router.tier_available(fetcher):
+            raise FetcherTierUnavailableError(
+                f"site {site!r} needs fetcher tier {fetcher!r}, which is not "
+                "available in this deployment"
+            )
         validate_source_url(
             url, ctx=f"add_source(owner={owner!r}, product_key={product_key!r})",
             domain_policy=self._domain_policy,
@@ -278,6 +289,15 @@ class AppService:
         for _product, source, site in registry.iter_sources():
             if site.tier2_label:
                 tier2_labels[source.source_id] = site.tier2_label
+            # Deployment-mismatch skip (card 3aeb8a19): a source added before
+            # this guard existed (or before a redeploy from autonomous to
+            # slim) can still reference an unavailable tier. Skip it -- same
+            # treatment as a source absent from the registry (invariant #3) --
+            # instead of writing an INDETERMINATE record every cadence
+            # forever, which add_source's guard alone cannot retroactively
+            # prevent. No record for this source this cycle.
+            if not self._router.tier_available(site.fetcher):
+                continue
             # Per-source guard (invariants #3/#8): a failing source (unknown
             # fetcher/parser tier, store error, ...) must never abort the run
             # nor suppress the aggregated digest.

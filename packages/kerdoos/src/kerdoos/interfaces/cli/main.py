@@ -31,6 +31,7 @@ from kerdoos.core.evaluator import evaluate_tick
 from kerdoos.config import get_settings
 from kerdoos.digest.factory import build_sender
 from kerdoos.digest.render import render_digest
+from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
 from kerdoos.parsers.factory import build_parser
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.ports import SiteConfig
@@ -54,6 +55,7 @@ def _build_app_service(
 def cmd_run(args: argparse.Namespace) -> int:
     service, config_store, state_store = _build_app_service(args.config_db, args.db)
     try:
+        log_unavailable_fetcher_tiers(config_store)
         result = service.run_now(args.owner)
     finally:
         config_store.close()
@@ -73,6 +75,7 @@ def cmd_digest(args: argparse.Namespace) -> int:
     router = StaticRouter(domain_policy)
     settings = get_settings()
     try:
+        log_unavailable_fetcher_tiers(config_store)
         sender = build_sender(
             settings, config_store, domain_policy, config_db_path=args.config_db)
         summary = asyncio.run(evaluate_tick(

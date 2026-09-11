@@ -290,6 +290,19 @@ class ConfigStore(Protocol):
         this store, ADR 0003 finding S2)."""
         ...
 
+    def list_referenced_fetcher_tiers(self) -> frozenset[str]:
+        """Distinct fetcher tier names referenced by at least one configured
+        product source, across ALL owners (card 3aeb8a19: boot-time fetcher
+        availability check).
+
+        Owner-anonymous by construction (only tier names, e.g. {"http",
+        "browser"}, come back -- no owner_id/source_id/url), so unlike
+        list_all_enabled_jobs this carries no cross-tenant existence oracle.
+        Still composition-root-only in practice: it exists to let the WebUI
+        lifespan and the CLI log ONE boot-time warning per unavailable tier,
+        not for a tenant-facing read."""
+        ...
+
 
 @runtime_checkable
 class MutableConfigStore(ConfigStore, Protocol):

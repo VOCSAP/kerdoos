@@ -13,6 +13,7 @@ tier.
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Callable, Iterable
 
 from .adapters.http import HttpFetcher
@@ -63,6 +64,34 @@ _FACTORIES: dict[str, Callable[[DomainPolicy, Iterable[str]], Fetcher]] = {
     "uc": _make_uc,
 }
 
+# Optional dependency each tier's factory imports lazily (mirrors _FACTORIES
+# above -- keep the two in sync). None means always available (stdlib/requests
+# baseline, no optional import).
+_TIER_MODULES: dict[str, str | None] = {
+    "http": None,
+    "tls": "curl_cffi",
+    "browser": "patchright",
+    "uc": "seleniumbase",
+}
+
+
+def tier_available(fetcher_name: str) -> bool:
+    """True if fetcher_name's optional dependency is importable in this
+    deployment. Uses importlib.util.find_spec, which locates a module WITHOUT
+    importing it -- a slim image still never pays the cost of an unavailable
+    tier's import (same rationale as the deferred imports in _make_tls/
+    _make_browser/_make_uc above).
+
+    An UNKNOWN tier name (not in _TIER_MODULES, e.g. a config typo) is
+    reported as available -- this check is scoped to "the tier exists but
+    this image lacks its optional dependency" (card 3aeb8a19), not to
+    tier-name validation; select() still raises UnknownFetcherError for that,
+    unchanged."""
+    module = _TIER_MODULES.get(fetcher_name)
+    if module is None:
+        return True
+    return importlib.util.find_spec(module) is not None
+
 
 class UnknownFetcherError(KeyError):
     """The site config references a fetcher tier with no adapter wired."""
@@ -90,3 +119,6 @@ class StaticRouter:
             self._cache[key] = _FACTORIES[fetcher_name](
                 self._domain_policy, subresource_domains)
         return self._cache[key]
+
+    def tier_available(self, fetcher_name: str) -> bool:
+        return tier_available(fetcher_name)
