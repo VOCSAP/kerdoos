@@ -12,6 +12,7 @@ this DNS lookup and the tool's own resolution (DNS-rebind).
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -19,6 +20,13 @@ from urllib.parse import urlsplit
 from .errors import FetchError, SSRFError
 
 ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+# RFC 3986 unreserved + reserved (gen-delims + sub-delims) + the percent
+# escape marker. An allowlist, not a denylist of "known-bad" characters
+# (quote, backslash, angle brackets, backtick, space, control bytes): closes
+# the injection at the shared choke point (check_scheme_and_domain, roadmap
+# c06082a5) against any byte outside RFC 3986, known or not yet enumerated.
+_RFC3986_SAFE_RE = re.compile(r"^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*$")
 
 _DEFAULT_PORT = {"http": 80, "https": 443}
 
@@ -98,6 +106,8 @@ def check_scheme_and_domain(url: str, domain_policy: DomainPolicy) -> tuple[str,
 
     Returns (scheme, host) on success. Raises SSRFError on any rejection.
     """
+    if not _RFC3986_SAFE_RE.fullmatch(url):
+        raise SSRFError("url contains a character outside RFC 3986")
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:

@@ -160,6 +160,74 @@ class ValidateTargetTest(unittest.TestCase):
                     "https://kabum.com.br/produto/1", _POLICY)
 
 
+class RfcOutOfBandCharacterTest(unittest.TestCase):
+    """Roadmap c06082a5: SeleniumBase's uc_open_with_reconnect interpolates
+    the URL, unescaped, into a JS string handed to execute_script. A stored
+    source URL carrying one of these characters must never reach that call --
+    check_scheme_and_domain is the single shared choke point (also used by
+    kerdoos.registry.url_validation.validate_source_url and
+    kerdoos.digest.view._safe_href). One test per forbidden character class:
+    a future regression in the allowlist regex for a single character must
+    not hide behind an unrelated character's coverage.
+    """
+
+    _BASE = "https://www.kabum.com.br/produto/1"
+
+    def test_double_quote_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + '");alert(1)//', _POLICY)
+
+    def test_backslash_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "\\x", _POLICY)
+
+    def test_angle_bracket_open_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "<script>", _POLICY)
+
+    def test_angle_bracket_close_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + ">x", _POLICY)
+
+    def test_backtick_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "`x`", _POLICY)
+
+    def test_space_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + " x", _POLICY)
+
+    def test_control_character_rejected(self) -> None:
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "\nx", _POLICY)
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "\x00x", _POLICY)
+
+    def test_non_ascii_byte_rejected(self) -> None:
+        # RFC 3986 requires percent-encoding for non-ASCII; a raw byte is
+        # outside the allowed repertoire regardless of intent.
+        with self.assertRaises(SSRFError):
+            safety.check_scheme_and_domain(self._BASE + "-café", _POLICY)
+
+    def test_real_stored_product_urls_still_accepted(self) -> None:
+        # Every one of these is a REAL captured product URL from this repo's
+        # test fixtures (never a synthetic example) -- a regression here
+        # would break the fetch-time gate for every currently-working site.
+        real_urls = [
+            "https://www.kabum.com.br/produto/534732/monitor-gamer-alienware-32-4k-qd-oled-aw3225qf",
+            "https://www.amazon.com.br/Monitor-Gamer-Alienware-QD-OLED-AW3225QF/dp/B0CVQGSRZ9",
+            "https://www.mercadolivre.com.br/monitor-gamer-alienware-32-4k-qd-oled-aw3225qf/p/MLB35045987",
+            "https://www.terabyteshop.com.br/produto/40561/water-cooler-deepcool-lq240-wh-argb-240mm-com-display-intel-amd-branco-r-lq240-whdsmc-g-1",
+            "https://www.pichau.com.br/gabinete-gamer-mancer-cv700b-mini-tower-lateral-de-vidro-com-2-fans-preto-mcr-cv700b-bk-2f",
+            "https://www.magazineluiza.com.br/monitor-gamer-alienware-32-4k-qd-oled-aw3225qf/p/bab5438g3h/in/mnpc/",
+        ]
+        for url in real_urls:
+            with self.subTest(url=url):
+                scheme, host = safety.check_scheme_and_domain(url, _POLICY)
+                self.assertEqual(scheme, "https")
+                self.assertTrue(host)
+
+
 class PinIpTest(unittest.TestCase):
     """The connection must use the validated IP, never a later re-resolution.
 

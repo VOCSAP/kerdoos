@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from autolycos.errors import FetchError
+from autolycos.errors import FetchError, SSRFError
 from autolycos.ports import FetchResult
 from kerdoos.core import retry
 from kerdoos.core.domain import ScrapeStatus
@@ -90,6 +90,24 @@ class OrchestratorRetryTest(unittest.TestCase):
             sleep=lambda _: None)
         self.assertEqual(record.status, ScrapeStatus.INDETERMINATE)
         self.assertEqual(fetcher.calls, 4)   # retried before degrading
+
+    def test_ssrf_error_maps_to_indeterminate_not_a_crash(self) -> None:
+        # Roadmap c06082a5: a stored URL rejected by a NEW check_scheme_and_
+        # domain rule (e.g. a character added to the RFC 3986 denylist after
+        # the URL was originally accepted) raises SSRFError from inside the
+        # real fetcher. SSRFError IS a FetchError (autolycos/errors.py), so
+        # it must degrade the same way any other hard fetch error does --
+        # measured through scrape_one itself, not asserted from reading the
+        # exception hierarchy alone.
+        fetcher = _ScriptedFetcher([SSRFError("url contains a character "
+                                              "outside RFC 3986")])
+        record = scrape_one(
+            fetcher, parser=object(), source_id="c:ml:1",
+            url="https://x/", now="2026-07-07T00:00:00+00:00",
+            sleep=lambda _: None)
+        self.assertEqual(record.status, ScrapeStatus.INDETERMINATE)
+        self.assertEqual(fetcher.calls, 1)   # SSRFError is not retried
+        self.assertIn("RFC 3986", record.error or "")
 
 
 if __name__ == "__main__":
