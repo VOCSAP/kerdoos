@@ -120,6 +120,15 @@ un `kerdoos digest` lance par cron a cote de la WebUI.
     fusionnee avec la precedente. Le statut (en file, en cours, termine, erreur) est
     garde en memoire, affiche sur le tableau de bord, et perdu au redemarrage (les
     releves deja ecrits restent dans `state.db`).
+  - **Cooldown par owner** : apres un run termine, une nouvelle demande du meme
+    owner est refusee pendant `KERDOOS_RUN_NOW_COOLDOWN_SECONDS` (defaut 300 ; 0
+    le desactive). Le temps restant est affiche sur le tableau de bord.
+  - **Relance supervisee du consumer** : un crash du consumer lui-meme (et non
+    l'echec d'un owner, deja isole) le relance, apres une pause fixe de 0,5 s,
+    jusqu'a `KERDOOS_RUN_QUEUE_MAX_RESTARTS` fois (defaut 5 ; 0 = aucune relance).
+    Le compteur revient a zero a chaque run termine. Au-dela, la file est declaree
+    morte : les nouvelles demandes sont refusees (statut erreur) jusqu'au
+    redemarrage du process.
   - Le digest ne passe **pas** par cette file : il est porte par la boucle de
     l'evaluateur (ADR 0003 Decision 4).
   - La garantie memoire n'est donc **pas** portee par une file commune, mais par
@@ -164,9 +173,24 @@ d'environnement** (l'enveloppe OOM depend de la machine cible). `workers=1` est 
   - sous Windows (developpement), `fcntl` n'existe pas : la borne est **par process
     seulement**, et un warning le signale a la construction de la porte ;
   - la CLI (`kerdoos digest`, `kerdoos run`) place ses verrous a cote de la base
-    passee en `--db`. Pour partager les slots avec la WebUI, elle doit viser la meme
-    base (`--db /data/state.db`). Son defaut `kerdoos.db` ne lit pas encore
-    `KERDOOS_STATE_DB` (carte 1af8b18b).
+    passee en `--db`, dont le defaut est `KERDOOS_STATE_DB` (`kerdoos.db` si la
+    variable est absente) : dans l'image, elle partage donc les slots de la WebUI
+    sans option supplementaire. Un `--db` explicite hors de `/data` la fait sortir
+    de la borne commune.
+- **Timeouts de lancement** : chaque tier borne son propre lancement de Chromium, en
+  plus de l'attente de la porte.
+  - `KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS` (defaut 30) pour le tier `uc` ;
+  - `KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS` (defaut 20) pour le tier `browser`.
+    Sans lui, patchright borne le lancement a 180 s, au-dela de l'attente de la
+    porte ;
+  - a l'echeance : `FetchError`, puis releve `INDETERMINATE`, et la porte est
+    liberee. Une valeur invalide ou <= 0 retombe sur le defaut, avec un warning ;
+  - aucune validation croisee : l'ordre attendu (lancement < navigation, 30 s
+    codees en dur pour le tier `browser`, < attente de la porte) n'est pas verifie.
+- **Limite connue** (carte d8b7b8fd) : apres le lancement, les etapes du tier
+  `browser` hors navigation (`new_page`, stealth, `page.content()`,
+  `browser.close()`) n'ont pas de timeout explicite. Un Chromium fige a ce moment
+  garde la porte.
 
 ### Justification
 1. SQLite ne gagne rien en debit d'ecriture avec N process writers.
@@ -347,11 +371,14 @@ devient le resume actionnable du mail.
 - **Un owner qui echoue ne bloque JAMAIS les autres** : boucle supervisee avec
   `try/except` **par owner** + `continue` + log WARNING (sinon un owner defaillant
   tue le cycle entier).
-- **Retry + backoff borne** sur echec SMTP transitoire (connexion refusee,
-  greylisting 4xx) : **NON IMPLEMENTE, et non repris par ADR 0003**. Comportement
-  reel : un echec d'envoi passe la ligne `job_runs` du job en `error`, ce qui
-  consomme la fenetre ; le job repart a sa fenetre suivante, sans nouvelle tentative
-  dans la fenetre courante.
+- **Retry + backoff borne** sur echec SMTP transitoire : implemente, par job, dans
+  le meme appel d'envoi, jamais d'un tick a l'autre. Seuls sont retentes une
+  reponse SMTP 4xx explicite (greylisting) et un echec de connexion survenu avant
+  l'envoi du message, au plus `KERDOOS_SMTP_RETRY_ATTEMPTS` fois (defaut 2, soit
+  trois essais) avec une pause de `KERDOOS_SMTP_RETRY_BACKOFF_SECONDS` (defaut 2),
+  sous une echeance absolue inferieure au delai du reaper. Tout autre echec
+  (connexion perdue apres l'envoi, 5xx, refus d'authentification) n'est pas
+  retente : la ligne `job_runs` passe en `error` et la fenetre est consommee.
 - **Digest partiel** : une source en blocage transitoire n'immobilise pas le digest
   entier ; elle apparait marquee `indetermine`.
 - L'echec d'envoi est **enregistre dans l'etat** pour visibilite operateur.
