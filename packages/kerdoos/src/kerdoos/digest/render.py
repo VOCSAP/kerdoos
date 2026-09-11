@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Mapping
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kerdoos.core.domain import ScrapeStatus
 from kerdoos.persistence.ports import ScrapeRecord
@@ -57,9 +57,19 @@ def _scraped_at_label(
     (invariant #4). tz_name is job.timezone when a DigestJob is in scope,
     else explicit UTC (render_digest has no job).
     """
-    scraped = _parse_ts(record_ts).astimezone(ZoneInfo(tz_name))
+    try:
+        tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        # Unreachable via the normal DigestJob write path (validate_timezone
+        # gates every job before storage), but the WebUI digest PREVIEW route
+        # builds a view straight from a live job -- degrade to UTC rather
+        # than 500 on a legacy/corrupted timezone string.
+        tz = timezone.utc
+    scraped = _parse_ts(record_ts).astimezone(tz)
     stamp = scraped.strftime("%Y-%m-%d %H:%M %Z")
-    age_days = max(0, (_parse_ts(generated_at) - _parse_ts(record_ts)).days)
+    age_days = (_parse_ts(generated_at) - _parse_ts(record_ts)).days
+    if age_days < 0:
+        return f"scraped {stamp} (clock skew)"
     if age_days >= 1:
         return f"scraped {stamp} ({age_days}d ago)"
     return f"scraped {stamp}"

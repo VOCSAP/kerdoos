@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from kerdoos.core.domain import Availability, ScrapeStatus
-from kerdoos.digest.render import _MAX_ERROR_LEN, format_cents, render_digest
+from kerdoos.digest.render import format_cents, render_digest
 from kerdoos.persistence.ports import ScrapeRecord
 
 
@@ -73,6 +73,22 @@ class DigestStalenessTest(unittest.TestCase):
         self.assertIn("scraped 2026-07-06", record_line)
         self.assertNotIn("ago)", record_line)
 
+    def test_future_dated_record_is_flagged_not_read_as_fresh(self) -> None:
+        # record.ts after generated_at (clock skew) must not silently clamp
+        # to "looks fresh, no suffix at all".
+        future = _rec(ts="2026-07-07T00:00:00+00:00")
+        body = render_digest([future], "2026-07-06T00:00:00+00:00")
+        record_line = next(l for l in body.splitlines() if l.startswith("["))
+        self.assertIn("(clock skew)", record_line)
+
+    def test_invalid_timezone_falls_back_to_utc_not_raise(self) -> None:
+        from kerdoos.digest.render import _scraped_at_label
+
+        label = _scraped_at_label(
+            "2026-07-06T00:00:00+00:00", "2026-07-06T00:00:00+00:00",
+            tz_name="not/a-real-zone")
+        self.assertIn("UTC", label)
+
 
 class DigestSanitizationTest(unittest.TestCase):
     def test_error_newlines_stripped(self) -> None:
@@ -92,11 +108,9 @@ class DigestSanitizationTest(unittest.TestCase):
         body = render_digest(
             [_rec(error="x" * 500, status=ScrapeStatus.INDETERMINATE)],
             "2026-07-06T00:00:00+00:00")
-        # Sanitized error SEGMENT is capped at _MAX_ERROR_LEN, well under the
-        # raw 500 chars -- asserted on the segment itself, not an arbitrary
-        # total line-length budget (which grows with unrelated fields).
         record_line = next(l for l in body.splitlines() if l.startswith("["))
-        self.assertLessEqual(record_line.count("x"), _MAX_ERROR_LEN)
+        segment = record_line.rsplit("  (", 1)[1]
+        self.assertLessEqual(len(segment), 170)
         self.assertIn("...", record_line)
 
 
