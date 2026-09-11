@@ -144,6 +144,34 @@ class _DaemonThreadSendExecutor:
         pass  # daemon threads need no teardown, they die with the process
 
 
+# How long a (job_id, window_start) warning is remembered before the
+# tracker purges it -- generous enough to cover an hourly/daily job's
+# cron period without letting the set grow forever across the lifetime
+# of a long-running evaluator.
+_EMPTY_DIGEST_WARNING_TTL = timedelta(days=2)
+
+
+class _EmptyDigestWarningTracker:
+    """Rate-limits the 'nothing to report' warning to once per
+    (job_id, window_start): a permanently tier-unavailable source
+    (roadmap 3aeb8a19) never accumulates history, so a naive per-tick
+    warning would flood the log at a 60s cadence. In-memory only, purged
+    of entries older than _EMPTY_DIGEST_WARNING_TTL on every check."""
+
+    def __init__(self) -> None:
+        self._warned: dict[tuple[str, str], datetime] = {}
+
+    def should_warn(self, job_id: str, window_start: str, tick_now: datetime) -> bool:
+        cutoff = tick_now - _EMPTY_DIGEST_WARNING_TTL
+        self._warned = {
+            key: seen for key, seen in self._warned.items() if seen >= cutoff}
+        key = (job_id, window_start)
+        if key in self._warned:
+            return False
+        self._warned[key] = tick_now
+        return True
+
+
 @dataclass(slots=True)
 class EvaluationSummary:
     """Aggregate counters for one evaluate_tick call (CLI/log reporting)."""
@@ -294,29 +322,34 @@ async def _run_plan_b(
     send_semaphore: asyncio.Semaphore,
     send_executor: _RotatingSendExecutor | _DaemonThreadSendExecutor,
     send_timeout_seconds: int,
+    empty_digest_warnings: _EmptyDigestWarningTracker,
 ) -> None:
     for job in jobs:
         try:
             if state_store.has_active_job_run(job.owner_id, job.id):
                 summary.skipped_jobs += 1
                 continue
-            if not job.source_ids:
-                # ADR 0003:144-145: a job with zero linked sources (its
-                # last source was removed, cascading the digest_job_sources
-                # link) must never send an empty digest. The window IS
-                # consumed -- nothing changes for this job before an
-                # operator reconfigures it, so a same-window retry would
-                # be pointless (unlike the capacity refusal below).
-                empty_window_start = compute_window_start(
+            records, tier2_labels = _collect_job_digest(
+                job,
+                source_index=source_index.get(job.owner_id, {}),
+                state_store=state_store,
+            )
+            if not records:
+                # ADR 0003:144-145: never send an empty digest. Covers a
+                # job with zero linked sources AND one whose sources have
+                # no scrape history yet (never scraped, a failed scrape,
+                # or a permanently tier-unavailable source, roadmap
+                # 3aeb8a19). Nothing is sent, so exactly-once has nothing
+                # to protect: no job_runs row, window not consumed --
+                # retried freely on the next tick, same window included
+                # (e.g. once a replacement source is linked).
+                window_start = compute_window_start(
                     job.schedule_cron, job.timezone, tick_now)
-                empty_run = JobRun(
-                    job_id=job.id, owner_id=job.owner_id,
-                    window_start=empty_window_start, fired_at=now_iso,
-                    status="queued",
-                )
-                if state_store.record_job_run(empty_run):
-                    state_store.update_job_run(
-                        job.id, empty_window_start, status="skipped_no_sources")
+                if empty_digest_warnings.should_warn(job.id, window_start, tick_now):
+                    logger.warning(
+                        "evaluator: job %s has nothing to report for "
+                        "window %s -- skipping without sending",
+                        job.name, window_start)
                 summary.skipped_jobs += 1
                 continue
             if not send_executor.can_submit():
@@ -342,11 +375,6 @@ async def _run_plan_b(
             state_store.update_job_run(job.id, window_start, status="running")
             cf_future = None
             try:
-                records, tier2_labels = _collect_job_digest(
-                    job,
-                    source_index=source_index.get(job.owner_id, {}),
-                    state_store=state_store,
-                )
                 # Dedicated executor (roadmap 1c67e5b2): an orphaned send
                 # thread must not occupy the scrape pool. wait_for bounds
                 # the whole send (roadmap 58d88fe0), not just each smtplib
@@ -453,6 +481,7 @@ async def evaluate_tick(
     send_semaphore: asyncio.Semaphore | None = None,
     send_executor: _RotatingSendExecutor | _DaemonThreadSendExecutor | None = None,
     reaper_timeout_seconds: int = 300,
+    empty_digest_warnings: _EmptyDigestWarningTracker | None = None,
 ) -> EvaluationSummary:
     """Run exactly ONE evaluation tick: a reaper sweep, then Plan A (scrape
     dedup), then Plan B (per-job notify). Shared by the intra-process timer
@@ -494,7 +523,12 @@ async def evaluate_tick(
     -- never a ThreadPoolExecutor here, or an orphaned send would block
     process exit on the CLI's short-lived `kerdoos digest` path).
     run_evaluator_loop instead passes its own long-lived, self-rotating
-    _RotatingSendExecutor, shared across every tick like send_semaphore."""
+    _RotatingSendExecutor, shared across every tick like send_semaphore.
+
+    empty_digest_warnings: rate-limits the 'nothing to report' log to once
+    per (job_id, window_start). By default a fresh tracker per call;
+    run_evaluator_loop shares ONE instance across every tick, same
+    contract as send_semaphore/send_executor."""
     tick_now = now if now is not None else datetime.now(timezone.utc)
     if tick_now.tzinfo is None:
         tick_now = tick_now.replace(tzinfo=timezone.utc)
@@ -541,12 +575,16 @@ async def evaluate_tick(
     executor = (
         send_executor if send_executor is not None
         else _DaemonThreadSendExecutor())
+    warnings = (
+        empty_digest_warnings if empty_digest_warnings is not None
+        else _EmptyDigestWarningTracker())
     try:
         await _run_plan_b(
             jobs=jobs, source_index=source_index, state_store=state_store,
             sender=sender, now_iso=now_iso, tick_now=tick_now, summary=summary,
             send_semaphore=semaphore, send_executor=executor,
             send_timeout_seconds=reaper_timeout_seconds,
+            empty_digest_warnings=warnings,
         )
     finally:
         if owns_executor:
@@ -576,16 +614,17 @@ async def run_evaluator_loop(
     Settings.digest_reaper_timeout_seconds explicitly (roadmap 58d88fe0);
     callers that omit it fall back to the 300s function default.
 
-    Builds ONE send_semaphore (S4) and ONE send_executor (roadmap 1c67e5b2)
-    here and reuses both across every tick of this loop -- ticks of the SAME
-    loop never overlap (each await blocks the next), but sharing one
-    instance is simpler than rebuilding it every iteration and matches
-    run_evaluator_loop's role as a single persistent evaluator. The
-    send_executor may internally rotate itself after a stuck send; this
-    loop only owns its final shutdown on exit."""
+    Builds ONE send_semaphore (S4), ONE send_executor (roadmap 1c67e5b2) and
+    ONE empty_digest_warnings tracker here and reuses all three across every
+    tick of this loop -- ticks of the SAME loop never overlap (each await
+    blocks the next), but sharing one instance is simpler than rebuilding it
+    every iteration and matches run_evaluator_loop's role as a single
+    persistent evaluator. The send_executor may internally rotate itself
+    after a stuck send; this loop only owns its final shutdown on exit."""
     event = stop_event if stop_event is not None else asyncio.Event()
     send_semaphore = asyncio.Semaphore(max_concurrent_sends)
     send_executor = _RotatingSendExecutor(max_workers=max(max_concurrent_sends, 1))
+    empty_digest_warnings = _EmptyDigestWarningTracker()
     try:
         while not event.is_set():
             try:
@@ -594,6 +633,7 @@ async def run_evaluator_loop(
                     router=router, parser_factory=parser_factory, sender=sender,
                     send_semaphore=send_semaphore, send_executor=send_executor,
                     reaper_timeout_seconds=reaper_timeout_seconds,
+                    empty_digest_warnings=empty_digest_warnings,
                 )
             except Exception:  # noqa: BLE001 -- one crashed tick must not kill the loop
                 logger.exception("evaluator: tick failed unexpectedly")

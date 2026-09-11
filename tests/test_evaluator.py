@@ -33,6 +33,7 @@ from kerdoos.core.app.services import AppService, DigestJobSpec, Principal, Prod
 from kerdoos.core.domain import Availability, Extract, ScrapeStatus
 from kerdoos.core.evaluator import (
     _run_plan_a,
+    _EmptyDigestWarningTracker,
     _RotatingSendExecutor,
     EvaluationSummary,
     evaluate_tick,
@@ -1215,14 +1216,9 @@ class LiveOrphanCeilingTest(unittest.IsolatedAsyncioTestCase):
 
 
 class EmptyJobSourceGhostTest(_EvaluatorTestBase):
-    """ADR 0003:144-145 promises a job with zero linked sources is
-    skipped, never an empty digest email. Diagnostic probe (roadmap
-    3c557a9c item 4): confirms or refutes this by removing a job's only
-    source through the real public API (cascading digest_job_sources via
-    FK ON DELETE CASCADE, not a synthetic DB write) and observing whether
-    sender.send() fires with zero records."""
+    """A job with nothing to report is skipped, never sent an empty digest."""
 
-    async def test_job_with_zero_sources_after_cascade_delete(self) -> None:
+    async def test_job_with_zero_sources_is_skipped_without_sending(self) -> None:
         sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
         job = self.service.create_job(
             Principal(owner_id="owner1"),
@@ -1244,19 +1240,21 @@ class EmptyJobSourceGhostTest(_EvaluatorTestBase):
         self.assertEqual(sender.calls, [])
         self.assertEqual(summary.notified_jobs, 0)
         self.assertEqual(summary.skipped_jobs, 1)
+        # No send was attempted, so exactly-once has nothing to protect:
+        # no job_runs row at all, the window stays open for a later tick.
         window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
         with self.state._op() as conn:
             row = conn.execute(
                 "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
                 (job.id, window_start),
             ).fetchone()
-        self.assertEqual(row["status"], "skipped_no_sources")
+        self.assertIsNone(row)
 
-    async def test_same_window_retry_is_blocked_not_resent(self) -> None:
+    async def test_source_relinked_in_the_same_window_is_notified(self) -> None:
         sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
-        self.service.create_job(
+        job = self.service.create_job(
             Principal(owner_id="owner1"),
-            DigestJobSpec(name="job1", frequency_kind="hourly",
+            DigestJobSpec(name="job1", frequency_kind="daily",
                           source_ids=(sid,)))
         self._seed_history(
             "owner1", sid, datetime(2026, 7, 13, 10, 0, 0, tzinfo=timezone.utc))
@@ -1264,22 +1262,88 @@ class EmptyJobSourceGhostTest(_EvaluatorTestBase):
 
         tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
         sender = _RecordingSender()
-        await evaluate_tick(
+        summary1 = await evaluate_tick(
             config_store=self.config, state_store=self.state,
             router=self.router, parser_factory=_fake_parser_factory,
             sender=sender, now=tick_now,
         )
+        self.assertEqual(sender.calls, [])
+        self.assertEqual(summary1.skipped_jobs, 1)
 
-        # Later tick, SAME window (same hourly bucket) -- must not
-        # re-attempt (the job stays sourceless, nothing to retry).
+        new_sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/2")
+        self.service.add_job_source("owner1", job.id, new_sid)
+        self._seed_history("owner1", new_sid, tick_now - _minutes(1))
+
+        # Later tick, SAME day (daily window) -- the fix must not have
+        # burned the window on the earlier, sourceless attempt.
+        later_tick = tick_now + timedelta(hours=2)
         summary2 = await evaluate_tick(
             config_store=self.config, state_store=self.state,
             router=self.router, parser_factory=_fake_parser_factory,
-            sender=sender, now=tick_now + timedelta(minutes=10),
+            sender=sender, now=later_tick,
         )
 
+        self.assertEqual(len(sender.calls), 1)
+        self.assertEqual(summary2.notified_jobs, 1)
+
+    async def test_linked_source_with_no_history_is_skipped_without_sending(
+        self,
+    ) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        # No history seeded, and the fetcher tier is unavailable -- Plan A
+        # never scrapes it either, so this state is PERMANENT, not a
+        # transient "not scraped yet".
+        router = _StubRouter({"http": self.fetcher}, unavailable=frozenset({"http"}))
+        sender = _RecordingSender()
+        base = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+
+        for minute in range(3):
+            summary = await evaluate_tick(
+                config_store=self.config, state_store=self.state,
+                router=router, parser_factory=_fake_parser_factory,
+                sender=sender, now=base + timedelta(minutes=minute),
+            )
+            self.assertEqual(summary.notified_jobs, 0)
+
         self.assertEqual(sender.calls, [])
-        self.assertEqual(summary2.notified_jobs, 0)
+        with self.state._op() as conn:
+            rows = conn.execute("SELECT * FROM job_runs").fetchall()
+        self.assertEqual(rows, [])
+
+    async def test_empty_digest_warning_is_rate_limited_per_window(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        router = _StubRouter({"http": self.fetcher}, unavailable=frozenset({"http"}))
+        sender = _RecordingSender()
+        tracker = _EmptyDigestWarningTracker()
+        base = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+
+        with self.assertLogs("kerdoos.core.evaluator", level="WARNING") as cm:
+            for minute in range(3):  # 3 ticks, SAME hourly window
+                await evaluate_tick(
+                    config_store=self.config, state_store=self.state,
+                    router=router, parser_factory=_fake_parser_factory,
+                    sender=sender, now=base + timedelta(minutes=minute),
+                    empty_digest_warnings=tracker,
+                )
+            # A tick in the NEXT hourly window -- a fresh warning is due.
+            await evaluate_tick(
+                config_store=self.config, state_store=self.state,
+                router=router, parser_factory=_fake_parser_factory,
+                sender=sender, now=base + timedelta(hours=1),
+                empty_digest_warnings=tracker,
+            )
+
+        warning_lines = [
+            msg for msg in cm.output if "has nothing to report" in msg]
+        self.assertEqual(len(warning_lines), 2)
 
 
 if __name__ == "__main__":
