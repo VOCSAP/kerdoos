@@ -228,6 +228,20 @@ exactement le telechargement runtime non pin/non verifie que Q-e a ferme. Le
 build echoue si les deux majeures divergent, en comparant leurs versions
 via le meme chemin de resolution que celui utilise a l'execution.
 
+### Correction Q-g -- le tier uc embarque DEUX drivers, aucun telechargement runtime tolere
+Seleniumbase a son propre mecanisme de contournement du signal `HeadlessChrome`
+dans `navigator.userAgent` (`uc_agent_cache`, actif des que `headless=True` et
+Chromium >= 117) : il lance une session jetable via un `chromedriver` **PLAIN**,
+distinct du `uc_driver` patche ci-dessus, pour capturer un User-Agent Chrome
+authentique avant de l'injecter dans la session undetected. Sans ce fichier
+present, ce mecanisme retelecharge silencieusement (verifie par execution,
+`with suppress(Exception)` cote seleniumbase) -- meme classe CWE-494 que Q-e,
+sur un fichier different. **Decision : aucune deuxieme requete reseau ni
+deuxieme pin.** Le `chromedriver` plain est une COPIE du `uc_driver` deja
+telecharge et verifie par sha256 (meme artefact, deux noms de fichier) --
+un seul hash a maintenir, aucun risque de derive entre les deux. L'assertion
+de fin de stage (Q-f) verifie aussi la majeure de ce `chromedriver` copie.
+
 ---
 
 ## Decision 6 -- Persistance SQLite et secrets (confirmations ADR 0001)

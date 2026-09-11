@@ -124,6 +124,17 @@ RUN sbase get uc_driver ${UC_DRIVER_VERSION} \
     && echo "${UC_DRIVER_SHA256}  /app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/uc_driver" \
        | sha256sum -c -
 
+# SeleniumBase's own HeadlessChrome UA-spoofing mechanism (get_local_driver's
+# uc_agent_cache, triggered whenever headless=True) launches a throwaway
+# session through a PLAIN "chromedriver" binary, distinct from "uc_driver"
+# above -- without it present, that mechanism silently downloads one from the
+# network on first launch (same CWE-494 this stage's uc_driver pin closes,
+# just a second file). Reusing the already-verified uc_driver bytes -- rather
+# than a second `sbase get` -- means one artifact, one hash, no drift risk
+# between the two files.
+RUN cp -p /app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/uc_driver \
+          /app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/chromedriver
+
 COPY packages/autolycos/src packages/autolycos/src
 COPY packages/kerdoos/src packages/kerdoos/src
 RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc
@@ -145,10 +156,17 @@ RUN set -eu; \
     CHROME_VER=$("$CHROME_BIN" --version --no-sandbox | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'); \
     UC_DRIVER_BIN=/app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/uc_driver; \
     UC_VER=$("$UC_DRIVER_BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'); \
+    CHROMEDRIVER_BIN=/app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/chromedriver; \
+    CHROMEDRIVER_VER=$("$CHROMEDRIVER_BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'); \
     CHROME_MAJOR=${CHROME_VER%%.*}; \
     UC_MAJOR=${UC_VER%%.*}; \
+    CHROMEDRIVER_MAJOR=${CHROMEDRIVER_VER%%.*}; \
     if [ "$CHROME_MAJOR" != "$UC_MAJOR" ]; then \
       echo "BUILD FAIL: chromium major $CHROME_MAJOR (patchright, $CHROME_VER) != uc_driver major $UC_MAJOR (UC_DRIVER_VERSION pin, $UC_VER) -- re-pin UC_DRIVER_VERSION/UC_DRIVER_SHA256 to patchright's Chromium major (ADR 0002 Decision 5)." >&2; \
       exit 1; \
     fi; \
-    echo "OK: chromium major $CHROME_MAJOR matches uc_driver major $UC_MAJOR"
+    if [ "$CHROME_MAJOR" != "$CHROMEDRIVER_MAJOR" ]; then \
+      echo "BUILD FAIL: chromium major $CHROME_MAJOR (patchright, $CHROME_VER) != chromedriver major $CHROMEDRIVER_MAJOR ($CHROMEDRIVER_VER) -- the copied chromedriver drifted from uc_driver (ADR 0002 Decision 5)." >&2; \
+      exit 1; \
+    fi; \
+    echo "OK: chromium major $CHROME_MAJOR matches uc_driver major $UC_MAJOR and chromedriver major $CHROMEDRIVER_MAJOR"
