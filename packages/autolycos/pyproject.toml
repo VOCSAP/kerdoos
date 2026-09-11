@@ -19,14 +19,18 @@ dependencies = [
 # here -- patchright provides the same sync_api surface (Phase 2b).
 browser = ["patchright>=1.49", "playwright-stealth>=2.0"]
 tls = ["curl_cffi>=0.7"]
-uc = ["seleniumbase>=4.24"]
+# psutil kills any chromedriver/Chrome process left behind when a uc launch
+# is abandoned at UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071) -- required,
+# not optional cleanup, since it runs on every uc fetch's launch path.
+uc = ["seleniumbase>=4.24", "psutil>=5.9"]
 
 [dependency-groups]
 # seleniumbase's own chromium_arg parsing is exercisable without a real
 # Chrome/Chromium binary, so it belongs in dev (every local/CI run), not
 # behind the "uc" extra (which the autonomous image installs for the actual
-# browser launch).
-dev = ["seleniumbase>=4.24"]
+# browser launch). psutil is needed alongside it for the launch-deadline
+# unit tests, which use a fake (non-Chrome) Driver and so also run locally.
+dev = ["seleniumbase>=4.24", "psutil>=5.9"]
 
 [build-system]
 requires = ["hatchling"]

@@ -13,13 +13,17 @@ from __future__ import annotations
 import importlib.util
 import os
 import socket
+import subprocess
+import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from autolycos import safety
 from autolycos.adapters import uc
-from autolycos.errors import SSRFError
+from autolycos.browser_gate import BrowserGate
+from autolycos.errors import FetchError, SSRFError
 from autolycos.safety import DomainPolicy, ValidatedTarget
 
 _POLICY = DomainPolicy(frozenset({
@@ -518,6 +522,83 @@ class UcPinExecutionTest(unittest.TestCase):
             self.assertTrue(result.startswith("THREW"), result)
         finally:
             driver.quit()
+
+
+class UcLaunchDeadlineTest(unittest.TestCase):
+    """Roadmap 65cef071: bounds the Chrome LAUNCH itself, not just navigation
+    (UC_PAGE_LOAD_TIMEOUT_SECONDS only takes effect after the launch already
+    returned). Uses a REAL BrowserGate (not a mock) so a second acquire
+    actually exercises the semaphore, and a REAL spawned child process so
+    the kill mechanism is proven against a genuine OS process, not asserted
+    from reading psutil's API alone.
+    """
+
+    def _hanging_factory(self, sleep_seconds: float, spawned: list) -> object:
+        def _factory(**kwargs):  # noqa: ANN003
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"])
+            spawned.append(proc)
+            time.sleep(sleep_seconds)
+            return _FakeDriver("<html></html>", **kwargs)
+
+        return _factory
+
+    def test_hung_launch_raises_fetch_error_within_the_deadline(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(
+                uc, "_load_seleniumbase",
+                return_value=self._hanging_factory(2.0, spawned),
+            ):
+                fetcher = uc.UcFetcher(
+                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                t0 = time.monotonic()
+                with self.assertRaises(FetchError):
+                    fetcher.fetch(_MAGALU_URL)
+                elapsed = time.monotonic() - t0
+        # Bounded by the 0.3s deadline, not the factory's 2.0s hang.
+        self.assertLess(elapsed, 1.5)
+        spawned[0].wait(timeout=5)
+
+    def test_gate_released_after_a_timed_out_launch(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(
+                uc, "_load_seleniumbase",
+                return_value=self._hanging_factory(2.0, spawned),
+            ):
+                fetcher = uc.UcFetcher(
+                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                with self.assertRaises(FetchError):
+                    fetcher.fetch(_MAGALU_URL)
+            # A second acquire on the SAME gate must succeed promptly --
+            # proves the slot was released, not held by the abandoned thread.
+            acquired_promptly = gate._semaphore.acquire(timeout=1.0)
+            self.assertTrue(acquired_promptly, "gate slot was not released")
+            gate._semaphore.release()
+        spawned[0].wait(timeout=5)
+
+    def test_no_zombie_process_survives_a_timed_out_launch(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(
+                uc, "_load_seleniumbase",
+                return_value=self._hanging_factory(2.0, spawned),
+            ):
+                fetcher = uc.UcFetcher(
+                    _POLICY, gate=gate, launch_timeout_seconds=0.3)
+                with self.assertRaises(FetchError):
+                    fetcher.fetch(_MAGALU_URL)
+        proc = spawned[0]
+        proc.wait(timeout=5)
+        self.assertIsNotNone(
+            proc.poll(), "the spawned child process was not killed")
 
 
 class GateWiringTest(unittest.TestCase):

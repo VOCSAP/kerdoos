@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections.abc import Iterable
 from urllib.parse import quote
 
@@ -67,14 +68,22 @@ _STATUS_FALLBACK = 200
 # raises instead of holding the browser gate forever. Generous vs.
 # RECONNECT_TIME + RENDER_WAIT (~9s) to tolerate a slow Akamai challenge.
 UC_PAGE_LOAD_TIMEOUT_SECONDS = 45.0
-# Roadmap c06082a5 rempart (2): SeleniumBase's uc_open_with_reconnect
-# interpolates the url, unescaped, into a JS string literal (currently
-# double-quoted) executed via execute_script. Rempart (1) already rejects
-# the dangerous ASCII bytes at the shared SSRF predicate; this re-encodes
-# defensively at the JS sink itself, against a future seleniumbase change
-# that interpolates between single quotes instead -- ' is deliberately
-# EXCLUDED from `safe` (encoded to %27) for that reason.
+# Roadmap c06082a5: SeleniumBase's uc_open_with_reconnect interpolates the
+# url, unescaped, into a JS string literal (currently double-quoted)
+# executed via execute_script -- ' is deliberately EXCLUDED from `safe`
+# (encoded to %27) against a future seleniumbase change that interpolates
+# between single quotes instead.
 _JS_SAFE_URL_CHARS = ":/?#[]@!$&()*+,;=%"
+# Roadmap 65cef071: bounds the Chrome LAUNCH itself (driver_cls(**kwargs)),
+# unlike UC_PAGE_LOAD_TIMEOUT_SECONDS above which only takes effect once the
+# launch has already returned. Without this, a hung launch (patchright cache
+# corruption, an Xvfb issue, OOM) holds the browser gate forever, and with
+# max_concurrent=1 that takes down the browser AND uc tiers process-wide.
+# Default measured against 3 real Driver() constructions in the built
+# autonomous image (0.33s-0.81s cold start included), generously multiplied
+# to tolerate real-world load while staying well under
+# UC_PAGE_LOAD_TIMEOUT_SECONDS and the browser gate's own acquire timeout.
+UC_LAUNCH_TIMEOUT_SECONDS = 30.0
 
 
 def _normalize_domains(domains: Iterable[str]) -> list[str]:
@@ -150,6 +159,28 @@ def _load_seleniumbase():  # type: ignore[no-untyped-def]
     return Driver
 
 
+def _kill_new_child_processes(before_pids: frozenset[int]) -> None:
+    """Best-effort: kill any child process (chromedriver, Chrome) spawned
+    since `before_pids` was snapshotted, so a launch abandoned at the
+    UC_LAUNCH_TIMEOUT_SECONDS deadline never leaves a zombie behind (roadmap
+    65cef071). psutil is optional (declared under the `uc` extra); any
+    psutil error here is swallowed -- this is cleanup, not correctness.
+    """
+    import psutil
+
+    try:
+        after = psutil.Process(os.getpid()).children(recursive=True)
+    except psutil.Error:
+        return
+    for proc in after:
+        if proc.pid in before_pids:
+            continue
+        try:
+            proc.kill()
+        except psutil.Error:
+            pass
+
+
 def _read_status(driver) -> int:  # type: ignore[no-untyped-def]
     """Best-effort HTTP status via CDP; 200 fallback when CDP is unavailable."""
     getter = getattr(driver, "get_http_status", None)
@@ -169,10 +200,47 @@ class UcFetcher:
 
     def __init__(self, domain_policy: DomainPolicy,
                  subresource_domains: Iterable[str] = (),
-                 gate: BrowserGate | None = None) -> None:
+                 gate: BrowserGate | None = None,
+                 launch_timeout_seconds: float = UC_LAUNCH_TIMEOUT_SECONDS,
+                 ) -> None:
         self._domain_policy = domain_policy
         self._subresource_domains = tuple(subresource_domains)
         self._gate = gate if gate is not None else default_browser_gate()
+        self._launch_timeout_seconds = launch_timeout_seconds
+
+    def _launch_with_deadline(self, driver_cls, driver_kwargs):  # type: ignore[no-untyped-def]
+        """Runs driver_cls(**driver_kwargs) (the Chrome launch itself) under
+        UC_LAUNCH_TIMEOUT_SECONDS. A native launch cannot be cancelled from
+        Python once started, so a hang is bounded by abandoning the thread
+        (daemon, never joined again) and killing any process it spawned,
+        rather than by cancelling the call itself.
+        """
+        import psutil
+
+        holder: dict = {}
+
+        def _construct() -> None:
+            try:
+                holder["driver"] = driver_cls(**driver_kwargs)
+            except BaseException as exc:  # noqa: BLE001 -- relayed to the caller
+                holder["error"] = exc
+
+        try:
+            before_pids = frozenset(
+                p.pid for p in psutil.Process(os.getpid()).children(recursive=True))
+        except psutil.Error:
+            before_pids = frozenset()
+
+        launch_thread = threading.Thread(target=_construct, daemon=True)
+        launch_thread.start()
+        launch_thread.join(timeout=self._launch_timeout_seconds)
+        if launch_thread.is_alive():
+            _kill_new_child_processes(before_pids)
+            raise FetchError(
+                f"uc launch exceeded {self._launch_timeout_seconds}s timeout")
+        if "error" in holder:
+            raise holder["error"]
+        return holder["driver"]
 
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using SeleniumBase, so a
@@ -201,7 +269,7 @@ class UcFetcher:
         # ADR 0002 Decision 1's single-Chromium OOM-coherence guarantee --
         # the SAME gate as the browser tier, since uc reuses its Chromium).
         with self._gate.acquire():
-            driver = driver_cls(**driver_kwargs)
+            driver = self._launch_with_deadline(driver_cls, driver_kwargs)
             try:
                 # Bounds the navigation itself (card ca30b736): without
                 # this, a frozen Chrome holds the gate forever regardless of

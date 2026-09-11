@@ -112,11 +112,13 @@ tls = [
     { name = "curl-cffi" },
 ]
 uc = [
+    { name = "psutil" },
     { name = "seleniumbase" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "psutil" },
     { name = "seleniumbase" },
 ]
 
@@ -125,13 +127,17 @@ requires-dist = [
     { name = "curl-cffi", marker = "extra == 'tls'", specifier = ">=0.7" },
     { name = "patchright", marker = "extra == 'browser'", specifier = ">=1.49" },
     { name = "playwright-stealth", marker = "extra == 'browser'", specifier = ">=2.0" },
+    { name = "psutil", marker = "extra == 'uc'", specifier = ">=5.9" },
     { name = "requests", specifier = ">=2.34" },
     { name = "seleniumbase", marker = "extra == 'uc'", specifier = ">=4.24" },
 ]
 provides-extras = ["browser", "tls", "uc"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "seleniumbase", specifier = ">=4.24" }]
+dev = [
+    { name = "psutil", specifier = ">=5.9" },
+    { name = "seleniumbase", specifier = ">=4.24" },
+]
 
 [[package]]
 name = "beautifulsoup4"
