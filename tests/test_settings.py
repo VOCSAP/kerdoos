@@ -120,8 +120,6 @@ class ReaperTimeoutFloorTest(_SettingsTestBase):
             cm.output)
 
     def test_non_numeric_floors_to_default_with_warning(self) -> None:
-        # gate ae0a343 C3: the bare int() this used to feed raised before
-        # ever reaching the positive-value floor below.
         os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "abc"
         with self.assertLogs("kerdoos.config", level="WARNING"):
             settings = get_settings()
@@ -144,8 +142,8 @@ class ReaperTimeoutFloorTest(_SettingsTestBase):
 
 
 class SmtpPortFloorTest(_SettingsTestBase):
-    """gate ae0a343 C3: a non-numeric KERDOOS_SMTP_PORT must warn and fall
-    back to the default, never raise ValueError."""
+    """A non-numeric or out-of-range KERDOOS_SMTP_PORT warns and falls back
+    to the default, never raises ValueError."""
 
     def test_non_numeric_floors_to_default_with_warning(self) -> None:
         os.environ["KERDOOS_SMTP_PORT"] = "abc"
@@ -154,10 +152,22 @@ class SmtpPortFloorTest(_SettingsTestBase):
         self.assertEqual(settings.smtp_port, DEFAULT_SMTP_PORT)
         self.assertTrue(any("KERDOOS_SMTP_PORT" in msg for msg in cm.output), cm.output)
 
+    def test_out_of_range_floors_to_default_with_warning(self) -> None:
+        os.environ["KERDOOS_SMTP_PORT"] = "99999"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.smtp_port, DEFAULT_SMTP_PORT)
+        self.assertTrue(any("KERDOOS_SMTP_PORT" in msg for msg in cm.output), cm.output)
+
+    def test_max_valid_port_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_SMTP_PORT"] = "65535"
+        settings = get_settings()
+        self.assertEqual(settings.smtp_port, 65535)
+
 
 class SmtpTimeoutFloorTest(_SettingsTestBase):
-    """gate ae0a343 C3: a non-numeric KERDOOS_SMTP_TIMEOUT_SECONDS must warn
-    and fall back to the default, never raise ValueError."""
+    """A non-numeric KERDOOS_SMTP_TIMEOUT_SECONDS warns and falls back to
+    the default, never raises ValueError."""
 
     def test_non_numeric_floors_to_default_with_warning(self) -> None:
         os.environ["KERDOOS_SMTP_TIMEOUT_SECONDS"] = "abc"
@@ -202,10 +212,10 @@ class WorkersFloorTest(_SettingsTestBase):
         self.assertEqual(settings.workers, 4)
 
     def test_shapes_the_shell_guard_rejects_also_floor_in_python(self) -> None:
-        # gate ae0a343 C2: int() is looser than the Dockerfile's shell case
-        # guard (whitespace, a leading sign, PEP 515 underscores) -- Python
-        # must reject exactly what the shell rejects, or the two disagree on
-        # the same value and the container silently runs with no evaluator.
+        # int() is looser than the Dockerfile's shell case guard
+        # (whitespace, a leading sign, PEP 515 underscores) -- Python must
+        # reject exactly what the shell rejects, or the two disagree on the
+        # same value and the container silently runs with no evaluator.
         for raw in (" 4", "4 ", "+4", "4_0", "0", "-3"):
             with self.subTest(raw=raw):
                 os.environ["KERDOOS_WORKERS"] = raw

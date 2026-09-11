@@ -48,7 +48,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +109,13 @@ class Settings:
         return self.session_secret
 
 
-def _env_number(name, default, cast, is_valid):
+_NumT = TypeVar("_NumT", int, float)
+
+
+def _env_number(
+    name: str, default: _NumT, cast: Callable[[str], _NumT],
+    is_valid: Callable[[_NumT], bool],
+) -> _NumT:
     """Read an env var as a number, falling back to `default` (with a
     warning naming the variable and value) on a cast failure or a failed
     `is_valid` check -- unset is left silently at `default`, not warned."""
@@ -134,10 +142,10 @@ _WORKERS_GRAMMAR = re.compile(r"[0-9]+")
 
 def _safe_workers(raw: str) -> int:
     """Accepts only the Dockerfile shell guard's own KERDOOS_WORKERS
-    grammar (plain ASCII digits, positive) -- gate ae0a343 C2."""
+    grammar (plain ASCII digits, positive)."""
     if not _WORKERS_GRAMMAR.fullmatch(raw):
         logger.warning(
-            "KERDOOS_WORKERS=%r is not a plain non-negative integer: "
+            "KERDOOS_WORKERS=%r is not a plain positive integer: "
             "falling back to the default (%d).", raw, DEFAULT_WORKERS,
         )
         return DEFAULT_WORKERS
@@ -165,7 +173,8 @@ def get_settings() -> Settings:
             == "true"),
         smtp_host=os.environ.get("KERDOOS_SMTP_HOST") or None,
         smtp_port=_env_number(
-            "KERDOOS_SMTP_PORT", DEFAULT_SMTP_PORT, int, lambda v: v > 0),
+            "KERDOOS_SMTP_PORT", DEFAULT_SMTP_PORT, int,
+            lambda v: 0 < v <= 65535),
         smtp_from=os.environ.get("KERDOOS_SMTP_FROM") or None,
         smtp_username=os.environ.get("KERDOOS_SMTP_USERNAME") or None,
         smtp_password=os.environ.get("KERDOOS_SMTP_PASSWORD") or None,

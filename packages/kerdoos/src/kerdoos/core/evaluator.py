@@ -61,10 +61,10 @@ ParserFactory = Callable[[ParserSpec], Parser]
 
 class _RotatingSendExecutor:
     """A send-only thread pool slot that can be swapped for a fresh one
-    after a stuck send (roadmap gate ae0a343 C1): callers share ONE instance
-    of this wrapper across ticks, so rotating `.current` is visible to
-    everyone holding the wrapper, unlike a bare ThreadPoolExecutor reference
-    a callee has no way to reseat in its caller's scope."""
+    after a stuck send: callers share ONE instance of this wrapper across
+    ticks, so rotating `.current` is visible to everyone holding the
+    wrapper, unlike a bare ThreadPoolExecutor reference a callee has no way
+    to reseat in its caller's scope."""
 
     def __init__(self, max_workers: int) -> None:
         self._max_workers = max_workers
@@ -245,6 +245,7 @@ async def _run_plan_b(
                 summary.skipped_jobs += 1  # already recorded this window
                 continue
             state_store.update_job_run(job.id, window_start, status="running")
+            cf_future = None
             try:
                 records, tier2_labels = _collect_job_digest(
                     job,
@@ -267,8 +268,8 @@ async def _run_plan_b(
                     )
             except asyncio.TimeoutError as exc:
                 # The stuck thread cannot be killed and may linger -- swap
-                # in a fresh executor (roadmap gate ae0a343 C1) so it alone
-                # absorbs the damage, never every later send too.
+                # in a fresh executor so it alone absorbs the damage, never
+                # every later send too.
                 if cf_future.cancel():
                     logger.warning(
                         "evaluator: job %s send() future was cancelled "
@@ -373,15 +374,17 @@ async def evaluate_tick(
     so a job stuck longer than this window releases the send_semaphore
     slot on the same schedule the reaper would consider its row stale.
 
-    send_semaphore (S4, ADR 0003 Phase 6b tranche 4): the ceiling on
-    simultaneously in-flight sender.send calls. By default a FRESH
+    send_semaphore (S4, ADR 0003 Phase 6b tranche 4): bounds how many sends
+    this evaluator is actively AWAITING at once -- not a hard ceiling on
+    threads actually running, since an orphaned send past its own timeout
+    keeps its thread alive in the background regardless. By default a FRESH
     Semaphore(max_concurrent_sends) is built per call -- correct for the
     common case (one evaluate_tick at a time, e.g. `kerdoos digest`).
     run_evaluator_loop builds ONE semaphore and reuses it across every tick
     of its loop. A caller that genuinely drives multiple evaluate_tick
     invocations CONCURRENTLY (e.g. an overlapping intra-process loop tick
     plus an external `kerdoos digest` against the same process) must pass
-    the SAME send_semaphore instance to each call for the ceiling to hold
+    the SAME send_semaphore instance to each call for this bound to hold
     across them -- an in-process asyncio.Semaphore can only cap concurrency
     among callers that share the object, never across separate processes
     (that boundary is covered by should_start_intra_process_evaluator's
@@ -478,8 +481,8 @@ async def run_evaluator_loop(
     loop never overlap (each await blocks the next), but sharing one
     instance is simpler than rebuilding it every iteration and matches
     run_evaluator_loop's role as a single persistent evaluator. The
-    send_executor may internally rotate itself after a stuck send (gate
-    ae0a343 C1); this loop only owns its final shutdown on exit."""
+    send_executor may internally rotate itself after a stuck send; this
+    loop only owns its final shutdown on exit."""
     event = stop_event if stop_event is not None else asyncio.Event()
     send_semaphore = asyncio.Semaphore(max_concurrent_sends)
     send_executor = _RotatingSendExecutor(max_workers=max(max_concurrent_sends, 1))

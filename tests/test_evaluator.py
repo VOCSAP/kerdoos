@@ -955,10 +955,10 @@ class PlanBDedicatedExecutorTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SharedSendExecutorRotationTest(unittest.IsolatedAsyncioTestCase):
-    """gate ae0a343 C1: run_evaluator_loop shares ONE send_executor across
-    every tick -- an orphaned send from an earlier tick must not
-    permanently occupy that executor's only worker and starve every later
-    tick's sends too. _run_plan_b rotates the executor on TimeoutError."""
+    """run_evaluator_loop shares ONE send_executor across every tick -- an
+    orphaned send from an earlier tick must not permanently occupy that
+    executor's only worker and starve every later tick's sends too.
+    _run_plan_b rotates the executor on TimeoutError."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
