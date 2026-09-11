@@ -158,6 +158,11 @@ DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS = 120
 # a transient bug without masking a persistently broken consumer forever.
 DEFAULT_RUN_QUEUE_MAX_RESTARTS = 5
 
+# Roadmap 3c557a9c item 6: number of DISTINCT owners simultaneously queued
+# or running in RunQueue at which an operator is warned of a backlog
+# building up. 0 disables the warning entirely.
+DEFAULT_RUN_QUEUE_BACKLOG_WARN_THRESHOLD = 5
+
 # Card 1af8b18b: min seconds between one owner's run_now finishing and
 # their next accepted manual re-run. 5 minutes is long enough to stop a
 # tenant clicking "Verifier maintenant" repeatedly from starving the
@@ -198,6 +203,7 @@ class Settings:
     browser_max_concurrent: int
     browser_acquire_timeout_seconds: float
     run_queue_max_restarts: int
+    run_queue_backlog_warn_threshold: int
     run_now_cooldown_seconds: float
     uc_launch_timeout_seconds: float
     browser_launch_timeout_seconds: float
@@ -315,6 +321,9 @@ def get_settings() -> Settings:
         run_queue_max_restarts=_env_number(
             "KERDOOS_RUN_QUEUE_MAX_RESTARTS",
             DEFAULT_RUN_QUEUE_MAX_RESTARTS, int, lambda v: v >= 0),
+        run_queue_backlog_warn_threshold=_env_number(
+            "KERDOOS_RUN_QUEUE_BACKLOG_WARN_THRESHOLD",
+            DEFAULT_RUN_QUEUE_BACKLOG_WARN_THRESHOLD, int, lambda v: v >= 0),
         run_now_cooldown_seconds=_env_number(
             "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
             DEFAULT_RUN_NOW_COOLDOWN_SECONDS, float, lambda v: v >= 0),

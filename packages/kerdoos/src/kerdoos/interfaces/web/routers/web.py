@@ -106,10 +106,19 @@ def dashboard(
         "unavailable": counts["unavailable"],
         "to_watch": counts["indeterminate"] + counts["unavailable"],
     }
+    # Admin-only, never serialised to a non-admin tenant (invariant 10 --
+    # instance-wide operational load, not owner-scoped data, but still
+    # restricted to the operator persona per DESIGN.md).
+    backlog_warning_depth = (
+        queue.queued_count
+        if principal.role == "admin" and queue.backlog_warning_active
+        else None)
+
     ctx = _base(request, principal, csrf, "dashboard")
     ctx.update(
         rows=rows, briefing=briefing, run_status=run_status,
-        cooldown_remaining=cooldown_remaining)
+        cooldown_remaining=cooldown_remaining,
+        backlog_warning_depth=backlog_warning_depth)
     return templates.TemplateResponse(request, "dashboard/index.html", ctx)
 
 

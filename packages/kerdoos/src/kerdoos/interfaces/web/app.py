@@ -102,7 +102,8 @@ def create_app() -> FastAPI:
     # below, not behind a flag.
     run_queue = RunQueue(
         app_service, max_consumer_restarts=settings.run_queue_max_restarts,
-        cooldown_seconds=settings.run_now_cooldown_seconds)
+        cooldown_seconds=settings.run_now_cooldown_seconds,
+        backlog_warn_threshold=settings.run_queue_backlog_warn_threshold)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:

@@ -46,14 +46,20 @@ class RunQueue:
 
     def __init__(
         self, service: AppService, max_consumer_restarts: int = 5,
-        cooldown_seconds: float = 0,
+        cooldown_seconds: float = 0, backlog_warn_threshold: int = 0,
     ) -> None:
         self._service = service
         self._max_consumer_restarts = max_consumer_restarts
         self._cooldown_seconds = cooldown_seconds
+        self._backlog_warn_threshold = backlog_warn_threshold
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._queued_or_running: set[str] = set()
         self._status: dict[str, RunStatus] = {}
+        # Debounce state for the backlog WARNING log (roadmap 3c557a9c item
+        # 6): fires once when depth reaches the threshold, re-arms only
+        # once depth has dropped back below it -- never a burst of one log
+        # line per enqueue while the backlog stays high.
+        self._backlog_warned = False
         # Cooldown elapsed time is measured on time.monotonic(), never
         # wall-clock: an NTP step (forward or back) must not shrink or
         # widen the window. finished_at (wall-clock ISO) stays purely for
@@ -72,6 +78,37 @@ class RunQueue:
     @property
     def is_dead(self) -> bool:
         return self._dead
+
+    @property
+    def queued_count(self) -> int:
+        """Number of DISTINCT owners currently queued or running. A plain
+        read (no lock), same discipline as is_dead/status_for: asyncio's
+        single-threaded cooperative scheduling means no other coroutine
+        can run between the start and end of this len() call, so there is
+        no intermediate/torn state to observe."""
+        return len(self._queued_or_running)
+
+    @property
+    def backlog_warning_active(self) -> bool:
+        """True once queued_count has reached the configured warning
+        threshold (roadmap 3c557a9c item 6). threshold<=0 disables it."""
+        if self._backlog_warn_threshold <= 0:
+            return False
+        return self.queued_count >= self._backlog_warn_threshold
+
+    def _check_backlog_warning_locked(self) -> None:
+        """Debounced WARNING log -- caller must already hold self._lock,
+        so the depth read matches the mutation that just happened."""
+        if self._backlog_warn_threshold <= 0:
+            return
+        depth = len(self._queued_or_running)
+        if depth >= self._backlog_warn_threshold and not self._backlog_warned:
+            self._backlog_warned = True
+            logger.warning(
+                "run_queue: backlog depth %d reached the warning "
+                "threshold %d", depth, self._backlog_warn_threshold)
+        elif depth < self._backlog_warn_threshold and self._backlog_warned:
+            self._backlog_warned = False
 
     def cooldown_remaining_seconds(self, owner_id: str) -> float | None:
         """Seconds left before owner_id may enqueue again, or None if not
@@ -116,6 +153,7 @@ class RunQueue:
                 return False
             self._queued_or_running.add(owner_id)
             self._status[owner_id] = RunStatus(state=RunState.QUEUED)
+            self._check_backlog_warning_locked()
         await self._queue.put(owner_id)
         return True
 
@@ -158,6 +196,7 @@ class RunQueue:
                                 state=RunState.ERROR,
                                 error="run_queue consumer crashed")
                             self._queued_or_running.discard(owner_id)
+                    self._check_backlog_warning_locked()
                 if stop_event.is_set():
                     return
                 if dying:
@@ -199,4 +238,5 @@ class RunQueue:
             finally:
                 async with self._lock:
                     self._queued_or_running.discard(owner_id)
+                    self._check_backlog_warning_locked()
                 self._queue.task_done()

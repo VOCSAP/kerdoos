@@ -25,6 +25,12 @@
   </div>
 </div>
 
+{% if backlog_warning_depth %}
+<div class="banner banner--warning" role="note">
+  <strong>File d'attente chargée.</strong> {{ backlog_warning_depth }} vérification(s) en attente ou en cours.
+</div>
+{% endif %}
+
 {% if rows %}
 <div class="briefing {% if briefing.to_watch == 0 %}briefing--clear{% endif %}">
   <span class="briefing__count">{{ briefing.to_watch }}</span>

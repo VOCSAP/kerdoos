@@ -349,5 +349,122 @@ class CooldownTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await queue.enqueue("owner1"))
 
 
+class BacklogWarningTest(unittest.IsolatedAsyncioTestCase):
+    """roadmap 3c557a9c item 6: queued_count / backlog_warning_active and
+    the debounced WARNING log."""
+
+    async def asyncSetUp(self) -> None:
+        self.service = _FakeService()
+        self.queue = RunQueue(self.service, backlog_warn_threshold=2)
+        self.stop = asyncio.Event()
+        self.consumer = asyncio.create_task(self.queue.run_forever(self.stop))
+
+    async def asyncTearDown(self) -> None:
+        self.stop.set()
+        self.consumer.cancel()
+        try:
+            await self.consumer
+        except asyncio.CancelledError:
+            pass
+
+    async def _block_consumer_on(self, owner_id: str) -> None:
+        """Enqueue owner_id and wait until the single consumer has picked
+        it up and entered run_now -- the consumer processes ONE owner at a
+        time, so every owner enqueued AFTER this one stays QUEUED (not
+        RUNNING) until this one is released, which is exactly what lets a
+        backlog of several QUEUED owners build up behind it."""
+        self.service.gate(owner_id)
+        self.assertTrue(await self.queue.enqueue(owner_id))
+        await asyncio.get_event_loop().run_in_executor(
+            None, self.service.wait_entered, owner_id)
+
+    async def _release_and_wait_drained(self, *owner_ids: str) -> None:
+        for owner_id in owner_ids:
+            self.service.release(owner_id)
+        for _ in range(200):
+            if self.queue.queued_count == 0:
+                break
+            await asyncio.sleep(0.01)
+
+    async def test_queued_count_coalesces_same_owner(self) -> None:
+        await self._block_consumer_on("owner1")
+        self.assertFalse(await self.queue.enqueue("owner1"))  # coalesced
+        self.assertEqual(self.queue.queued_count, 1)
+        await self._release_and_wait_drained("owner1")
+
+    async def test_queued_count_decrements_after_done(self) -> None:
+        await self._block_consumer_on("owner1")
+        self.assertEqual(self.queue.queued_count, 1)
+        await self._release_and_wait_drained("owner1")
+        self.assertEqual(self.queue.queued_count, 0)
+
+    async def test_queued_count_decrements_after_error(self) -> None:
+        self.service.raise_for.add("bad-owner")
+        await self._block_consumer_on("bad-owner")
+        self.assertEqual(self.queue.queued_count, 1)
+        await self._release_and_wait_drained("bad-owner")
+        self.assertEqual(self.queue.queued_count, 0)
+
+    async def test_backlog_warning_active_once_threshold_reached(self) -> None:
+        self.assertFalse(self.queue.backlog_warning_active)
+        # owner1 blocks the consumer; owner2 stays QUEUED behind it -- both
+        # still count toward queued_count.
+        await self._block_consumer_on("owner1")
+        self.assertFalse(self.queue.backlog_warning_active)  # depth 1 < 2
+        self.assertTrue(await self.queue.enqueue("owner2"))
+        self.assertTrue(self.queue.backlog_warning_active)  # depth 2 >= 2
+        await self._release_and_wait_drained("owner1")
+
+    async def test_backlog_warning_log_fires_once_then_rearms(self) -> None:
+        with self.assertLogs(
+            "kerdoos.core.run_queue", level="WARNING",
+        ) as first_crossing:
+            await self._block_consumer_on("owner1")
+            self.assertTrue(await self.queue.enqueue("owner2"))
+            # Depth 3, still >= threshold -- must NOT log a second time.
+            self.assertTrue(await self.queue.enqueue("owner3"))
+        self.assertEqual(
+            sum(1 for msg in first_crossing.output if "backlog depth" in msg),
+            1, first_crossing.output)
+
+        # owner2/owner3 were never gated -- they run to completion on
+        # their own as soon as the consumer reaches them, only owner1
+        # needs an explicit release.
+        await self._release_and_wait_drained("owner1")
+        self.assertFalse(self.queue.backlog_warning_active)
+
+        with self.assertLogs(
+            "kerdoos.core.run_queue", level="WARNING",
+        ) as second_crossing:
+            await self._block_consumer_on("owner4")
+            self.assertTrue(await self.queue.enqueue("owner5"))
+        self.assertEqual(
+            sum(1 for msg in second_crossing.output if "backlog depth" in msg),
+            1, second_crossing.output)
+        await self._release_and_wait_drained("owner4")
+
+
+class BacklogWarningDisabledTest(unittest.IsolatedAsyncioTestCase):
+    async def test_zero_threshold_disables_warning(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, backlog_warn_threshold=0)
+        stop = asyncio.Event()
+        consumer = asyncio.create_task(queue.run_forever(stop))
+        try:
+            service.gate("owner1")
+            self.assertTrue(await queue.enqueue("owner1"))
+            await asyncio.get_event_loop().run_in_executor(
+                None, service.wait_entered, "owner1")
+            self.assertFalse(queue.backlog_warning_active)
+            service.release("owner1")
+        finally:
+            stop.set()
+            consumer.cancel()
+            try:
+                await consumer
+            except asyncio.CancelledError:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

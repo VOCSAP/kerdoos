@@ -664,5 +664,52 @@ class RunQueueWebUITest(_WebUITestBase):
                     self.assertEqual(calls, ["o1"])  # run_now NOT called again
 
 
+class BacklogWarningWebUITest(_WebUITestBase):
+    """roadmap 3c557a9c item 6: the dashboard backlog banner is admin-only."""
+
+    def setUp(self):
+        os.environ["KERDOOS_RUN_QUEUE_BACKLOG_WARN_THRESHOLD"] = "1"
+        self.addCleanup(
+            os.environ.pop, "KERDOOS_RUN_QUEUE_BACKLOG_WARN_THRESHOLD", None)
+        super().setUp()
+        self._add_owner("admin1", "root", "s3cret", role="admin")
+        self._add_owner("o1", "alice", "s3cret")
+
+    def test_admin_sees_the_banner_at_threshold_user_never_does(self):
+        import threading
+        from unittest import mock as _mock
+
+        from kerdoos.core.app.services import AppService
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_run_now(self, owner_id):  # noqa: ANN001
+            entered.set()
+            release.wait(timeout=2)
+            from kerdoos.core.app.services import RunResult
+            return RunResult(records=[], generated_at="2026-01-01T00:00:00+00:00")
+
+        with _mock.patch.object(AppService, "run_now", _blocking_run_now):
+            with TestClient(create_app()) as client:
+                self._login_on(client, "alice", "s3cret")
+                self.assertNotIn("attente charg", client.get("/").text)
+
+                token = self._csrf_on(client)
+                client.post("/run", data={"csrf_token": token})
+                self.assertTrue(entered.wait(timeout=2))
+
+                # Below/at threshold from a USER's own dashboard: never shown.
+                user_page = client.get("/").text
+                self.assertNotIn("attente charg", user_page)
+
+                self._login_on(client, "root", "s3cret")  # overwrites cookie
+                admin_page = client.get("/").text
+                self.assertIn("attente charg", admin_page)
+                self.assertIn("1 v", admin_page)
+
+                release.set()
+
+
 if __name__ == "__main__":
     unittest.main()
