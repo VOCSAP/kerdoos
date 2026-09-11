@@ -18,7 +18,11 @@ import unittest
 from kerdoos.config import (
     DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS,
     DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
-    DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_RUN_NOW_COOLDOWN_SECONDS,
+    DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
+    DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS,
+    DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP,
+    DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+    DEFAULT_RUN_NOW_COOLDOWN_SECONDS,
     DEFAULT_RUN_QUEUE_BACKLOG_WARN_THRESHOLD, DEFAULT_RUN_QUEUE_MAX_RESTARTS,
     DEFAULT_SMTP_PORT, DEFAULT_SMTP_RETRY_ATTEMPTS,
     DEFAULT_SMTP_RETRY_BACKOFF_SECONDS, DEFAULT_SMTP_TIMEOUT_SECONDS,
@@ -37,6 +41,9 @@ _SMTP_ENV_VARS = (
     "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
     "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
     "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS",
+    "KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS",
+    "KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS",
+    "KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP",
 )
 
 
@@ -546,6 +553,105 @@ class BrowserLaunchTimeoutFloorTest(_SettingsTestBase):
                     DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS)
                 self.assertTrue(
                     any("KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS" in msg
+                        for msg in cm.output), cm.output)
+
+
+class LoginRateLimitWindowFloorTest(_SettingsTestBase):
+    """roadmap f1048ab8: a malformed KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    warns and floors to the default instead of crashing at settings-read
+    time."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.login_rate_limit_window_seconds,
+            DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS"] = "60"
+        settings = get_settings()
+        self.assertEqual(settings.login_rate_limit_window_seconds, 60.0)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.login_rate_limit_window_seconds,
+                    DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS)
+                self.assertTrue(
+                    any("KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS" in msg
+                        for msg in cm.output), cm.output)
+
+
+class LoginRateLimitMaxAttemptsFloorTest(_SettingsTestBase):
+    """roadmap f1048ab8: 0 explicitly disables the limiter (valid, not
+    floored); a malformed or negative value warns and floors instead."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.login_rate_limit_max_attempts,
+            DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS"] = "3"
+        settings = get_settings()
+        self.assertEqual(settings.login_rate_limit_max_attempts, 3)
+
+    def test_zero_disables_and_is_valid(self) -> None:
+        os.environ["KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS"] = "0"
+        settings = get_settings()
+        self.assertEqual(settings.login_rate_limit_max_attempts, 0)
+
+    def test_invalid_or_negative_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.login_rate_limit_max_attempts,
+                    DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS)
+                self.assertTrue(
+                    any("KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS" in msg
+                        for msg in cm.output), cm.output)
+
+
+class LoginRateLimitRowCapFloorTest(_SettingsTestBase):
+    """roadmap f1048ab8: a malformed KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP warns
+    and floors to the default instead of crashing at settings-read time."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.login_rate_limit_row_cap,
+            DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP"] = "500"
+        settings = get_settings()
+        self.assertEqual(settings.login_rate_limit_row_cap, 500)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.login_rate_limit_row_cap,
+                    DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP)
+                self.assertTrue(
+                    any("KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP" in msg
                         for msg in cm.output), cm.output)
 
 

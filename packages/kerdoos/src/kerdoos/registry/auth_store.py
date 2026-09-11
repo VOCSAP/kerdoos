@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS tokens (
     state      TEXT NOT NULL DEFAULT 'active'
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_owner ON tokens(owner_id);
+
+-- roadmap f1048ab8: keyed by the identifier as TYPED (normalized), never
+-- an owner_id -- no FK to owners, a row can exist for an identifier that
+-- names no real owner at all.
+CREATE TABLE IF NOT EXISTS login_attempts (
+    identifier_key TEXT PRIMARY KEY,
+    failure_count  INTEGER NOT NULL,
+    window_start   REAL NOT NULL
+);
 """
 
 _BUSY_TIMEOUT_MS = 5000
@@ -106,8 +115,16 @@ class SqliteAuthStore:
     """AuthStore port impl on config.db, connection-per-operation (see module
     docstring). Thread-safe by construction: no shared connection, no lock."""
 
-    def __init__(self, config_db_path: str | Path) -> None:
+    def __init__(
+        self, config_db_path: str | Path, *,
+        login_rate_limit_window_seconds: float = 900.0,
+        login_rate_limit_max_attempts: int = 5,
+        login_rate_limit_row_cap: int = 10000,
+    ) -> None:
         self._path = str(config_db_path)
+        self._login_rate_limit_window_seconds = login_rate_limit_window_seconds
+        self._login_rate_limit_max_attempts = login_rate_limit_max_attempts
+        self._login_rate_limit_row_cap = login_rate_limit_row_cap
         # One-time: enable WAL (persists at the DB level), ensure the
         # sessions/tokens tables exist, and ensure this store's OWN
         # uniqueness invariant on owners.email (idx_owners_email). Owners the
@@ -190,6 +207,79 @@ class SqliteAuthStore:
         return OwnerCredentials(
             owner_id=row["id"], role=row["role"],
             password_hash=row["password_hash"])
+
+    # -- login rate-limit (roadmap f1048ab8) -------------------------------
+    def login_attempt_blocked_seconds(
+        self, identifier_key: str, *, now: float,
+    ) -> float | None:
+        if self._login_rate_limit_max_attempts <= 0:
+            return None
+        conn = self._connect()
+        try:
+            conn.execute(
+                "DELETE FROM login_attempts WHERE window_start <= ?",
+                (now - self._login_rate_limit_window_seconds,))
+            row = conn.execute(
+                "SELECT failure_count, window_start FROM login_attempts "
+                "WHERE identifier_key = ?", (identifier_key,)).fetchone()
+            if row is not None:
+                conn.commit()
+                if row["failure_count"] < self._login_rate_limit_max_attempts:
+                    return None
+                remaining = self._login_rate_limit_window_seconds - (
+                    now - row["window_start"])
+                return remaining if remaining > 0 else None
+            # Never-seen identifier_key: fail closed if the table is at
+            # capacity (a flood of distinct identifiers must not grow it
+            # without bound, nor silently disable the limit) -- worst-case
+            # retry hint is the full window, since there is no row of its
+            # own to compute a tighter one from.
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM login_attempts").fetchone()["c"]
+            conn.commit()
+            if count >= self._login_rate_limit_row_cap:
+                return self._login_rate_limit_window_seconds
+            return None
+        finally:
+            conn.close()
+
+    def record_login_failure(self, identifier_key: str, *, now: float) -> None:
+        if self._login_rate_limit_max_attempts <= 0:
+            return
+        conn = self._connect()
+        try:
+            conn.execute(
+                "DELETE FROM login_attempts WHERE window_start <= ?",
+                (now - self._login_rate_limit_window_seconds,))
+            cur = conn.execute(
+                "UPDATE login_attempts SET failure_count = failure_count + 1 "
+                "WHERE identifier_key = ?", (identifier_key,))
+            if cur.rowcount == 0:
+                count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM login_attempts").fetchone()["c"]
+                if count < self._login_rate_limit_row_cap:
+                    conn.execute(
+                        "INSERT INTO login_attempts "
+                        "(identifier_key, failure_count, window_start) "
+                        "VALUES (?, 1, ?)", (identifier_key, now))
+                # else: at capacity -- no row created. The NEXT check for
+                # this identifier_key falls into the fail-closed capacity
+                # branch of login_attempt_blocked_seconds instead.
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record_login_success(self, identifier_key: str) -> None:
+        if self._login_rate_limit_max_attempts <= 0:
+            return
+        conn = self._connect()
+        try:
+            conn.execute(
+                "DELETE FROM login_attempts WHERE identifier_key = ?",
+                (identifier_key,))
+            conn.commit()
+        finally:
+            conn.close()
 
     # -- sessions ----------------------------------------------------------
     def create_session(

@@ -148,9 +148,20 @@ def create_app() -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError):
                 await run_queue_task
 
+    if settings.login_rate_limit_max_attempts <= 0:
+        logger.warning(
+            "KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS=0: the /login brute-force "
+            "rate limit is DISABLED for this deployment.")
+
     app = FastAPI(title="Kerdoos", lifespan=_lifespan)
     app.state.auth_service = AuthService(
-        SqliteAuthStore(settings.config_db), Argon2Hasher())
+        SqliteAuthStore(
+            settings.config_db,
+            login_rate_limit_window_seconds=settings.login_rate_limit_window_seconds,
+            login_rate_limit_max_attempts=settings.login_rate_limit_max_attempts,
+            login_rate_limit_row_cap=settings.login_rate_limit_row_cap,
+        ),
+        Argon2Hasher())
     app.state.app_service = app_service
     app.state.run_queue = run_queue
     # Exposed for the Notifications digest preview (Phase 6-web): build_digest_view

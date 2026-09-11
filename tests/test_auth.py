@@ -108,6 +108,143 @@ class HybridIdentityTest(_AuthTestBase):
         self.assertEqual(self.service.authenticate("joe", "pw").role, "user")
 
 
+class LoginRateLimitTest(_AuthTestBase):
+    """roadmap f1048ab8: persistent, per-identifier login rate limit."""
+
+    def _make_service(
+        self, *, max_attempts=2, window_seconds=60, row_cap=10000,
+        clock=None, hasher=None,
+    ):
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=max_attempts,
+            login_rate_limit_window_seconds=window_seconds,
+            login_rate_limit_row_cap=row_cap)
+        kwargs = {}
+        if clock is not None:
+            kwargs["clock"] = clock
+        return AuthService(store, hasher or self.real_hasher, **kwargs)
+
+    def test_two_failures_then_blocked_even_with_correct_password(self) -> None:
+        self._add_owner("o1", "alice", "s3cret")
+        service = self._make_service(max_attempts=2)
+        p1, r1 = service.check_and_authenticate("alice", "wrong")
+        self.assertIsNone(p1)
+        self.assertIsNone(r1)
+        p2, r2 = service.check_and_authenticate("alice", "wrong")
+        self.assertIsNone(p2)
+        self.assertIsNone(r2)
+        p3, r3 = service.check_and_authenticate("alice", "s3cret")
+        self.assertIsNone(p3)
+        self.assertIsNotNone(r3)
+
+    def test_existing_and_nonexistent_identifier_behave_identically(self) -> None:
+        self._add_owner("o1", "alice", "s3cret")
+        service = self._make_service(max_attempts=2)
+        results = {}
+        for identifier in ("alice", "ghost-user"):
+            service.check_and_authenticate(identifier, "wrong")
+            service.check_and_authenticate(identifier, "wrong")
+            principal, retry_after = service.check_and_authenticate(
+                identifier, "irrelevant")
+            results[identifier] = (principal, retry_after is not None)
+        self.assertEqual(results["alice"], (None, True))
+        self.assertEqual(results["ghost-user"], (None, True))
+
+    def test_success_resets_the_counter(self) -> None:
+        self._add_owner("o1", "alice", "s3cret")
+        service = self._make_service(max_attempts=2)
+        service.check_and_authenticate("alice", "wrong")
+        principal, retry_after = service.check_and_authenticate(
+            "alice", "s3cret")
+        self.assertIsNotNone(principal)
+        self.assertIsNone(retry_after)
+        # A fresh single failure right after a success must not block yet.
+        _p, retry_after2 = service.check_and_authenticate("alice", "wrong")
+        self.assertIsNone(retry_after2)
+
+    def test_expired_window_unblocks(self) -> None:
+        self._add_owner("o1", "alice", "s3cret")
+        clock_box = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        service = self._make_service(
+            max_attempts=1, window_seconds=60,
+            clock=lambda: clock_box["now"])
+        service.check_and_authenticate("alice", "wrong")
+        _p, blocked = service.check_and_authenticate("alice", "s3cret")
+        self.assertIsNotNone(blocked)
+        clock_box["now"] += timedelta(seconds=61)
+        principal, retry_after = service.check_and_authenticate(
+            "alice", "s3cret")
+        self.assertIsNotNone(principal)
+        self.assertIsNone(retry_after)
+
+    def test_identifier_normalization_shares_the_counter(self) -> None:
+        self._add_owner("o1", "alice", "s3cret")
+        service = self._make_service(max_attempts=2)
+        service.check_and_authenticate("Alice", "wrong")
+        service.check_and_authenticate(" alice ", "wrong")
+        _p, retry_after = service.check_and_authenticate("ALICE", "s3cret")
+        self.assertIsNotNone(retry_after)
+
+    def test_blocked_identifier_never_pays_the_hash_cost(self) -> None:
+        self._add_owner("o1", "alice", "s3cret")
+        counting = _CountingHasher(self.real_hasher)
+        service = self._make_service(max_attempts=1, hasher=counting)
+        service.check_and_authenticate("alice", "wrong")
+        counting.hash_ops = 0
+        principal, retry_after = service.check_and_authenticate(
+            "alice", "s3cret")
+        self.assertIsNone(principal)
+        self.assertIsNotNone(retry_after)
+        self.assertEqual(counting.hash_ops, 0)
+
+    def test_max_attempts_zero_disables_the_limiter(self) -> None:
+        store = SqliteAuthStore(self.db_path, login_rate_limit_max_attempts=0)
+        for _ in range(50):
+            store.record_login_failure("alice", now=1000.0)
+        self.assertIsNone(
+            store.login_attempt_blocked_seconds("alice", now=1000.0))
+
+    def test_row_cap_fails_closed_for_a_never_seen_identifier(self) -> None:
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=5,
+            login_rate_limit_window_seconds=900,
+            login_rate_limit_row_cap=1)
+        store.record_login_failure("existing-key", now=1000.0)
+        self.assertIsNotNone(
+            store.login_attempt_blocked_seconds("new-key", now=1000.0))
+        # The already-tracked key is unaffected (1 failure < max_attempts).
+        self.assertIsNone(
+            store.login_attempt_blocked_seconds("existing-key", now=1000.0))
+
+    def test_two_store_instances_share_the_counter(self) -> None:
+        store_a = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=2,
+            login_rate_limit_window_seconds=60)
+        store_b = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=2,
+            login_rate_limit_window_seconds=60)
+        store_a.record_login_failure("alice", now=1000.0)
+        store_b.record_login_failure("alice", now=1000.0)
+        self.assertIsNotNone(
+            store_a.login_attempt_blocked_seconds("alice", now=1000.0))
+        self.assertIsNotNone(
+            store_b.login_attempt_blocked_seconds("alice", now=1000.0))
+
+    def test_expired_row_is_purged_not_just_ignored(self) -> None:
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=1,
+            login_rate_limit_window_seconds=60)
+        store.record_login_failure("alice", now=1000.0)
+        store.login_attempt_blocked_seconds("alice", now=2000.0)  # window long expired
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM login_attempts").fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row[0], 0)
+
+
 class AntiEnumerationTest(_AuthTestBase):
     def setUp(self) -> None:
         super().setUp()

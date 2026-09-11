@@ -20,7 +20,7 @@ from __future__ import annotations
 from fastapi import (
     APIRouter, Depends, Form, HTTPException, Request, Response, status,
 )
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from kerdoos.core.app.auth import AuthService
@@ -36,14 +36,23 @@ class LoginBody(BaseModel):
     password: str
 
 
-@router.post("/login")
+@router.post("/login", response_model=None)
 def login(
     body: LoginBody,
     response: Response,
     auth: AuthService = Depends(get_auth_service),
     cookie: SessionCookie = Depends(get_session_cookie),
-) -> dict[str, str]:
-    principal = auth.authenticate(body.identifier, body.password)
+) -> dict[str, str] | Response:
+    principal, retry_after = auth.check_and_authenticate(
+        body.identifier, body.password)
+    if retry_after is not None:
+        # Identical for an existing vs nonexistent identifier (roadmap
+        # f1048ab8): the block check never resolves an owner_id.
+        return JSONResponse(
+            {"detail": "too many login attempts"},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(int(retry_after) + 1)},
+        )
     if principal is None:
         # Uniform 401 on all 3 failure branches (anti-enum) -- see module docstring.
         raise HTTPException(
@@ -96,7 +105,17 @@ def login_submit(
     # cannot exist here. Login CSRF (a forged login into an attacker account) is
     # a low-severity, distinct threat mitigated by SameSite=Lax on the cookie;
     # the session-bound CSRF guard covers every AUTHENTICATED write instead.
-    principal = auth.authenticate(identifier, password)
+    principal, retry_after = auth.check_and_authenticate(identifier, password)
+    if retry_after is not None:
+        # Identical for an existing vs nonexistent identifier (roadmap
+        # f1048ab8): the block check never resolves an owner_id.
+        resp = templates.TemplateResponse(
+            request, "auth/login.html",
+            {"error": True, "identifier": identifier},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        resp.headers["Retry-After"] = str(int(retry_after) + 1)
+        return resp
     if principal is None:
         # Uniform failure: same page + generic message on all branches (anti-enum).
         return templates.TemplateResponse(

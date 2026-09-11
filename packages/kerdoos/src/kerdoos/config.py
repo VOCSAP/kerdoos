@@ -163,6 +163,19 @@ DEFAULT_RUN_QUEUE_MAX_RESTARTS = 5
 # building up. 0 disables the warning entirely.
 DEFAULT_RUN_QUEUE_BACKLOG_WARN_THRESHOLD = 5
 
+# Roadmap f1048ab8: /login brute-force rate limit, persisted per typed
+# identifier (never resolved to an owner_id -- anti-enumeration). A third
+# party who knows (or guesses) an identifier can lock it out for the
+# window; the window/attempt counts trade that off against slowing down
+# credential stuffing. 0 attempts disables the limiter entirely (a startup
+# WARNING is logged when an operator makes that choice explicitly).
+DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS = 900.0
+DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5
+# Bounds the login_attempts table against a flood of distinct identifiers
+# (real or fake) -- past this many tracked rows, a NEW identifier is
+# refused (429) rather than admitted unbounded or the limiter disabled.
+DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP = 10000
+
 # Card 1af8b18b: min seconds between one owner's run_now finishing and
 # their next accepted manual re-run. 5 minutes is long enough to stop a
 # tenant clicking "Verifier maintenant" repeatedly from starving the
@@ -207,6 +220,9 @@ class Settings:
     run_now_cooldown_seconds: float
     uc_launch_timeout_seconds: float
     browser_launch_timeout_seconds: float
+    login_rate_limit_window_seconds: float
+    login_rate_limit_max_attempts: int
+    login_rate_limit_row_cap: int
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -333,4 +349,13 @@ def get_settings() -> Settings:
         browser_launch_timeout_seconds=_env_number(
             "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS",
             DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
+        login_rate_limit_window_seconds=_env_number(
+            "KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS",
+            DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS, float, lambda v: v > 0),
+        login_rate_limit_max_attempts=_env_number(
+            "KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS",
+            DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS, int, lambda v: v >= 0),
+        login_rate_limit_row_cap=_env_number(
+            "KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP",
+            DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP, int, lambda v: v > 0),
     )

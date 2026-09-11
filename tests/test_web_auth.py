@@ -208,5 +208,60 @@ class LogoutTest(_WebAuthTestBase):
         self.assertEqual(resp.status_code, 200)
 
 
+class LoginRateLimitWebTest(_WebAuthTestBase):
+    """roadmap f1048ab8: /login and /auth/login rate-limit, over HTTP."""
+
+    def setUp(self) -> None:
+        os.environ["KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS"] = "2"
+        os.environ["KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS"] = "60"
+        self.addCleanup(
+            os.environ.pop, "KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS", None)
+        self.addCleanup(
+            os.environ.pop, "KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", None)
+        super().setUp()
+        self._add_owner("o1", "alice", "s3cret")
+
+    def _html_login(self, identifier: str, password: str):
+        return self.client.post(
+            "/auth/login",
+            data={"identifier": identifier, "password": password})
+
+    def test_json_login_two_failures_then_429_with_retry_after(self) -> None:
+        self._login("alice", "wrong")
+        self._login("alice", "wrong")
+        resp = self._login("alice", "s3cret")  # correct, but now blocked
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp.headers)
+
+    def test_html_login_two_failures_then_429(self) -> None:
+        self._html_login("alice", "wrong")
+        self._html_login("alice", "wrong")
+        resp = self._html_login("alice", "s3cret")
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp.headers)
+
+    def test_existing_and_nonexistent_identifier_identical_responses(
+        self,
+    ) -> None:
+        for identifier in ("alice", "ghost-user"):
+            self._login(identifier, "wrong")
+            self._login(identifier, "wrong")
+        resp_existing = self._login("alice", "wrong")
+        resp_nonexistent = self._login("ghost-user", "wrong")
+        self.assertEqual(
+            resp_existing.status_code, resp_nonexistent.status_code)
+        self.assertEqual(resp_existing.json(), resp_nonexistent.json())
+        self.assertIn("Retry-After", resp_existing.headers)
+        self.assertIn("Retry-After", resp_nonexistent.headers)
+
+    def test_success_resets_the_counter(self) -> None:
+        self._login("alice", "wrong")
+        ok = self._login("alice", "s3cret")
+        self.assertEqual(ok.status_code, 200)
+        # A single fresh failure right after must not be blocked yet.
+        resp = self._login("alice", "wrong")
+        self.assertEqual(resp.status_code, 401)
+
+
 if __name__ == "__main__":
     unittest.main()

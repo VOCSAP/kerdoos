@@ -121,6 +121,29 @@ class AuthService:
         # role is server-resolved from owners.role, never from input.
         return Principal(owner_id=creds.owner_id, role=creds.role)
 
+    def check_and_authenticate(
+        self, identifier: str, password: str,
+    ) -> tuple[Principal | None, float | None]:
+        """authenticate() wrapped with a persistent, per-identifier rate
+        limit (roadmap f1048ab8). Returns (principal, retry_after): when
+        retry_after is not None, the identifier is currently blocked and
+        principal is always None -- authenticate() is never called (no
+        Argon2id cost paid, no credential check at all) while blocked,
+        even for a correct password. The rate-limit KEY is the identifier
+        as typed (normalized), never resolved to an owner_id, so a
+        nonexistent identifier is throttled identically to a real one."""
+        key = identifier.strip().lower()
+        now = self._clock().timestamp()
+        retry_after = self._store.login_attempt_blocked_seconds(key, now=now)
+        if retry_after is not None:
+            return None, retry_after
+        principal = self.authenticate(identifier, password)
+        if principal is not None:
+            self._store.record_login_success(key)
+        else:
+            self._store.record_login_failure(key, now=now)
+        return principal, None
+
     # -- sessions (WebUI) --------------------------------------------------
     def create_session(self, principal: Principal) -> str:
         """Mint a revocable session for the acting principal. Returns the opaque
