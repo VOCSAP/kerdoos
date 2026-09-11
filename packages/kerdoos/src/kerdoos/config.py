@@ -83,11 +83,14 @@ and the same StaticRouter injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS
 above.
 
 KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce): the delay of the
-uc tier's second orphan-process sweep, which runs before the browser gate is
-released on a launch that exceeded uc_launch_timeout_seconds (autolycos.
-adapters.uc.UcFetcher's orphan_sweep_delay_seconds), same floor-with-warning
-discipline and the same StaticRouter injection path as
-KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above.
+uc tier's second orphan-process sweep, which runs SYNCHRONOUSLY, still
+holding the browser gate, on a launch that exceeded uc_launch_timeout_seconds
+(autolycos.adapters.uc.UcFetcher's orphan_sweep_delay_seconds), same
+StaticRouter injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. Has
+no upper bound of its own: _safe_uc_orphan_sweep_delay clamps it (with a
+warning) so a single timed-out launch cannot occupy the gate for as long as
+KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS, same discipline as digest.factory.
+_safe_smtp_timeout.
 """
 
 from __future__ import annotations
@@ -305,7 +308,36 @@ def _safe_workers(raw: str) -> int:
     return value
 
 
+def _safe_uc_orphan_sweep_delay(
+    sweep_delay: float, uc_launch_timeout: float, acquire_timeout: float,
+) -> float:
+    """roadmap 6521bbce: the uc tier's second orphan-process sweep blocks
+    synchronously WHILE STILL HOLDING the browser gate (autolycos.adapters.
+    uc._launch_with_deadline), so an unbounded delay holds up every other
+    caller waiting on that gate. A value that would make a single timed-out
+    launch occupy the gate for at least as long as the gate's own acquire
+    timeout degrades to a clamped safe value with a warning, mirroring
+    digest.factory._safe_smtp_timeout's discipline."""
+    if uc_launch_timeout + sweep_delay < acquire_timeout:
+        return sweep_delay
+    clamped = max(0.1, (acquire_timeout - uc_launch_timeout) / 2.0)
+    logger.warning(
+        "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS=%r combined with "
+        "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS=%s would hold the browser gate "
+        "for at least as long as KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s "
+        "on a single timed-out launch: clamping the sweep delay to %ss.",
+        sweep_delay, uc_launch_timeout, acquire_timeout, clamped,
+    )
+    return clamped
+
+
 def get_settings() -> Settings:
+    uc_launch_timeout_seconds = _env_number(
+        "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
+        DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    browser_acquire_timeout_seconds = _env_number(
+        "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
+        float(DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS), float, lambda v: v > 0)
     return Settings(
         session_secret=os.environ.get("KERDOOS_SESSION_SECRET"),
         config_db=os.environ.get("KERDOOS_CONFIG_DB", "config.db"),
@@ -345,10 +377,7 @@ def get_settings() -> Settings:
         browser_max_concurrent=_env_number(
             "KERDOOS_BROWSER_MAX_CONCURRENT",
             DEFAULT_BROWSER_MAX_CONCURRENT, int, lambda v: v > 0),
-        browser_acquire_timeout_seconds=_env_number(
-            "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
-            float(DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS), float,
-            lambda v: v > 0),
+        browser_acquire_timeout_seconds=browser_acquire_timeout_seconds,
         run_queue_max_restarts=_env_number(
             "KERDOOS_RUN_QUEUE_MAX_RESTARTS",
             DEFAULT_RUN_QUEUE_MAX_RESTARTS, int, lambda v: v >= 0),
@@ -358,9 +387,7 @@ def get_settings() -> Settings:
         run_now_cooldown_seconds=_env_number(
             "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
             DEFAULT_RUN_NOW_COOLDOWN_SECONDS, float, lambda v: v >= 0),
-        uc_launch_timeout_seconds=_env_number(
-            "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS",
-            DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
+        uc_launch_timeout_seconds=uc_launch_timeout_seconds,
         browser_launch_timeout_seconds=_env_number(
             "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS",
             DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
@@ -373,7 +400,9 @@ def get_settings() -> Settings:
         login_rate_limit_row_cap=_env_number(
             "KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP",
             DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP, int, lambda v: v > 0),
-        uc_orphan_sweep_delay_seconds=_env_number(
-            "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
-            DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS, float, lambda v: v > 0),
+        uc_orphan_sweep_delay_seconds=_safe_uc_orphan_sweep_delay(
+            _env_number(
+                "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
+                DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS, float, lambda v: v > 0),
+            uc_launch_timeout_seconds, browser_acquire_timeout_seconds),
     )

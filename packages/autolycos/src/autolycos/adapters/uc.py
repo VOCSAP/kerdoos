@@ -204,24 +204,15 @@ def _snapshot_descendant_pids() -> frozenset[int]:
 def _launch_process_tree(  # type: ignore[no-untyped-def]
     marker: str, pids_before: frozenset[int] | None = None,
 ) -> list:
-    """The OS process tree belonging to the launch tagged with `marker`: any
-    live process whose cmdline carries it, that process's parent when the
-    parent is itself named chromedriver/uc_driver, and all of their
-    descendants (renderer/GPU child processes, which do not carry the
-    marker in their own argv).
+    """The OS process tree belonging to the launch tagged with `marker`:
+    any live process whose cmdline carries it, that process's
+    chromedriver/uc_driver parent if any, and all of their descendants.
 
-    Roadmap 6521bbce: in undetected mode SeleniumBase launches Chrome
-    DIRECTLY from Python and runs uc_driver as Chrome's SIBLING in the
-    process tree, not its parent -- the marker-walk above never finds it
-    (uc_driver's own argv never carries the marker, and it is never
-    Chrome's ancestor in this mode). `pids_before`, a snapshot taken right
-    before this launch's own thread started, additionally matches any
-    descendant of the current process named uc_driver/chromedriver that is
-    ABSENT from that snapshot -- i.e. spawned since. The caller only passes
-    it when this launch holds the browser gate exclusively (see
-    UcFetcher._launch_with_deadline), which is what makes "new since my own
-    baseline" unambiguous: no other launch can be creating processes while
-    this one still holds the gate.
+    `pids_before`, a PID snapshot taken before this launch started, also
+    matches a live uc_driver/chromedriver descendant NOT in that snapshot
+    (it never carries the marker itself in undetected mode). Only pass it
+    while this launch still holds the browser gate exclusively -- see
+    UcFetcher._launch_with_deadline.
     """
     import psutil
 
@@ -268,32 +259,34 @@ def _launch_process_tree(  # type: ignore[no-untyped-def]
     return list(tree.values())
 
 
-def _kill_launch_processes(
-    marker: str, pids_before: frozenset[int] | None = None,
-) -> None:
-    """Best-effort: kill only the process tree of the launch tagged with
-    `marker`, so a launch abandoned at the deadline never leaves a process
-    behind (roadmap 65cef071) without also hitting a concurrent, unrelated
-    launch's own process. psutil is optional (declared under the `uc`
-    extra); any error here is swallowed -- this is cleanup, not correctness.
-
-    Roadmap 6521bbce, MEASURED in the autonomous image: uc_driver is
-    routinely already a ZOMBIE (exited, never reaped) by the time cleanup
-    runs, not a live process -- kill() is then a genuine no-op, and psutil
-    still reports it as "running" (the PID slot survives until reaped). We
-    are its direct parent, so os.waitpid(pid, WNOHANG) reaps it. Before
-    acting, each process's identity (pid + its OWN create_time, re-read a
-    moment apart on the same object -- not compared against any other
-    process or timestamp) is re-checked to guard against the pid having
-    been recycled between the scan above and here.
-    """
+def _capture_identities(procs) -> list[tuple[int, float]]:  # type: ignore[no-untyped-def]
+    """(pid, create_time) pairs for a live process list, so a caller can
+    act on this EXACT set later without re-scanning by name."""
     import psutil
 
-    for proc in _launch_process_tree(marker, pids_before):
+    identities = []
+    for proc in procs:
         try:
-            pid, created = proc.pid, proc.create_time()
-            if psutil.Process(pid).create_time() != created:
-                continue  # pid recycled since the scan; not our process
+            identities.append((proc.pid, proc.create_time()))
+        except psutil.Error:
+            continue
+    return identities
+
+
+def _kill_identities(identities: list[tuple[int, float]]) -> None:
+    """Best-effort kill + zombie reap for an already-identified (pid,
+    create_time) set. Re-verifies identity against a FRESH psutil.Process
+    immediately before acting, so a pid recycled since capture is skipped
+    rather than signalled -- uc_driver is routinely already a zombie by
+    the time this runs; we are its direct parent, so
+    os.waitpid(pid, WNOHANG) reaps it."""
+    import psutil
+
+    for pid, created in identities:
+        try:
+            proc = psutil.Process(pid)
+            if proc.create_time() != created:
+                continue  # pid recycled since capture; not our process
         except psutil.Error:
             continue
         try:
@@ -301,11 +294,22 @@ def _kill_launch_processes(
         except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
             pass
         try:
-            os.waitpid(proc.pid, os.WNOHANG)
+            os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             pass  # not our own direct child (a grandchild), or already reaped
         except Exception:  # noqa: BLE001 -- best-effort, never raise from cleanup
             pass
+
+
+def _kill_launch_processes(
+    marker: str, pids_before: frozenset[int] | None = None,
+) -> None:
+    """Best-effort: kill only the process tree of the launch tagged with
+    `marker` (roadmap 65cef071), never a concurrent, unrelated launch's
+    own process. psutil is optional (the `uc` extra); any error here is
+    swallowed -- this is cleanup, not correctness."""
+    _kill_identities(
+        _capture_identities(_launch_process_tree(marker, pids_before)))
 
 
 def _read_status(driver) -> int:  # type: ignore[no-untyped-def]
@@ -372,11 +376,17 @@ class UcFetcher:
         # same time -- see the sweep below, which relies on this being
         # true for its whole duration, not just at this instant.
         single_flight = self._gate.max_concurrent == 1
-        sibling_pids = pids_before if single_flight else None
 
         holder: dict = {}
         claim_lock = threading.Lock()
         claimed = {"value": False}
+        # Populated by the deadline branch below, still under the gate.
+        # A construction call that loses the claim AFTER that point runs
+        # asynchronously with NO guarantee the gate is still held -- it may
+        # act on this already-identified set, never a fresh PID diff (a
+        # different launch could by then own the gate and its own uc_driver).
+        frozen_siblings: list[tuple[int, float]] = []
+        sweep_done = threading.Event()
 
         def _claim() -> bool:
             with claim_lock:
@@ -385,6 +395,11 @@ class UcFetcher:
                 claimed["value"] = True
                 return True
 
+        def _cleanup_after_losing_the_claim() -> None:
+            sweep_done.wait(self._orphan_sweep_delay_seconds + 5.0)
+            _kill_launch_processes(marker)  # marker match: safe at any time
+            _kill_identities(frozen_siblings)
+
         def _construct() -> None:
             try:
                 driver = driver_cls(**driver_kwargs)
@@ -392,7 +407,7 @@ class UcFetcher:
                 if _claim():
                     holder["error"] = exc
                 else:
-                    _kill_launch_processes(marker, sibling_pids)
+                    _cleanup_after_losing_the_claim()
                 return
             if _claim():
                 holder["driver"] = driver
@@ -401,12 +416,13 @@ class UcFetcher:
                     driver.quit()
                 except Exception:  # noqa: BLE001 -- best-effort, caller is gone
                     pass
-                _kill_launch_processes(marker, sibling_pids)
+                _cleanup_after_losing_the_claim()
 
         launch_thread = threading.Thread(target=_construct, daemon=True)
         launch_thread.start()
         launch_thread.join(timeout=self._launch_timeout_seconds)
         if launch_thread.is_alive() and _claim():
+            sibling_pids = pids_before if single_flight else None
             _kill_launch_processes(marker, sibling_pids)
             # The construction call may still be running (a launch that
             # never returns, roadmap 6521bbce) and spawn a process AFTER
@@ -419,9 +435,13 @@ class UcFetcher:
             # release rather than racing it.
             if single_flight:
                 time.sleep(self._orphan_sweep_delay_seconds)
-                _kill_launch_processes(marker, sibling_pids)
+                frozen_siblings.extend(_capture_identities(
+                    _launch_process_tree(marker, sibling_pids)))
+                _kill_identities(frozen_siblings)
+            sweep_done.set()
             raise FetchError(
                 f"uc launch exceeded {self._launch_timeout_seconds}s timeout")
+        sweep_done.set()
         # Either the thread had already finished by the deadline, or it won
         # the claim race right as the deadline fired -- either way it is
         # about to return (or already has), so this join is bounded.

@@ -690,5 +690,34 @@ class UcOrphanSweepDelayFloorTest(_SettingsTestBase):
                         for msg in cm.output), cm.output)
 
 
+class UcOrphanSweepDelayUpperBoundTest(_SettingsTestBase):
+    """Roadmap 6521bbce re-gate: the sweep now blocks synchronously while
+    holding the browser gate, so an unbounded value could hold it for
+    longer than KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS -- a misconfigured
+    combination must degrade (clamp + warn), never crash get_settings()."""
+
+    def test_value_within_the_acquire_timeout_budget_passes_through(self) -> None:
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "10"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS"] = "5"
+        settings = get_settings()
+        self.assertEqual(settings.uc_orphan_sweep_delay_seconds, 5.0)
+
+    def test_value_that_would_hold_the_gate_past_acquire_timeout_is_clamped(
+            self) -> None:
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "30"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS"] = "3600"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertLess(
+            settings.uc_launch_timeout_seconds
+            + settings.uc_orphan_sweep_delay_seconds,
+            settings.browser_acquire_timeout_seconds)
+        self.assertGreater(settings.uc_orphan_sweep_delay_seconds, 0)
+        self.assertTrue(
+            any("clamping" in msg for msg in cm.output), cm.output)
+
+
 if __name__ == "__main__":
     unittest.main()

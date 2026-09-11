@@ -1061,6 +1061,66 @@ class UcOrphanSweepExclusiveGateTest(unittest.TestCase):
                 later_spawned[0].kill()
 
 
+class UcLateClaimLoserTest(unittest.TestCase):
+    """Card 6521bbce, re-gate NO-GO (R1b/R1c, reviewer probe_orph3.py): A's
+    construction thread can lose the claim race LONG after the deadline
+    branch already released the browser gate (a late successful return, or
+    a late exception) -- that branch must never re-diff by PID against its
+    own stale pre-launch snapshot, because a DIFFERENT, later launch (B)
+    may already hold the gate and have spawned its own live uc_driver.
+    POSIX only.
+    """
+
+    def setUp(self) -> None:
+        if os.name != "posix" or not os.path.exists("/bin/sleep"):
+            self.skipTest("needs /bin/sleep (POSIX)")
+
+    def _run_scenario(self, late_raises: bool) -> None:
+        gate = BrowserGate(max_concurrent=1)
+
+        def _a_factory(**kwargs):  # noqa: ANN003
+            time.sleep(2.5)  # returns/raises long AFTER A's deadline+sweep
+            if late_raises:
+                raise RuntimeError("late launch failure")
+            return _FakeDriver("<html></html>", **kwargs)
+
+        fetcher_a = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, launch_timeout_seconds=0.3,
+            orphan_sweep_delay_seconds=0.5)
+        with self.assertRaises(FetchError):
+            with gate.acquire():
+                fetcher_a._launch_with_deadline(_a_factory, {})
+
+        b_spawned: list = []
+
+        def _b_factory(**kwargs):  # noqa: ANN003
+            b_spawned.append(subprocess.Popen([_fake_uc_driver_binary(), "60"]))
+            return _FakeDriver("<html></html>", **kwargs)
+
+        fetcher_b = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, launch_timeout_seconds=5.0,
+            orphan_sweep_delay_seconds=0.5)
+        try:
+            with gate.acquire():
+                fetcher_b._launch_with_deadline(_b_factory, {})
+            # A's construction thread returns/raises at ~2.5s -- past that,
+            # if the fix were unsound it would have killed B's live process.
+            time.sleep(3.0)
+            self.assertIsNone(
+                b_spawned[0].poll(),
+                "the NEXT launch's real uc_driver was killed by A's "
+                "late (post-gate-release) claim-loser cleanup")
+        finally:
+            if b_spawned and b_spawned[0].poll() is None:
+                b_spawned[0].kill()
+
+    def test_next_launch_survives_a_late_successful_return(self) -> None:
+        self._run_scenario(late_raises=False)
+
+    def test_next_launch_survives_a_late_exception(self) -> None:
+        self._run_scenario(late_raises=True)
+
+
 class UcOrphanSweepAttributionTest(unittest.TestCase):
     """Card 6521bbce acceptance test, reviewer NO-GO: must bite on the
     attribution mechanism itself, not on driver.quit() -- the factory
