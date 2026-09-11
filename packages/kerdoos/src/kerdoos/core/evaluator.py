@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
@@ -206,8 +207,10 @@ async def _run_plan_b(
     tick_now: datetime,
     summary: EvaluationSummary,
     send_semaphore: asyncio.Semaphore,
+    send_executor: ThreadPoolExecutor,
     send_timeout_seconds: int,
 ) -> None:
+    loop = asyncio.get_running_loop()
     for job in jobs:
         try:
             if state_store.has_active_job_run(job.owner_id, job.id):
@@ -232,8 +235,13 @@ async def _run_plan_b(
                 # S4 (ADR 0003 Phase 6b tranche 4): an EXPLICIT ceiling on
                 # simultaneously in-flight sender.send calls, on top of the
                 # per-job DB singleton above (has_active_job_run). Dispatched
-                # via asyncio.to_thread so a real blocking SMTP call cannot
-                # stall the event loop while holding the semaphore slot.
+                # via loop.run_in_executor on a DEDICATED send_executor
+                # (roadmap 1c67e5b2) -- never asyncio.to_thread, which shares
+                # asyncio's default executor with Plan A's
+                # to_thread(scrape_and_record). A real blocking SMTP call
+                # cannot stall the event loop while holding the semaphore
+                # slot, and an orphaned send thread (see below) can never
+                # starve the scrape path by competing for the same pool.
                 #
                 # roadmap 58d88fe0: wrapped in wait_for with a TOTAL deadline
                 # -- SmtpSettings.timeout_seconds only bounds each individual
@@ -242,11 +250,13 @@ async def _run_plan_b(
                 # per-operation timeout could otherwise hold the semaphore
                 # slot far longer than send_timeout_seconds. On timeout the
                 # `await` raises and the send_semaphore slot is released,
-                # unblocking the loop even though the underlying to_thread
-                # thread cannot itself be cancelled and may linger.
+                # unblocking the loop even though the underlying thread
+                # cannot itself be cancelled and may linger -- in the
+                # dedicated send_executor, never in the shared default one.
                 async with send_semaphore:
                     sent = await asyncio.wait_for(
-                        asyncio.to_thread(
+                        loop.run_in_executor(
+                            send_executor,
                             sender.send, job, records, now_iso, tier2_labels),
                         timeout=send_timeout_seconds,
                     )
@@ -322,6 +332,7 @@ async def evaluate_tick(
     now: datetime | None = None,
     max_concurrent_sends: int = 1,
     send_semaphore: asyncio.Semaphore | None = None,
+    send_executor: ThreadPoolExecutor | None = None,
     reaper_timeout_seconds: int = 300,
 ) -> EvaluationSummary:
     """Run exactly ONE evaluation tick: a reaper sweep, then Plan A (scrape
@@ -354,7 +365,20 @@ async def evaluate_tick(
     among callers that share the object, never across separate processes
     (that boundary is covered by should_start_intra_process_evaluator's
     workers<=1 guard-rail plus the per-job DB-level has_active_job_run
-    singleton, which IS cross-process)."""
+    singleton, which IS cross-process).
+
+    send_executor (roadmap 1c67e5b2): the thread pool Plan B's sender.send
+    calls run on, via loop.run_in_executor -- deliberately SEPARATE from
+    asyncio's default executor, which Plan A's to_thread(scrape_and_record)
+    uses. A send that overruns send_timeout_seconds leaves its OS thread
+    orphaned (Python cannot kill a running thread); isolating it in its own
+    pool means that orphan can only ever starve future sends, never a
+    scrape. By default a FRESH ThreadPoolExecutor(max_workers=
+    max_concurrent_sends) is built per call and shut down with
+    shutdown(wait=False) once _run_plan_b returns -- non-blocking, since
+    waiting would defeat the point on a still-stuck orphan. Same reuse
+    contract as send_semaphore: run_evaluator_loop builds ONE instance and
+    passes it to every tick."""
     tick_now = now if now is not None else datetime.now(timezone.utc)
     if tick_now.tzinfo is None:
         tick_now = tick_now.replace(tzinfo=timezone.utc)
@@ -397,11 +421,23 @@ async def evaluate_tick(
     semaphore = (
         send_semaphore if send_semaphore is not None
         else asyncio.Semaphore(max_concurrent_sends))
-    await _run_plan_b(
-        jobs=jobs, source_index=source_index, state_store=state_store,
-        sender=sender, now_iso=now_iso, tick_now=tick_now, summary=summary,
-        send_semaphore=semaphore, send_timeout_seconds=reaper_timeout_seconds,
-    )
+    owns_executor = send_executor is None
+    executor = (
+        send_executor if send_executor is not None
+        else ThreadPoolExecutor(max_workers=max(max_concurrent_sends, 1)))
+    try:
+        await _run_plan_b(
+            jobs=jobs, source_index=source_index, state_store=state_store,
+            sender=sender, now_iso=now_iso, tick_now=tick_now, summary=summary,
+            send_semaphore=semaphore, send_executor=executor,
+            send_timeout_seconds=reaper_timeout_seconds,
+        )
+    finally:
+        if owns_executor:
+            # wait=False: an orphaned send thread cannot be killed anyway,
+            # so blocking teardown on it would just re-create the wedge
+            # this executor exists to avoid.
+            executor.shutdown(wait=False)
     return summary
 
 
@@ -427,19 +463,20 @@ async def run_evaluator_loop(
     Settings.digest_reaper_timeout_seconds explicitly (roadmap 58d88fe0);
     callers that omit it fall back to the 300s function default.
 
-    Builds ONE send_semaphore (S4) here and reuses it across every tick of
-    this loop -- ticks of the SAME loop never overlap (each await blocks the
-    next), but sharing one instance is simpler than rebuilding it every
-    iteration and matches run_evaluator_loop's role as a single persistent
-    evaluator."""
+    Builds ONE send_semaphore (S4) and ONE send_executor (roadmap 1c67e5b2)
+    here and reuses both across every tick of this loop -- ticks of the SAME
+    loop never overlap (each await blocks the next), but sharing one
+    instance is simpler than rebuilding it every iteration and matches
+    run_evaluator_loop's role as a single persistent evaluator."""
     event = stop_event if stop_event is not None else asyncio.Event()
     send_semaphore = asyncio.Semaphore(max_concurrent_sends)
+    send_executor = ThreadPoolExecutor(max_workers=max(max_concurrent_sends, 1))
     while not event.is_set():
         try:
             await evaluate_tick(
                 config_store=config_store, state_store=state_store,
                 router=router, parser_factory=parser_factory, sender=sender,
-                send_semaphore=send_semaphore,
+                send_semaphore=send_semaphore, send_executor=send_executor,
                 reaper_timeout_seconds=reaper_timeout_seconds,
             )
         except Exception:  # noqa: BLE001 -- one crashed tick must not kill the loop

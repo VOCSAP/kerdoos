@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -838,6 +839,118 @@ class PlanBSendTotalDeadlineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("job-fast-owner", sender.calls)
         self.assertEqual(summary.notified_jobs, 1)
         self.assertEqual(summary.errors, 1)
+
+
+class _HangingThenFastSender:
+    """DigestSender double: job "job-slow" blocks FOREVER (a real OS thread
+    that cannot be cancelled once orphaned by wait_for's timeout); any other
+    job returns immediately."""
+
+    def __init__(self, hang_forever: threading.Event) -> None:
+        self._hang_forever = hang_forever
+        self.calls: list[str] = []
+
+    def send(self, job, records, generated_at, tier2_labels) -> bool:
+        if job.name == "job-slow":
+            self._hang_forever.wait()
+        self.calls.append(job.name)
+        return True
+
+
+class PlanBDedicatedExecutorTest(unittest.IsolatedAsyncioTestCase):
+    """roadmap 1c67e5b2: Plan B's sender.send() must run on its OWN bounded
+    executor, never asyncio's shared default one that Plan A's
+    to_thread(scrape_and_record) also uses -- otherwise an orphaned send
+    thread (wait_for cancels the await, never the underlying OS thread)
+    permanently occupies a slot in the shared pool and eventually starves
+    the scrape path too."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._never_set = threading.Event()  # the orphaned thread's prison
+        # concurrent.futures.thread registers every worker thread it ever
+        # starts in a process-wide registry that atexit JOINS on interpreter
+        # shutdown, regardless of whether the ThreadPoolExecutor object
+        # itself is still referenced. Release the thread at teardown so it
+        # cannot hang the whole test process after this test is done with it.
+        self.addCleanup(self._never_set.set)
+
+    async def test_a_stuck_send_does_not_starve_a_later_scrape(self) -> None:
+        loop = asyncio.get_running_loop()
+        # Constrain the DEFAULT executor to a single worker (mirrors the
+        # small-vCPU target from the roadmap card: min(32, cpu+4) shrinks to
+        # a handful of workers there) so a single orphaned thread is enough
+        # to starve it deterministically, without a real multi-hour leak.
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+
+        tick1 = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        tick2 = tick1 + timedelta(hours=2)  # still the same UTC day
+
+        config = SqliteConfigStore(Path(self._tmp.name) / "config.db")
+        state = SqliteStateStore(Path(self._tmp.name) / "state.db")
+        self.addCleanup(config.close)
+        self.addCleanup(state.close)
+        domain_policy = CatalogueDomainPolicy(config)
+        router = _StubRouter({"http": _FakeFetcher()})
+        service = AppService(config, state, router, domain_policy, build_parser)
+        config.add_site(_SITE)
+
+        # slow-owner: its OWN source is already fresh (Plan A never needs to
+        # scrape it), so the only thing this job contributes is a send()
+        # that never returns. Daily frequency keeps BOTH ticks in the same
+        # idempotence window, so tick2 never attempts a second hanging send.
+        service.add_product("slow-owner", ProductSpec("p1"))
+        slow_source = service.add_source(
+            "slow-owner", "p1", "kabum", "https://www.kabum.com.br/p/slow")
+        service.create_job(
+            Principal(owner_id="slow-owner"),
+            DigestJobSpec(name="job-slow", frequency_kind="daily",
+                          source_ids=(slow_source.source_id,)))
+        state.record("slow-owner", ScrapeRecord(
+            source_id=slow_source.source_id, ts=(tick1 - _minutes(1)).isoformat(),
+            status=ScrapeStatus.OK, price_pix_cents=100, price_card_cents=110,
+            currency="BRL", availability=Availability.IN_STOCK, method="http",
+            error=None,
+        ))
+
+        # scrape-owner: no history seeded, hourly job -- needs a fresh
+        # scrape on EVERY tick this test drives. This is what must keep
+        # progressing regardless of what happens on the send side.
+        service.add_product("scrape-owner", ProductSpec("p1"))
+        scrape_source = service.add_source(
+            "scrape-owner", "p1", "kabum", "https://www.kabum.com.br/p/scrape")
+        service.create_job(
+            Principal(owner_id="scrape-owner"),
+            DigestJobSpec(name="job-scrape", frequency_kind="hourly",
+                          source_ids=(scrape_source.source_id,)))
+
+        sender = _HangingThenFastSender(self._never_set)
+
+        summary1 = await evaluate_tick(
+            config_store=config, state_store=state, router=router,
+            parser_factory=_fake_parser_factory, sender=sender, now=tick1,
+            max_concurrent_sends=1, reaper_timeout_seconds=0.05,
+        )
+        self.assertEqual(summary1.errors, 1)  # job-slow's send timed out
+        self.assertEqual(summary1.scraped_sources, 1)  # job-scrape, tick1
+
+        # The orphaned job-slow thread is now permanently parked in
+        # whichever executor Plan B used. If that is the shared default
+        # executor (max_workers=1 above), tick2's Plan A scrape -- which
+        # also needs the default executor via asyncio.to_thread -- can
+        # never get a worker. Bound the assertion itself so a regression
+        # fails fast instead of hanging the whole suite.
+        summary2 = await asyncio.wait_for(
+            evaluate_tick(
+                config_store=config, state_store=state, router=router,
+                parser_factory=_fake_parser_factory, sender=sender, now=tick2,
+                max_concurrent_sends=1, reaper_timeout_seconds=5.0,
+            ),
+            timeout=5.0,
+        )
+        self.assertEqual(summary2.scraped_sources, 1)  # job-scrape, tick2
+        self.assertEqual(summary2.skipped_jobs, 1)  # job-slow, same window
 
 
 if __name__ == "__main__":
