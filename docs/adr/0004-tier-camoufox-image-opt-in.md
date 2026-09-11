@@ -1,9 +1,10 @@
 # ADR 0004 -- Tier `camoufox` (Firefox anti-detection) en variante d'image opt-in
 
-- **Statut** : principe ACCEPTED (decision operateur du 2026-09-11, citee plus bas) ;
-  decisions 1 a 8 PROPOSEES par l'architecte, a ratifier avant la tranche T1. Les
-  conditions de securite C1 a C6 de la revue security-auditor y sont integrees
-  (table de tracabilite en fin de document).
+- **Statut** : ACCEPTED (2026-09-11). Principe : decision operateur, citee plus bas.
+  Decisions 1 a 8 : ratifiees par le team-lead au titre de son mandat d'autonomie,
+  apres validation de la revue security-auditor (ratifiable apres les retouches R1 a
+  R3). Les conditions de securite C1 a C6 y sont integrees (table de tracabilite en fin
+  de document). Les trois questions operateur restent ouvertes.
 - **Date** : 2026-09-11
 - **Portee** : ajout d'un cinquieme tier de fetch, `camoufox`, et d'une troisieme
   cible d'image, opt-in. Amende la Decision 5 de
@@ -35,6 +36,12 @@ Faits mesures pendant le spike 5e84a704 et la mesure de RAM qui l'a suivi :
   memoire n'est consommee que pendant le fetch.
 - Sans init dans le conteneur, chaque fetch Camoufox laisse 4 process zombies
   (Chromium : 2), meme cause que la carte d8b7b8fd.
+- **MercadoLivre, deuxieme site candidat** (mesure sur **un seul echantillon**, une
+  requete sur la meme fiche produit, a confirmer en T4) : le tier `browser` actuel
+  (patchright, Chromium complet, user-agent sans "Headless") recoit un 200 mais sur un
+  mur de verification de compte (40802 octets, aucune donnee produit) ; Camoufox (image
+  du spike) recoit la vraie fiche (1055964 octets, etat pre-charge de la page, JSON-LD
+  Product avec un prix de 9434 BRL et la disponibilite InStock).
 
 **Decision operateur, citee telle quelle** : « B ; mais à condition de rendre facile
 l'activation de cette image. En tout cas on câble tout ce qu'il faut pour pouvoir
@@ -100,6 +107,10 @@ pas (mesure), donc le moins couteux qui passe est `camoufox`.
 
 - Le catalogue livre declare `fetcher: camoufox` pour Magalu. Nom du tier et valeur de
   `FetchResult.method` : `camoufox`.
+- MercadoLivre, declare aujourd'hui `fetcher: browser`, est candidat au meme tier sur
+  la foi d'une mesure unique (Contexte). Son routage vers `camoufox` dans le catalogue
+  se fait en T3, et sa confirmation sur plusieurs echantillons en T4 ; si T4 ne
+  confirme pas, MercadoLivre revient a `browser`.
 - **Sur l'image par defaut**, le tier est indisponible et suit le patron 3aeb8a19 :
   log au demarrage, ajout de source refuse, source ignoree au scrape sans ScrapeRecord.
 - **Disponibilite = paquet + binaire + version** (renforcee par la condition C5) : le
@@ -331,8 +342,8 @@ exigees ici des la tranche T1 :
 | T0.5 | Condition C1 : allowlist de domaines a l'autorite du CONNECT dans `egress_proxy.py`, appliquee au tier `browser` existant ; tests du proxy (hote hors allowlist refuse sans resolution, loopback) | T0 (`browser.py` est modifie par d8b7b8fd) |
 | T1 | Adaptateur autolycos : extra, import paresseux, zero telechargement (C5 cote code), preferences imposees (C2), garde de contexte (C3), liveness de la Decision 5, registre du routeur, disponibilite paquet + binaire + version, tests unitaires avec un faux Camoufox ; mesure des durees de lancement et de navigation pour fixer les defauts | T0, T0.5 (API du proxy) |
 | T2 | Dockerfile : cible `autonomous-camoufox`, bibliotheques systeme, telechargement deterministe epingle (C4), assertion de version au build (C5), durcissement (Decision 8) ; compose : profil `camoufox` durci ; `env.example` (variables, note de RAM) ; taille d'image mesuree | T0, T1 (l'extra existe dans `uv.lock`) |
-| T3 | Cablage kerdoos : variables dans `get_settings`, WARNING d'ordre, injection par la racine de composition (WebUI et CLI), tests de cablage par racine, indicateur WebUI (barreau `camoufox`, cle `uc` corrigee), catalogue Magalu -> `camoufox`, documentation d'exploitation (dont `CLAUDE.md` invariant 6 et `AGENTS.md`) | T1 ; en parallele de T2 |
-| T4 | Tests en image : preuves SSRF de la Decision 4 (dont T4-1 a T4-6), zero telechargement T4-7, durcissement T4-8, reproductibilite T4-9, liveness de la Decision 5, RAM re-mesuree sur l'image reelle, `MagaluParser` sur une vraie page Camoufox (fixture issue du spike) | T2, T3 |
+| T3 | Cablage kerdoos : variables dans `get_settings`, WARNING d'ordre, injection par la racine de composition (WebUI et CLI), tests de cablage par racine, indicateur WebUI (barreau `camoufox`, cle `uc` corrigee), catalogue Magalu et MercadoLivre -> `camoufox`, documentation d'exploitation (dont `CLAUDE.md` invariant 6 et `AGENTS.md`) | T1 ; en parallele de T2 |
+| T4 | Tests en image : preuves SSRF de la Decision 4 (dont T4-1 a T4-6), zero telechargement T4-7, durcissement T4-8, reproductibilite T4-9, liveness de la Decision 5, RAM re-mesuree sur l'image reelle, `MagaluParser` sur une vraie page Camoufox (fixture issue du spike), MercadoLivre confirme sur plusieurs echantillons avec son parser (sinon retour a `browser`) | T2, T3 |
 
 Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
 
@@ -410,3 +421,8 @@ Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
   (C3), build deterministe sans `camoufox fetch` (C4), zero telechargement a l'execution
   par construction (C5), durcissement de l'image (C6, Decision 8), neuf preuves T4.
   Correction de la question ouverte 1 (C7).
+- **2026-09-11 -- ACCEPTED**. Retouches de ratification securite (R1 a R3, N1, N2) ;
+  decisions 1 a 8 ratifiees par le team-lead au titre de son mandat d'autonomie, apres
+  validation de la revue security-auditor. Ajout de MercadoLivre comme deuxieme site
+  candidat, mesure sur un seul echantillon, a confirmer en T4. Les trois questions
+  operateur restent ouvertes.
