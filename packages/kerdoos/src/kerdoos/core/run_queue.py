@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -53,6 +54,12 @@ class RunQueue:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._queued_or_running: set[str] = set()
         self._status: dict[str, RunStatus] = {}
+        # Cooldown elapsed time is measured on time.monotonic(), never
+        # wall-clock: an NTP step (forward or back) must not shrink or
+        # widen the window. finished_at (wall-clock ISO) stays purely for
+        # display -- RunStatus keeps it, this dict is the cooldown source
+        # of truth.
+        self._done_monotonic: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._dead = False
         self._dead_reason: str | None = None
@@ -76,11 +83,10 @@ class RunQueue:
         status = self._status.get(owner_id)
         if status is None or status.state is not RunState.DONE:
             return None
-        if status.finished_at is None:
+        done_at = self._done_monotonic.get(owner_id)
+        if done_at is None:
             return None
-        finished = datetime.fromisoformat(status.finished_at)
-        elapsed = (datetime.now(timezone.utc) - finished).total_seconds()
-        remaining = self._cooldown_seconds - elapsed
+        remaining = self._cooldown_seconds - (time.monotonic() - done_at)
         return remaining if remaining > 0 else None
 
     async def enqueue(self, owner_id: str) -> bool:
@@ -188,6 +194,7 @@ class RunQueue:
                 async with self._lock:
                     self._status[owner_id] = RunStatus(
                         state=RunState.DONE, finished_at=finished_at)
+                    self._done_monotonic[owner_id] = time.monotonic()
                     self._restarts = 0
             finally:
                 async with self._lock:

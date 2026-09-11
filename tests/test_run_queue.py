@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -270,6 +271,7 @@ class CooldownTest(unittest.IsolatedAsyncioTestCase):
         finished = datetime.now(timezone.utc).isoformat()
         queue._status["owner1"] = RunStatus(
             state=RunState.DONE, finished_at=finished)
+        queue._done_monotonic["owner1"] = time.monotonic()
 
         self.assertFalse(await queue.enqueue("owner1"))
 
@@ -290,6 +292,7 @@ class CooldownTest(unittest.IsolatedAsyncioTestCase):
         old = (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()
         queue._status["owner1"] = RunStatus(
             state=RunState.DONE, finished_at=old)
+        queue._done_monotonic["owner1"] = time.monotonic() - 2
 
         self.assertIsNone(queue.cooldown_remaining_seconds("owner1"))
         self.assertTrue(await queue.enqueue("owner1"))
@@ -300,6 +303,7 @@ class CooldownTest(unittest.IsolatedAsyncioTestCase):
         finished = datetime.now(timezone.utc).isoformat()
         queue._status["owner1"] = RunStatus(
             state=RunState.DONE, finished_at=finished)
+        queue._done_monotonic["owner1"] = time.monotonic()
 
         self.assertIsNone(queue.cooldown_remaining_seconds("owner1"))
         self.assertTrue(await queue.enqueue("owner1"))
@@ -319,10 +323,30 @@ class CooldownTest(unittest.IsolatedAsyncioTestCase):
         finished = datetime.now(timezone.utc).isoformat()
         queue._status["owner-a"] = RunStatus(
             state=RunState.DONE, finished_at=finished)
+        queue._done_monotonic["owner-a"] = time.monotonic()
 
         self.assertFalse(await queue.enqueue("owner-a"))
         self.assertTrue(await queue.enqueue("owner-b"))
         self.assertIsNone(queue.cooldown_remaining_seconds("owner-b"))
+
+    async def test_ntp_wall_clock_jump_does_not_affect_cooldown(self) -> None:
+        # NIT (gate 1af8b18b): elapsed time must come from time.monotonic(),
+        # not the wall clock -- a backward NTP step on finished_at (wall
+        # clock, display-only) must not fool the cooldown into expiring
+        # early or never.
+        service = _FakeService()
+        queue = RunQueue(service, cooldown_seconds=300)
+        # finished_at claims a run 10 minutes ago (would normally have
+        # elapsed the cooldown), but the monotonic clock says it JUST
+        # finished -- monotonic must win.
+        stale_wall_clock = (
+            datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        queue._status["owner1"] = RunStatus(
+            state=RunState.DONE, finished_at=stale_wall_clock)
+        queue._done_monotonic["owner1"] = time.monotonic()
+
+        self.assertIsNotNone(queue.cooldown_remaining_seconds("owner1"))
+        self.assertFalse(await queue.enqueue("owner1"))
 
 
 if __name__ == "__main__":

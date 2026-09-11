@@ -12,7 +12,6 @@ CLI is a thin AppService wrapper), so this test first goes through
 from __future__ import annotations
 
 import contextlib
-import importlib
 import io
 import os
 import tempfile
@@ -172,24 +171,28 @@ class CliDigestTest(unittest.TestCase):
 class CliStateDbDefaultTest(unittest.TestCase):
     """Card 1af8b18b: --db defaults to KERDOOS_STATE_DB when set, so a
     cron-scheduled `kerdoos digest` without --db shares the same state.db
-    (and BrowserGate lock directory) as the WebUI. _DEFAULT_STATE_DB is
-    computed once at module import, so the env var must be set/unset
-    BEFORE reloading the module."""
+    (and BrowserGate lock directory) as the WebUI. Read at
+    build_parser_cli() CALL time (not module import), matching
+    config.get_settings()'s own read-at-call discipline -- no reload
+    needed, just set/unset the env var before calling build_parser_cli()."""
 
     def setUp(self) -> None:
-        self._saved = os.environ.pop("KERDOOS_STATE_DB", None)
+        self._saved_state_db = os.environ.pop("KERDOOS_STATE_DB", None)
+        self._saved_config_db = os.environ.pop("KERDOOS_CONFIG_DB", None)
 
     def tearDown(self) -> None:
-        if self._saved is None:
-            os.environ.pop("KERDOOS_STATE_DB", None)
-        else:
-            os.environ["KERDOOS_STATE_DB"] = self._saved
-        importlib.reload(cli)
+        for var, saved in (
+            ("KERDOOS_STATE_DB", self._saved_state_db),
+            ("KERDOOS_CONFIG_DB", self._saved_config_db),
+        ):
+            if saved is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = saved
 
     def test_db_defaults_to_state_db_env_var_when_set(self) -> None:
         os.environ["KERDOOS_STATE_DB"] = "/data/state.db"
-        module = importlib.reload(cli)
-        parser = module.build_parser_cli()
+        parser = cli.build_parser_cli()
         self.assertEqual(
             parser.parse_args(["run", "--owner", "o1"]).db, "/data/state.db")
         self.assertEqual(parser.parse_args(["digest"]).db, "/data/state.db")
@@ -197,10 +200,40 @@ class CliStateDbDefaultTest(unittest.TestCase):
             parser.parse_args(["config", "import"]).db, "/data/state.db")
 
     def test_db_defaults_to_literal_when_state_db_unset(self) -> None:
-        module = importlib.reload(cli)
-        parser = module.build_parser_cli()
+        parser = cli.build_parser_cli()
         self.assertEqual(
             parser.parse_args(["run", "--owner", "o1"]).db, "kerdoos.db")
+
+    def test_config_db_defaults_to_config_db_env_var_when_set(self) -> None:
+        # Gate 1af8b18b MAJOR: the Dockerfile cron (`kerdoos digest`
+        # without --config-db) must resolve to /data/config.db, not the
+        # WORKDIR-relative literal -- otherwise it silently finds zero
+        # digest jobs.
+        os.environ["KERDOOS_CONFIG_DB"] = "/data/config.db"
+        parser = cli.build_parser_cli()
+        self.assertEqual(
+            parser.parse_args(["run", "--owner", "o1"]).config_db,
+            "/data/config.db")
+        self.assertEqual(
+            parser.parse_args(["digest"]).config_db, "/data/config.db")
+        self.assertEqual(
+            parser.parse_args(["config", "import"]).config_db,
+            "/data/config.db")
+        self.assertEqual(
+            parser.parse_args(["config", "export"]).config_db,
+            "/data/config.db")
+        self.assertEqual(
+            parser.parse_args(["user", "bootstrap", "--name", "a"]).config_db,
+            "/data/config.db")
+        self.assertEqual(
+            parser.parse_args(["user", "add", "--name", "a"]).config_db,
+            "/data/config.db")
+
+    def test_config_db_defaults_to_literal_when_unset(self) -> None:
+        parser = cli.build_parser_cli()
+        self.assertEqual(
+            parser.parse_args(["run", "--owner", "o1"]).config_db,
+            "config.db")
 
 
 if __name__ == "__main__":

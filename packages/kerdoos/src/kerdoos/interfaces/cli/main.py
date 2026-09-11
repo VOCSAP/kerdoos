@@ -42,14 +42,28 @@ from kerdoos.registry.sqlite_store import SqliteConfigStore
 from kerdoos.registry.yaml_store import parse_products_yaml, parse_sites_yaml
 from kerdoos.persistence.sqlite_store import SqliteStateStore
 
-# Card 1af8b18b: --db falls back to KERDOOS_STATE_DB (same var the WebUI
-# reads via config.get_settings()) rather than a fixed literal, so a
-# cron-scheduled `kerdoos digest` without --db shares both the state.db
-# file AND the BrowserGate lock directory (derived from its parent) with
-# the WebUI, instead of silently bypassing the inter-process concurrency
-# bound env.example promises. KERDOOS_STATE_DB unset keeps the historical
-# literal, zero behavior change for existing deployments/tests.
-_DEFAULT_STATE_DB = os.environ.get("KERDOOS_STATE_DB", "kerdoos.db")
+def _default_state_db() -> str:
+    """Card 1af8b18b: --db falls back to KERDOOS_STATE_DB (same var the
+    WebUI reads via config.get_settings()) rather than a fixed literal, so
+    a cron-scheduled `kerdoos digest` without --db shares both the
+    state.db file AND the BrowserGate lock directory (derived from its
+    parent) with the WebUI, instead of silently bypassing the
+    inter-process concurrency bound env.example promises. Read here, at
+    parser-construction time (not import time -- matches
+    config.get_settings()'s own read-at-call discipline). KERDOOS_STATE_DB
+    unset keeps the historical literal, zero behavior change for existing
+    deployments/tests."""
+    return os.environ.get("KERDOOS_STATE_DB", "kerdoos.db")
+
+
+def _default_config_db() -> str:
+    """Gate 1af8b18b MAJOR: same discipline for --config-db/
+    KERDOOS_CONFIG_DB -- the Dockerfile sets KERDOOS_CONFIG_DB=/data/
+    config.db and the documented cron line (`kerdoos digest`) has no
+    --config-db; without this, that cron silently reads config.db from
+    WORKDIR /app (outside the /data volume) instead of /data/config.db,
+    finding zero digest jobs and sending nothing, in silence."""
+    return os.environ.get("KERDOOS_CONFIG_DB", "config.db")
 
 
 def _build_browser_gate(state_db: str) -> BrowserGate:
@@ -282,9 +296,9 @@ def build_parser_cli() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="scrape all sources for --owner, print the digest")
     run.add_argument("--owner", required=True, help="owner id to run for")
-    run.add_argument("--config-db", default="config.db",
+    run.add_argument("--config-db", default=_default_config_db(),
                      help="SQLite ConfigStore path")
-    run.add_argument("--db", default=_DEFAULT_STATE_DB,
+    run.add_argument("--db", default=_default_state_db(),
                      help="SQLite state store path (defaults to KERDOOS_STATE_DB "
                           "if set, else 'kerdoos.db'; connection-per-operation -- "
                           "':memory:' is a distinct in-memory DB per connection "
@@ -298,9 +312,9 @@ def build_parser_cli() -> argparse.ArgumentParser:
         "digest",
         help="run one digest-jobs evaluation tick across ALL owners, then exit "
              "(ADR 0003 Decision 8 -- for external cron when KERDOOS_WORKERS > 1)")
-    digest.add_argument("--config-db", default="config.db",
+    digest.add_argument("--config-db", default=_default_config_db(),
                         help="SQLite ConfigStore path")
-    digest.add_argument("--db", default=_DEFAULT_STATE_DB,
+    digest.add_argument("--db", default=_default_state_db(),
                         help="SQLite state store path (defaults to KERDOOS_STATE_DB "
                              "if set, else 'kerdoos.db'; connection-per-operation -- "
                              "':memory:' is a distinct in-memory DB per connection "
@@ -314,15 +328,15 @@ def build_parser_cli() -> argparse.ArgumentParser:
     imp = config_sub.add_parser("import", help="upsert sites.yaml/products.yaml into config.db")
     imp.add_argument("--config-dir", default="config",
                      help="directory holding sites.yaml + products.yaml")
-    imp.add_argument("--config-db", default="config.db")
-    imp.add_argument("--db", default=_DEFAULT_STATE_DB)
+    imp.add_argument("--config-db", default=_default_config_db())
+    imp.add_argument("--db", default=_default_state_db())
     imp.add_argument("--owner", default=None,
                      help="also import products.yaml sources for this owner")
     imp.set_defaults(func=cmd_config_import)
 
     exp = config_sub.add_parser("export", help="write config.db back to sites.yaml/products.yaml")
     exp.add_argument("--config-dir", default="config")
-    exp.add_argument("--config-db", default="config.db")
+    exp.add_argument("--config-db", default=_default_config_db())
     exp.add_argument("--owner", default=None,
                      help="also export this owner's products/sources")
     exp.set_defaults(func=cmd_config_export)
@@ -332,7 +346,7 @@ def build_parser_cli() -> argparse.ArgumentParser:
 
     bootstrap = user_sub.add_parser("bootstrap", help="create a minimal owner row (no auth)")
     bootstrap.add_argument("--name", required=True)
-    bootstrap.add_argument("--config-db", default="config.db")
+    bootstrap.add_argument("--config-db", default=_default_config_db())
     bootstrap.add_argument("--admin", action="store_true", default=False)
     bootstrap.set_defaults(func=cmd_user_bootstrap)
 
@@ -340,7 +354,7 @@ def build_parser_cli() -> argparse.ArgumentParser:
         "add", help="create an owner with a password (prompt/stdin, never an arg)")
     add.add_argument("--name", required=True, help="username / login handle (unique)")
     add.add_argument("--email", default=None, help="optional; omit for WebUI-only")
-    add.add_argument("--config-db", default="config.db")
+    add.add_argument("--config-db", default=_default_config_db())
     add.add_argument("--admin", action="store_true", default=False)
     add.set_defaults(func=cmd_user_add)
 

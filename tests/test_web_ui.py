@@ -629,6 +629,7 @@ class RunQueueWebUITest(_WebUITestBase):
     def test_second_post_run_within_cooldown_is_refused_with_message(self):
         # Card 1af8b18b: a re-click right after a DONE run must not trigger
         # a second run_now, and the dashboard must say so in a neutral way.
+        import time
         from unittest import mock as _mock
 
         from kerdoos.core.app.services import AppService, RunResult
@@ -653,7 +654,6 @@ class RunQueueWebUITest(_WebUITestBase):
                         text = client.get("/").text
                         if "run-status--done" in text:
                             break
-                        import time
                         time.sleep(0.02)
                     self.assertIn("run-status--done", text)
                     self.assertEqual(calls, ["o1"])
