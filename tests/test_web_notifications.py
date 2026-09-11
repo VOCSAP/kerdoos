@@ -186,7 +186,7 @@ class LastStatusTest(_NotificationsBase):
     def test_never_sent_job_shows_explicit_label(self):
         self._create_job(name="Sans historique")
         page = self.client.get("/notifications")
-        self.assertIn("Jamais envoye", page.text)
+        self.assertIn("Jamais envoyé", page.text)
 
     def test_skipped_no_email_status_is_displayed(self):
         page = self._create_job(name="Sans e-mail")
@@ -197,7 +197,7 @@ class LastStatusTest(_NotificationsBase):
         page = self.client.get("/notifications")
         self.assertIn("Ajoutez un e-mail", page.text)
 
-    def test_error_status_message_is_html_escaped(self):
+    def test_error_status_message_never_leaks_raw_text(self):
         page = self._create_job(name="Erreur")
         job_id = _JOB_ROW.search(page.text).group(1)
         self._record_run(
@@ -206,7 +206,25 @@ class LastStatusTest(_NotificationsBase):
             error="<script>alert(3)</script>")
         page = self.client.get("/notifications")
         self.assertNotIn("<script>alert(3)</script>", page.text)
-        self.assertIn("&lt;script&gt;", page.text)
+        self.assertNotIn("&lt;script&gt;", page.text)
+        self.assertIn("Erreur d&#39;envoi", page.text)
+
+    def test_tls_config_error_never_leaks_the_relay_hostname(self):
+        # roadmap 3c557a9c: the raw error persisted by core.evaluator can
+        # carry the relay's internal hostname (TLS cert verification
+        # failure) -- it must never reach the tenant unfiltered.
+        page = self._create_job(name="TLS")
+        job_id = _JOB_ROW.search(page.text).group(1)
+        self._record_run(
+            job_id, "o1", status="error",
+            window_start="2026-07-10T00:00:00+00:00",
+            error=(
+                "SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] "
+                "certificate verify failed: hostname 'smtp.internal.example' "
+                "doesn't match"))
+        page = self.client.get("/notifications")
+        self.assertNotIn("smtp.internal.example", page.text)
+        self.assertIn("configuration du serveur d&#39;envoi", page.text)
 
     def test_cross_tenant_job_run_row_never_leaks(self):
         page = self._create_job(name="Alice job")

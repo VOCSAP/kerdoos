@@ -247,7 +247,7 @@ class CrudOwnerScopeTest(_DigestJobsTestBase):
         self.assertEqual(len(rows), 1)
         _job, last_run = rows[0]
         self.assertIsNotNone(last_run)
-        self.assertEqual(last_run.status, "skipped_no_email")
+        self.assertEqual(last_run.latest.status, "skipped_no_email")
 
     def test_list_jobs_with_status_cross_owner_job_never_appears(self) -> None:
         job = self.service.create_job(
@@ -504,8 +504,28 @@ class JobRunTest(unittest.TestCase):
             sent_at="2026-07-10T01:00:06+00:00",
         ))
         latest = self.state.latest_job_runs("owner1")
-        self.assertEqual(latest["job1"].status, "sent")
-        self.assertEqual(latest["job1"].window_start, "2026-07-10T01:00:00+00:00")
+        self.assertEqual(latest["job1"].latest.status, "sent")
+        self.assertEqual(
+            latest["job1"].latest.window_start, "2026-07-10T01:00:00+00:00")
+
+    def test_latest_job_runs_shows_earlier_success_when_latest_is_error(
+        self,
+    ) -> None:
+        self.state.record_job_run(JobRun(
+            job_id="job1", owner_id="owner1",
+            window_start="2026-07-10T00:00:00+00:00",
+            fired_at="2026-07-10T00:00:05+00:00", status="sent",
+            sent_at="2026-07-10T00:00:06+00:00",
+        ))
+        self.state.record_job_run(JobRun(
+            job_id="job1", owner_id="owner1",
+            window_start="2026-07-10T01:00:00+00:00",
+            fired_at="2026-07-10T01:00:05+00:00", status="error",
+            error="OSError: connection refused",
+        ))
+        summary = self.state.latest_job_runs("owner1")["job1"]
+        self.assertEqual(summary.latest.status, "error")
+        self.assertEqual(summary.last_sent_at, "2026-07-10T00:00:06+00:00")
 
     def test_latest_job_runs_isolated_by_owner(self) -> None:
         # A job_id shared (or forged) across two owners must not leak the
@@ -527,13 +547,53 @@ class JobRunTest(unittest.TestCase):
         ))
         latest_a = self.state.latest_job_runs("ownerA")
         latest_b = self.state.latest_job_runs("ownerB")
-        self.assertEqual(latest_a["shared-id"].status, "sent")
-        self.assertEqual(latest_a["shared-id"].owner_id, "ownerA")
-        self.assertEqual(latest_b["shared-id"].status, "error")
-        self.assertEqual(latest_b["shared-id"].owner_id, "ownerB")
+        self.assertEqual(latest_a["shared-id"].latest.status, "sent")
+        self.assertEqual(latest_a["shared-id"].latest.owner_id, "ownerA")
+        self.assertEqual(latest_b["shared-id"].latest.status, "error")
+        self.assertEqual(latest_b["shared-id"].latest.owner_id, "ownerB")
 
     def test_latest_job_runs_empty_for_owner_with_no_runs(self) -> None:
         self.assertEqual(self.state.latest_job_runs("owner1"), {})
+
+    def test_latest_job_runs_query_plan_uses_the_index_not_a_scan(self) -> None:
+        # roadmap 3c557a9c: without the composite index this query falls
+        # back to a full table scan plus an in-memory sort -- the planner
+        # must SEARCH instead.
+        for job_n in range(3):
+            for window_n in range(5):
+                ts = f"2026-07-{10 + window_n:02d}T00:00:00+00:00"
+                self.state.record_job_run(JobRun(
+                    job_id=f"job{job_n}", owner_id="owner1",
+                    window_start=ts, fired_at=ts, status="sent", sent_at=ts,
+                ))
+        with self.state._op() as conn:
+            plan = [
+                row["detail"] for row in conn.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT latest.job_id FROM (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY job_id ORDER BY fired_at DESC, rowid DESC
+                        ) AS rn
+                        FROM job_runs
+                        WHERE owner_id = ?
+                    ) AS latest
+                    LEFT JOIN (
+                        SELECT job_id, MAX(sent_at) AS max_sent_at
+                        FROM job_runs
+                        WHERE owner_id = ? AND status = 'sent'
+                        GROUP BY job_id
+                    ) AS last_sent ON last_sent.job_id = latest.job_id
+                    WHERE latest.rn = 1
+                    """,
+                    ("owner1", "owner1"),
+                ).fetchall()
+            ]
+        self.assertTrue(
+            any("idx_job_runs_owner_job_fired" in step for step in plan),
+            plan)
+        self.assertFalse(
+            any(step == "SCAN job_runs" for step in plan), plan)
 
 
 if __name__ == "__main__":

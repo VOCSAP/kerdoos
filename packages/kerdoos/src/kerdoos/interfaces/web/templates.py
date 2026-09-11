@@ -123,24 +123,60 @@ _JOB_RUN_STATUS_CLASS = {
     "skipped_no_email": "attention",
 }
 _JOB_RUN_STATUS_LABEL = {
-    "sent": "Envoye",
+    "sent": "Envoyé",
     "error": "Erreur",
     "skipped_no_email": "Ajoutez un e-mail",
     "queued": "En file",
     "running": "En cours",
 }
 
+# core.evaluator persists job_runs.error as
+# f"{type(exc).__name__}: {exc}"[:500]; the reaper's own sweep uses the
+# literal prefix "reaped" instead of an exception class name
+# (persistence.sqlite_store.reap_stale_job_run). The raw text can carry
+# the SMTP relay's internal hostname, an operator auth identifier, or raw
+# relay response text -- only a generic label ever reaches the tenant.
+_JOB_RUN_ERROR_REFUSED = frozenset({
+    "SMTPRecipientsRefused", "SMTPSenderRefused", "SMTPDataError",
+})
+_JOB_RUN_ERROR_TRANSIENT = frozenset({
+    "TimeoutError", "OSError", "SMTPConnectError", "SMTPServerDisconnected",
+    "reaped",
+})
+_JOB_RUN_ERROR_CONFIG = frozenset({
+    "SMTPAuthenticationError", "SMTPNotSupportedError",
+})
 
-def job_run_status_class(run) -> str:
-    if run is None:
+
+def job_run_status_class(summary) -> str:
+    if summary is None:
         return "pending"
-    return _JOB_RUN_STATUS_CLASS.get(run.status, "pending")
+    return _JOB_RUN_STATUS_CLASS.get(summary.latest.status, "pending")
 
 
-def job_run_status_label(run) -> str:
-    if run is None:
-        return "Jamais envoye"
-    return _JOB_RUN_STATUS_LABEL.get(run.status, run.status)
+def job_run_status_label(summary) -> str:
+    if summary is None:
+        return "Jamais envoyé"
+    return _JOB_RUN_STATUS_LABEL.get(summary.latest.status, "Statut inconnu")
+
+
+def job_run_error_label(summary) -> str:
+    if summary is None or not summary.latest.error:
+        return "Erreur d'envoi"
+    # type(exc).__name__ for an SSL exception is the concrete subclass
+    # (e.g. SSLCertVerificationError), never the base class name
+    # "SSLError" -- matched by prefix rather than an exact-match set.
+    prefix = summary.latest.error.split(":", 1)[0]
+    if prefix == "_UnsafeRecipientError":
+        return "Adresse e-mail invalide, mettez-la à jour dans votre profil"
+    if prefix in _JOB_RUN_ERROR_REFUSED:
+        return "Adresse refusée par le serveur de messagerie"
+    if prefix in _JOB_RUN_ERROR_TRANSIENT:
+        return "Échec d'envoi temporaire, nouvel essai à la prochaine fenêtre"
+    if prefix in _JOB_RUN_ERROR_CONFIG or prefix.startswith("SSL"):
+        return ("Problème de configuration du serveur d'envoi, contactez "
+                "l'administrateur")
+    return "Erreur d'envoi"
 
 
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
@@ -154,4 +190,5 @@ templates.env.filters["frequency_label"] = frequency_label
 templates.env.filters["template_label"] = template_label
 templates.env.filters["job_run_status_class"] = job_run_status_class
 templates.env.filters["job_run_status_label"] = job_run_status_label
+templates.env.filters["job_run_error_label"] = job_run_error_label
 templates.env.globals["tier_ladder"] = _TIER_LADDER

@@ -162,16 +162,16 @@
       <span class="job-meta__k">Sources</span>
       <span class="job-meta__v">{{ job.source_ids | length }}</span>
     </div>
-    {% if last_run and last_run.sent_at %}
+    {% if last_run and last_run.last_sent_at %}
     <div class="job-meta__item">
       <span class="job-meta__k">Dernier envoi</span>
-      <span class="job-meta__v">{{ last_run.sent_at }}</span>
+      <span class="job-meta__v">{{ last_run.last_sent_at }}</span>
     </div>
     {% endif %}
-    {% if last_run and last_run.status == 'error' and last_run.error %}
+    {% if last_run and last_run.latest.status == 'error' and last_run.latest.error %}
     <div class="job-meta__item">
       <span class="job-meta__k">Erreur</span>
-      <span class="job-meta__v">{{ last_run.error }}</span>
+      <span class="job-meta__v">{{ last_run | job_run_error_label }}</span>
     </div>
     {% endif %}
   </div>

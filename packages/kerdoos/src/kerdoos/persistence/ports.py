@@ -73,6 +73,17 @@ class JobRun:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class JobRunSummary:
+    """Presentation-oriented view over job_runs for a single job (roadmap
+    3c557a9c item 7): the latest firing (any status) plus the most recent
+    successful send -- the latest firing can be an error while an earlier
+    one succeeded, so the two dates are not always the same row."""
+
+    latest: JobRun
+    last_sent_at: str | None
+
+
 @runtime_checkable
 class StateStore(Protocol):
     """Persist and read back scrape history, tenant-scoped (ADR 0001 S4).
@@ -118,12 +129,14 @@ class StateStore(Protocol):
         (job_id, window_start) pair (never raises on a missing row)."""
         ...
 
-    def latest_job_runs(self, owner: str) -> dict[str, JobRun]:
-        """Most recent job_runs row per job_id, scoped to owner (no N+1).
-        A job_id with no job_runs row at all is simply absent from the
-        returned dict -- the caller must handle the 'never sent' case
-        itself, since state.db has no way to enumerate job ids that were
-        never fired (digest_jobs lives in the physically separate
+    def latest_job_runs(self, owner: str) -> dict[str, JobRunSummary]:
+        """Most recent job_runs row per job_id, scoped to owner (no N+1),
+        paired with the most recent SUCCESSFUL send for that job (which
+        can be an EARLIER row than the latest one, if the latest attempt
+        failed). A job_id with no job_runs row at all is simply absent
+        from the returned dict -- the caller must handle the 'never sent'
+        case itself, since state.db has no way to enumerate job ids that
+        were never fired (digest_jobs lives in the physically separate
         config.db, ADR 0003 T2)."""
         ...
 

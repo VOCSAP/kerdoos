@@ -24,7 +24,7 @@ from kerdoos.core.domain import Availability, ScrapeStatus
 from kerdoos.core.fetcher_guard import tier_unavailable
 from kerdoos.core.orchestrator import scrape_and_record
 from kerdoos.parsers.ports import Parser, ParserSpec
-from kerdoos.persistence.ports import JobRun, ScrapeRecord, StateStore
+from kerdoos.persistence.ports import JobRunSummary, ScrapeRecord, StateStore
 from kerdoos.registry.errors import (
     ConfigError,
     ConfigImportError,
@@ -382,7 +382,7 @@ class AppService:
 
     def list_jobs_with_status(
         self, owner: str,
-    ) -> tuple[tuple[DigestJob, JobRun | None], ...]:
+    ) -> tuple[tuple[DigestJob, JobRunSummary | None], ...]:
         """Each job paired with its most recent job_runs row (state.db),
         or None if it was never fired. No cross-DB FK is possible (ADR
         0003 T2: config.db and state.db are physically separate files),

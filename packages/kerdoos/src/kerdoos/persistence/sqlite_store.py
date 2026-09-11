@@ -19,7 +19,7 @@ from pathlib import Path
 
 from kerdoos.core.domain import Availability, ScrapeStatus
 
-from .ports import JobRun, ScrapeRecord
+from .ports import JobRun, JobRunSummary, ScrapeRecord
 
 _BUSY_TIMEOUT_MS = 5000
 
@@ -177,6 +177,10 @@ class SqliteStateStore:
             "CREATE INDEX IF NOT EXISTS idx_scrapes_owner_source_ts "
             "ON scrapes (owner_id, source_id, ts DESC)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_job_runs_owner_job_fired "
+            "ON job_runs (owner_id, job_id, fired_at)"
+        )
         conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     def record(self, owner: str, scrape: ScrapeRecord) -> None:
@@ -259,36 +263,52 @@ class SqliteStateStore:
             )
         return cur.rowcount == 1
 
-    def latest_job_runs(self, owner: str) -> dict[str, JobRun]:
-        # owner_id filtered INLINE (same discipline as every other
-        # StateStore method) -- rows for another owner never enter the
-        # result set at all, so a colliding job_id across tenants cannot
-        # leak a foreign row. Ordered by fired_at DESC and only the FIRST
-        # row seen per job_id is kept, so a tie or an out-of-order insert
-        # never yields two candidate rows for the same job_id.
+    def latest_job_runs(self, owner: str) -> dict[str, JobRunSummary]:
+        # owner_id filtered INLINE, twice (once per subquery) -- rows for
+        # another owner never enter either result set, so a colliding
+        # job_id across tenants cannot leak a foreign row. The window
+        # function partitions on job_id and ranks by fired_at DESC (rowid
+        # DESC breaks a fired_at tie deterministically); idx_job_runs_
+        # owner_job_fired lets the planner SEARCH instead of scanning the
+        # whole table (roadmap 3c557a9c). The second subquery tracks the
+        # most recent SUCCESSFUL send separately, since the latest firing
+        # can be an error while an earlier one succeeded.
         with self._op() as conn:
             rows = conn.execute(
                 """
-                SELECT job_id, owner_id, window_start, fired_at, sent_at,
-                       status, error
-                FROM job_runs
-                WHERE owner_id = ?
-                ORDER BY fired_at DESC
+                SELECT
+                    latest.job_id, latest.owner_id, latest.window_start,
+                    latest.fired_at, latest.sent_at, latest.status,
+                    latest.error, last_sent.max_sent_at
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY job_id ORDER BY fired_at DESC, rowid DESC
+                    ) AS rn
+                    FROM job_runs
+                    WHERE owner_id = ?
+                ) AS latest
+                LEFT JOIN (
+                    SELECT job_id, MAX(sent_at) AS max_sent_at
+                    FROM job_runs
+                    WHERE owner_id = ? AND status = 'sent'
+                    GROUP BY job_id
+                ) AS last_sent ON last_sent.job_id = latest.job_id
+                WHERE latest.rn = 1
                 """,
-                (owner,),
+                (owner, owner),
             ).fetchall()
-        latest: dict[str, JobRun] = {}
-        for row in rows:
-            job_id = row["job_id"]
-            if job_id in latest:
-                continue
-            latest[job_id] = JobRun(
-                job_id=job_id, owner_id=row["owner_id"],
-                window_start=row["window_start"], fired_at=row["fired_at"],
-                status=row["status"], sent_at=row["sent_at"],
-                error=row["error"],
+        return {
+            row["job_id"]: JobRunSummary(
+                latest=JobRun(
+                    job_id=row["job_id"], owner_id=row["owner_id"],
+                    window_start=row["window_start"], fired_at=row["fired_at"],
+                    status=row["status"], sent_at=row["sent_at"],
+                    error=row["error"],
+                ),
+                last_sent_at=row["max_sent_at"],
             )
-        return latest
+            for row in rows
+        }
 
     def has_active_job_run(self, owner: str, job_id: str) -> bool:
         # Double-scoping IDOR defense (ADR 0003 finding S2): owner_id is

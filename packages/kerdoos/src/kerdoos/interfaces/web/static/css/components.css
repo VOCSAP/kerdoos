@@ -262,11 +262,19 @@
 .badge--on     { color: var(--state-ok); background: var(--state-ok-bg); border-color: transparent; }
 .badge--paused { color: var(--text-tertiary); background: var(--surface-2); }
 
-/* --- Last-send-status badge (roadmap 3c557a9c item 7): another JOB fact,
- * same discipline as enabled/paused above -- reuses the same tokens
- * through new modifiers instead of a bespoke color. */
-.badge--sent      { color: var(--state-ok);      background: var(--state-ok-bg);      border-color: transparent; }
-.badge--error     { color: var(--state-unavail); background: var(--state-unavail-bg); border-color: transparent; }
+/* --- Last-send-status badge (roadmap 3c557a9c item 7): a SYSTEM outcome
+ * (did the send succeed), not the product three-state signal -- uses
+ * --success/--danger/--warning, never --state-ok/--state-unavail. */
+.badge--sent {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface-1));
+  border-color: transparent;
+}
+.badge--error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-1));
+  border-color: transparent;
+}
 .badge--attention {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 10%, var(--surface-1));
