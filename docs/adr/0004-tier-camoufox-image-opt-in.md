@@ -215,13 +215,18 @@ Firefox de `strip_dangerous_browser_args` :
   `dom.push.enabled=false`.
 - Trafic interne coupe : portail captif, verification de connectivite, safebrowsing,
   mises a jour (`app.update`, `extensions.update`), telemetrie et `datareporting`,
-  geolocalisation, remote settings.
+  geolocalisation, remote settings. En T1, ces categories sont **enumerees par nom
+  exact de preference** dans le code, et un test verifie le dictionnaire final apres
+  fusion avec les preferences de l'appelant.
 - **OCSP : desactive** (`security.OCSP.enabled=0`). Raison : avec l'allowlist C1, les
   requetes OCSP vers les repondeurs des autorites de certification seraient refusees
   par le proxy de toute facon ; la verification de revocation en ligne est donc
   abandonnee explicitement plutot qu'implicitement. Parite avec le tier Chromium, qui ne
   fait pas de verification de revocation en ligne par defaut. Risque accepte : les
-  cibles sont un catalogue admin fixe de sites marchands sous TLS.
+  cibles sont un catalogue admin fixe de sites marchands sous TLS. L'agrafage OCSP reste
+  actif (`security.ssl.enable_ocsp_stapling=true`, aucune requete sortante) ; couper
+  remote settings laisse CRLite perime ou absent, ce qui est coherent avec ce risque
+  accepte.
 - `geoip=False` : pas d'appel de pre-vol vers un service d'echo d'IP (le bypass a ete
   mesure dans cette configuration).
 - Le reglage de resolution mesure pendant le spike (`network.dns.forceResolve`) n'est
@@ -243,11 +248,18 @@ des centaines de Ko.
 - **Cible neutre pinnee** : `example.com` resolue par le proxy vers 192.0.2.1 -> la
   navigation echoue.
 - **Hote hors allowlist** : refuse par le proxy (C1), sans resolution.
+- **Hote allowliste qui resout vers une IP non globale** (resolveur de test, ou
+  domaine de test vers 10.x, 127.x, 169.254.169.254 ou ::ffff:127.0.0.1) : refuse par
+  le proxy au controle d'IP (`ip_is_safe`), juge au journal du proxy. C'est la preuve
+  anti-rebinding, la seule qui exerce la deuxieme couche du proxy : depuis C1, le
+  loopback de T4-1 est refuse avant toute resolution et ne la teste pas.
 - **T4-1** : 127.0.0.1, `localhost` et `[::1]` passent par le proxy et sont refuses.
-- **T4-2** : audit d'egress par `strace` (`connect`, `sendto`) sur tout l'arbre de
-  process Firefox pendant un fetch puis 30 s d'inactivite, rapproche du journal des
-  autorites CONNECT du proxy : aucune connexion hors proxy, aucune autorite hors
-  allowlist.
+- **T4-2** : audit d'egress par `strace -f -e trace=connect,sendto,sendmsg,sendmmsg`
+  (QUIC et WebRTC emettent par `sendmsg` et `sendmmsg`) sur tout l'arbre de process
+  Firefox pendant un fetch puis 30 s d'inactivite, rapproche du journal des autorites
+  CONNECT du proxy : aucune connexion hors proxy, aucune autorite hors allowlist.
+  `CAP_SYS_PTRACE` n'est accorde qu'au conteneur de TEST, jamais au compose de
+  production (qui garde le `cap_drop: [ALL]` de la Decision 8).
 - **T4-3** : un WebSocket vers un hote hors allowlist est refuse.
 - **T4-4** : un service worker, un Worker dedie et un `window.open` ne sortent pas de
   l'allowlist.
@@ -330,10 +342,13 @@ Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
   inscriptible (profil Firefox, cache). La propriete du volume `/data` pour cet
   utilisateur est a traiter en T2 (le volume est aujourd'hui ecrit par root).
 - **Sandbox de contenu Firefox active** : aucune variable `MOZ_DISABLE_*SANDBOX` dans
-  l'image ni dans le compose.
+  l'image ni dans le compose. `security.sandbox.content.level` n'est jamais abaisse (ni
+  a 0, ni a une valeur reduite), ni par la liste figee de C2, ni par l'appelant.
 - **Compose** : `cap_drop: [ALL]`, `security_opt: no-new-privileges`, profil seccomp par
   defaut (jamais `unconfined`) ; `read_only` avec des `tmpfs` pour les repertoires
-  inscriptibles si le fonctionnement le permet, a mesurer en T2.
+  inscriptibles si le fonctionnement le permet, a mesurer en T2. Aucun `cap_add`
+  (notamment `SYS_ADMIN`) ni seccomp `unconfined` pour reparer la sandbox si elle ne
+  demarre pas : le probleme se regle dans l'image, pas en elargissant les privileges.
 - **Base Firefox documentee** : version de Firefox sur laquelle repose le binaire
   Camoufox epingle, notee a cote de l'epinglage ; **politique de re-epinglage** a chaque
   release de securite amont de Firefox reprise par Camoufox.
