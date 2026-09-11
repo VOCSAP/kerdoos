@@ -127,3 +127,28 @@ RUN sbase get uc_driver ${UC_DRIVER_VERSION} \
 COPY packages/autolycos/src packages/autolycos/src
 COPY packages/kerdoos/src packages/kerdoos/src
 RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc
+
+# ADR 0002 Decision 5: patchright's Chromium and seleniumbase's uc_driver are
+# fetched independently above and can drift apart silently into the CWE-494
+# path Decision 5 closed (get_local_driver only re-fetches on a version
+# MISMATCH, behind the egress-proxy's strict allowlist). Assert their major
+# versions match at BUILD time, through UcFetcher's own runtime resolver.
+# LAST instruction of this stage on purpose: it must run under the stage's
+# FINAL effective user, so it stays HOME-sensitive to any future USER change.
+RUN set -eu; \
+    CHROME_BIN=$(python3 -c \
+      "from autolycos.adapters.uc import _find_patchright_chromium as f; print(f() or '')"); \
+    if [ -z "$CHROME_BIN" ]; then \
+      echo "BUILD FAIL: _find_patchright_chromium() found no Chromium under \$HOME/.cache/ms-playwright" >&2; \
+      exit 1; \
+    fi; \
+    CHROME_VER=$("$CHROME_BIN" --version --no-sandbox | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'); \
+    UC_DRIVER_BIN=/app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/uc_driver; \
+    UC_VER=$("$UC_DRIVER_BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'); \
+    CHROME_MAJOR=${CHROME_VER%%.*}; \
+    UC_MAJOR=${UC_VER%%.*}; \
+    if [ "$CHROME_MAJOR" != "$UC_MAJOR" ]; then \
+      echo "BUILD FAIL: chromium major $CHROME_MAJOR (patchright, $CHROME_VER) != uc_driver major $UC_MAJOR (UC_DRIVER_VERSION pin, $UC_VER) -- re-pin UC_DRIVER_VERSION/UC_DRIVER_SHA256 to patchright's Chromium major (ADR 0002 Decision 5)." >&2; \
+      exit 1; \
+    fi; \
+    echo "OK: chromium major $CHROME_MAJOR matches uc_driver major $UC_MAJOR"

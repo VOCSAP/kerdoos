@@ -204,6 +204,18 @@ chromedriver AU BUILD** de l'image, dans le stage `autonomous` (a cote de
 `patchright install --with-deps chromium`). Aucun telechargement reseau au premier
 run `uc`.
 
+### Correction Q-f -- navigateur du tier uc : reutilisation du Chromium patchright
+Seleniumbase ne trouve jamais le Chromium prive installe par patchright
+(cache prive `~/.cache/ms-playwright`, invisible pour la detection de
+navigateur de seleniumbase). Pas de second navigateur installe : le tier `uc`
+**reutilise le Chromium de patchright**, dont l'adaptateur (`UcFetcher`) passe
+le chemin explicitement a `seleniumbase.Driver(binary_location=...)`. Cette
+majeure de version doit rester alignee avec celle de `UC_DRIVER_VERSION`
+(le chromedriver pre-fetch ci-dessus) -- une derive silencieuse rouvrirait
+exactement le telechargement runtime non pin/non verifie que Q-e a ferme. Le
+build echoue si les deux majeures divergent, en comparant leurs versions
+via le meme chemin de resolution que celui utilise a l'execution.
+
 ---
 
 ## Decision 6 -- Persistance SQLite et secrets (confirmations ADR 0001)

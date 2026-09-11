@@ -83,19 +83,41 @@ class HostResolverRulesTest(unittest.TestCase):
 
 
 class FindPatchrightChromiumTest(unittest.TestCase):
-    def test_returns_none_when_no_chromium_cached(self) -> None:
-        with mock.patch.object(uc.glob, "glob", return_value=[]):
+    def test_returns_none_when_cache_dir_absent(self) -> None:
+        with mock.patch.object(uc.os, "listdir", side_effect=OSError):
             self.assertIsNone(uc._find_patchright_chromium())
 
-    def test_returns_first_sorted_match_when_multiple_present(self) -> None:
-        paths = [
-            "/root/.cache/ms-playwright/chromium-1300/chrome-linux64/chrome",
-            "/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome",
-        ]
-        with mock.patch.object(uc.glob, "glob", return_value=paths):
-            self.assertEqual(
-                uc._find_patchright_chromium(),
-                "/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome")
+    def test_returns_none_when_no_dir_matches_chromium_pattern(self) -> None:
+        with mock.patch.object(uc.os, "listdir",
+                               return_value=["other", "chromium", "chromium-"]):
+            self.assertIsNone(uc._find_patchright_chromium())
+
+    def test_ignores_dir_name_with_shell_metacharacters(self) -> None:
+        # SeleniumBase shells this candidate out downstream (detect_b_ver.py
+        # Popen(shell=True)); a name that fails the strict digits-only match
+        # must never reach the returned path (CWE-78).
+        with mock.patch.object(uc.os, "listdir",
+                               return_value=["chromium-0;touch pwned"]):
+            with mock.patch.object(uc.os.path, "isfile", return_value=True):
+                self.assertIsNone(uc._find_patchright_chromium())
+
+    def test_picks_highest_revision_numerically_not_lexicographically(self) -> None:
+        # Lexicographic sort would rank "chromium-1000" BEFORE "chromium-999".
+        with mock.patch.object(uc.os, "listdir",
+                               return_value=["chromium-999", "chromium-1000"]):
+            with mock.patch.object(uc.os.path, "isfile", return_value=True):
+                path = uc._find_patchright_chromium()
+        self.assertIn("chromium-1000", path)
+
+    def test_skips_dir_missing_the_expected_chrome_binary(self) -> None:
+        def _isfile(path: str) -> bool:
+            return "chromium-1000" not in path  # higher revision incomplete
+
+        with mock.patch.object(uc.os, "listdir",
+                               return_value=["chromium-999", "chromium-1000"]):
+            with mock.patch.object(uc.os.path, "isfile", side_effect=_isfile):
+                path = uc._find_patchright_chromium()
+        self.assertIn("chromium-999", path)
 
 
 class UcFetcherContractTest(unittest.TestCase):

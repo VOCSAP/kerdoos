@@ -47,8 +47,8 @@ is computed from the rendered page_source, not from the status).
 
 from __future__ import annotations
 
-import glob
 import os
+import re
 from collections.abc import Iterable
 
 from ..challenge import looks_challenged
@@ -92,27 +92,35 @@ def _host_resolver_rules(
     return ", ".join(rules)
 
 
-_PATCHRIGHT_CHROMIUM_GLOB = "~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"
+_MS_PLAYWRIGHT_CACHE = "~/.cache/ms-playwright"
+_CHROMIUM_DIR_RE = re.compile(r"^chromium-(\d+)$")
 
 
 def _find_patchright_chromium() -> str | None:
-    """Locate the Chromium binary installed by patchright (autonomous image).
-
-    SeleniumBase's own browser detection (detect_b_ver.chrome_on_linux_path)
-    only looks at PATH and a handful of hardcoded system paths, so it never
-    finds patchright's privately-cached Chromium -- the two tools coexist in
-    the image without sharing a browser location. Passing this path via
-    Driver(binary_location=...) is honored end-to-end, including on the
-    uc/undetected launch path (seleniumbase/core/browser_launcher.py ->
-    seleniumbase/undetected/__init__.py options.binary_location), confirmed
-    by execution, not by documentation (roadmap card 460d7bce).
-
-    Returns None (not an empty string) when patchright is absent -- e.g. dev
-    machines or the `slim` image -- so callers can fall back to SeleniumBase's
-    own detection unchanged.
+    """SeleniumBase's browser detection only searches PATH and fixed system
+    paths, never patchright's private cache. Returns None when patchright's
+    Chromium is absent (slim image, dev hosts).
     """
-    candidates = sorted(glob.glob(os.path.expanduser(_PATCHRIGHT_CHROMIUM_GLOB)))
-    return candidates[0] if candidates else None
+    base = os.path.expanduser(_MS_PLAYWRIGHT_CACHE)
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return None
+    best: tuple[int, str] | None = None
+    for name in entries:
+        # Only a strict digits-only match is ever turned into a path: this
+        # candidate is later shelled out by SeleniumBase (detect_b_ver.py
+        # Popen(shell=True)), so a directory name is untrusted input here.
+        match = _CHROMIUM_DIR_RE.fullmatch(name)
+        if match is None:
+            continue
+        candidate = os.path.join(base, name, "chrome-linux64", "chrome")
+        if not os.path.isfile(candidate):
+            continue
+        revision = int(match.group(1))
+        if best is None or revision > best[0]:
+            best = (revision, candidate)
+    return best[1] if best else None
 
 
 def _load_seleniumbase():  # type: ignore[no-untyped-def]
