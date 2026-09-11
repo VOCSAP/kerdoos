@@ -1052,7 +1052,7 @@ class CliProcessExitTest(unittest.TestCase):
 
     def test_process_exits_promptly_despite_a_hanging_send(self) -> None:
         probe = Path(__file__).parent / "_cli_exit_probe.py"
-        hang_seconds = 6.0
+        hang_seconds = 20.0
         start = time.monotonic()
         result = subprocess.run(
             [sys.executable, str(probe), "0.3", str(hang_seconds)],
@@ -1062,9 +1062,10 @@ class CliProcessExitTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ASYNCIO_RUN_RETURNED", result.stdout)
         # If the process were blocked joining the orphaned thread at exit,
-        # elapsed would be >= hang_seconds. A generous margin below that
-        # tolerates process-startup overhead without becoming a tight race.
-        self.assertLess(elapsed, hang_seconds - 2.0)
+        # elapsed would be close to hang_seconds. A fixed, generous bound
+        # well below that tolerates process-startup variance (green path
+        # measures well under 1s) without becoming a tight race.
+        self.assertLess(elapsed, 10.0)
 
 
 class _AlwaysHangingSender:
@@ -1083,16 +1084,40 @@ class _AlwaysHangingSender:
 
 
 class LiveOrphanCeilingTest(unittest.IsolatedAsyncioTestCase):
-    """roadmap 3c0b1c80 (b): _RotatingSendExecutor must refuse a new send
-    once too many retired pools still have a live orphaned thread -- an
-    unboundedly long-lived loop would otherwise accumulate unbounded
-    concurrent orphans, one rotation at a time."""
+    """_RotatingSendExecutor must refuse a new send once too many retired
+    pools still have a live orphaned thread -- an unboundedly long-lived
+    loop would otherwise accumulate unbounded concurrent orphans, one
+    rotation at a time."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self._never_set = threading.Event()
         self.addCleanup(self._never_set.set)
+
+    def _make_four_jobs(self, config, state, service, tick_now):
+        # 4 distinct owners/jobs so no idempotence-window collision needs
+        # managing -- the default ceiling for max_workers=1 is 3, so
+        # exactly 3 of these must be dispatched (and time out, each
+        # rotating the executor) before the 4th is refused outright.
+        jobs = []
+        for i in range(4):
+            owner = f"owner-{i}"
+            service.add_product(owner, ProductSpec("p1"))
+            source = service.add_source(
+                owner, "p1", "kabum", f"https://www.kabum.com.br/p/{i}")
+            job = service.create_job(
+                Principal(owner_id=owner),
+                DigestJobSpec(name=f"job-{i}", frequency_kind="hourly",
+                              source_ids=(source.source_id,)))
+            jobs.append(job)
+            state.record(owner, ScrapeRecord(
+                source_id=source.source_id, ts=(tick_now - _minutes(1)).isoformat(),
+                status=ScrapeStatus.OK, price_pix_cents=100, price_card_cents=110,
+                currency="BRL", availability=Availability.IN_STOCK, method="http",
+                error=None,
+            ))
+        return jobs
 
     async def test_fourth_send_is_refused_once_the_ceiling_is_reached(
         self,
@@ -1106,26 +1131,7 @@ class LiveOrphanCeilingTest(unittest.IsolatedAsyncioTestCase):
         router = _StubRouter({"http": _FakeFetcher()})
         service = AppService(config, state, router, domain_policy, build_parser)
         config.add_site(_SITE)
-
-        # 4 distinct owners/jobs so no idempotence-window collision needs
-        # managing -- the default ceiling for max_workers=1 is 3, so
-        # exactly 3 of these must be dispatched (and time out, each
-        # rotating the executor) before the 4th is refused outright.
-        for i in range(4):
-            owner = f"owner-{i}"
-            service.add_product(owner, ProductSpec("p1"))
-            source = service.add_source(
-                owner, "p1", "kabum", f"https://www.kabum.com.br/p/{i}")
-            service.create_job(
-                Principal(owner_id=owner),
-                DigestJobSpec(name=f"job-{i}", frequency_kind="hourly",
-                              source_ids=(source.source_id,)))
-            state.record(owner, ScrapeRecord(
-                source_id=source.source_id, ts=(tick_now - _minutes(1)).isoformat(),
-                status=ScrapeStatus.OK, price_pix_cents=100, price_card_cents=110,
-                currency="BRL", availability=Availability.IN_STOCK, method="http",
-                error=None,
-            ))
+        self._make_four_jobs(config, state, service, tick_now)
 
         sender = _AlwaysHangingSender(self._never_set)
         shared_executor = _RotatingSendExecutor(max_workers=1)
@@ -1138,7 +1144,74 @@ class LiveOrphanCeilingTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(sender.dispatched), 3)
-        self.assertEqual(summary.errors, 4)
+        self.assertEqual(summary.errors, 3)  # job-0..2: dispatched, timed out
+        self.assertEqual(summary.skipped_jobs, 1)  # job-3: refused outright
+
+    async def test_refused_job_is_retried_in_the_same_window_once_orphans_clear(
+        self,
+    ) -> None:
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        config = SqliteConfigStore(Path(self._tmp.name) / "config.db")
+        state = SqliteStateStore(Path(self._tmp.name) / "state.db")
+        self.addCleanup(config.close)
+        self.addCleanup(state.close)
+        domain_policy = CatalogueDomainPolicy(config)
+        router = _StubRouter({"http": _FakeFetcher()})
+        service = AppService(config, state, router, domain_policy, build_parser)
+        config.add_site(_SITE)
+        jobs = self._make_four_jobs(config, state, service, tick_now)
+        refused_job = jobs[3]
+        refused_window_start = compute_window_start(
+            refused_job.schedule_cron, refused_job.timezone, tick_now)
+
+        sender = _AlwaysHangingSender(self._never_set)
+        shared_executor = _RotatingSendExecutor(max_workers=1)
+
+        summary1 = await evaluate_tick(
+            config_store=config, state_store=state, router=router,
+            parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+            max_concurrent_sends=1, reaper_timeout_seconds=0.05,
+            send_executor=shared_executor,
+        )
+        self.assertEqual(summary1.skipped_jobs, 1)  # job-3, refused
+
+        # A capacity refusal must not consume the idempotence window: no
+        # job_runs row exists for job-3 at all yet.
+        with state._op() as conn:
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
+                (refused_job.id, refused_window_start),
+            ).fetchone()
+        self.assertIsNone(row)
+
+        # Release the 3 orphaned threads and poll can_submit() until the
+        # executor has pruned them -- the background threads need a moment
+        # to resume and finish once the Event fires.
+        self._never_set.set()
+        for _ in range(200):
+            if shared_executor.can_submit():
+                break
+            await asyncio.sleep(0.01)
+        else:
+            self.fail("orphans never cleared within the poll budget")
+
+        # SAME tick_now -- SAME window -- job-3 gets a fresh attempt and
+        # succeeds this time (send() returns immediately, Event is set).
+        summary2 = await evaluate_tick(
+            config_store=config, state_store=state, router=router,
+            parser_factory=_fake_parser_factory, sender=sender, now=tick_now,
+            max_concurrent_sends=1, reaper_timeout_seconds=0.05,
+            send_executor=shared_executor,
+        )
+        self.assertEqual(summary2.notified_jobs, 1)
+        self.assertEqual(sender.dispatched.count("job-3"), 1)
+
+        with state._op() as conn:
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
+                (refused_job.id, refused_window_start),
+            ).fetchone()
+        self.assertEqual(row["status"], "sent")
 
 
 if __name__ == "__main__":

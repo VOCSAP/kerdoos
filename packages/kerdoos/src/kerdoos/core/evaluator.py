@@ -59,28 +59,25 @@ logger = logging.getLogger(__name__)
 
 ParserFactory = Callable[[ParserSpec], Parser]
 
+# Live-orphan ceiling multiplier: a small buffer above one orphan per
+# worker slot, since a burst of timeouts can retire several pools before
+# any of them finish. Not derived more precisely -- just needs to bound
+# accumulation over an unboundedly long-lived loop, not be exact.
+_LIVE_ORPHANS_PER_WORKER = 3
+
 
 class _RotatingSendExecutor:
-    """A send-only thread pool slot that can be swapped for a fresh one
-    after a stuck send: callers share ONE instance of this wrapper across
-    ticks, so rotating `.current` is visible to everyone holding the
-    wrapper, unlike a bare ThreadPoolExecutor reference a callee has no way
-    to reseat in its caller's scope.
-
-    roadmap 3c0b1c80 (b): a retired pool's orphaned thread can outlive the
-    rotation that replaced it, and nothing bounded how many could pile up
-    over this executor's unboundedly long lifetime (run_evaluator_loop
-    shares ONE instance for as long as the process runs). `can_submit()`
-    refuses a new send once too many retired pools still have a live
-    (not-yet-finished) orphan; `rotate()` tracks each retirement against
-    the future that timed out so a later `can_submit()` can prune the ones
-    that have since completed."""
+    """A send-only thread pool that swaps itself for a fresh one when a
+    send times out, shared by every caller holding this wrapper (never a
+    bare ThreadPoolExecutor reference, which a callee could not reseat).
+    `can_submit()` refuses a new send once too many retired pools still
+    have a live orphan, capped at `max_workers * _LIVE_ORPHANS_PER_WORKER`."""
 
     def __init__(self, max_workers: int) -> None:
         self._max_workers = max_workers
         self.current = ThreadPoolExecutor(max_workers=max_workers)
         self._retired: list[tuple[ThreadPoolExecutor, Future]] = []
-        self._max_live_orphans = max_workers * 3
+        self._max_live_orphans = max_workers * _LIVE_ORPHANS_PER_WORKER
 
     def _prune_retired(self) -> None:
         still_live = []
@@ -112,19 +109,11 @@ class _RotatingSendExecutor:
 
 
 class _DaemonThreadSendExecutor:
-    """evaluate_tick's default (per-call) send executor -- one DAEMON
-    thread per send, never a ThreadPoolExecutor (roadmap 3c0b1c80 a).
-    concurrent.futures registers every ThreadPoolExecutor worker thread it
-    ever starts and an atexit hook joins ALL of them at interpreter
-    shutdown, regardless of executor.shutdown(wait=False) already having
-    been called -- a short-lived process (the CLI's `kerdoos digest` cron
-    path, the only production caller of this default) then hangs at exit
-    on an orphaned send. A daemon thread is joined by neither that hook
-    nor CPython's own shutdown, so an orphan here can still delay THIS
-    tick's own completion (bounded by send_timeout_seconds, unchanged) but
-    can never block the process from exiting afterward. No pool, so no
-    orphan-count ceiling either -- out of scope for a single short-lived
-    tick (unlike run_evaluator_loop's unboundedly long-lived executor)."""
+    """evaluate_tick's default (per-call) send executor: one daemon thread
+    per send, never a ThreadPoolExecutor -- pool workers are joined at
+    interpreter exit regardless of shutdown(wait=False), which would hang
+    the short-lived CLI (`kerdoos digest`) on an orphaned send. No pool, so
+    no orphan-count ceiling either -- out of scope for a single tick."""
 
     def __init__(self) -> None:
         self.current = self
@@ -311,6 +300,17 @@ async def _run_plan_b(
             if state_store.has_active_job_run(job.owner_id, job.id):
                 summary.skipped_jobs += 1
                 continue
+            if not send_executor.can_submit():
+                # Checked BEFORE record_job_run: no send was even
+                # attempted, so this must NOT consume the idempotence
+                # window the way a timeout may (the mail could already be
+                # out by then) -- write no job_runs row, so a later tick
+                # of the SAME window can retry once orphans clear.
+                logger.error(
+                    "evaluator: job %s send refused -- live-orphan ceiling "
+                    "reached on this executor", job.name)
+                summary.skipped_jobs += 1
+                continue
             window_start = compute_window_start(
                 job.schedule_cron, job.timezone, tick_now)
             run = JobRun(
@@ -321,19 +321,6 @@ async def _run_plan_b(
                 summary.skipped_jobs += 1  # already recorded this window
                 continue
             state_store.update_job_run(job.id, window_start, status="running")
-            if not send_executor.can_submit():
-                # roadmap 3c0b1c80 (b): too many retired pools still have a
-                # live orphan -- refuse rather than dispatch into an
-                # already-overloaded executor.
-                logger.error(
-                    "evaluator: job %s send refused -- live-orphan ceiling "
-                    "reached on this executor", job.name)
-                state_store.update_job_run(
-                    job.id, window_start, status="error",
-                    error="send refused: live-orphan ceiling reached",
-                )
-                summary.errors += 1
-                continue
             cf_future = None
             try:
                 records, tier2_labels = _collect_job_digest(
@@ -359,7 +346,7 @@ async def _run_plan_b(
                 # The stuck thread cannot be killed and may linger -- swap
                 # in a fresh executor so it alone absorbs the damage, never
                 # every later send too.
-                if cf_future.cancel():
+                if cf_future is None or cf_future.cancel():
                     logger.warning(
                         "evaluator: job %s send() future was cancelled "
                         "before it started running (send pool congested, "
