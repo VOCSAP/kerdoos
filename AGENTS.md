@@ -36,6 +36,13 @@ docs/adr/            architecture decision records (authoritative)
 - Target Python: `>=3.11`.
 - Do not introduce a new tool chain without an ADR. The stack above is decided
   (see `docs/adr/0002`).
+- Some tests skip outside the `autonomous` Docker image (no SeleniumBase/real
+  Chromium on a plain dev machine). Run them before touching `uc.py`:
+  ```bash
+  docker build --target autonomous -t kerdoos:autonomous .
+  docker run --rm -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
+    sh -c "cd /tmp && python3 -m pytest tests/test_uc.py -k UcPinExecution"
+  ```
 
 ## Invariants (do not violate)
 
