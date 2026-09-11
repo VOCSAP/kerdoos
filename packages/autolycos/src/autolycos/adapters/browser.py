@@ -91,14 +91,19 @@ def _load_stealth():  # type: ignore[no-untyped-def]
     return Stealth
 
 
-def _load_timeout_error():  # type: ignore[no-untyped-def]
-    """Lazy handle on patchright's TimeoutError (same rationale as
-    _load_playwright): imported on demand so this module loads without
-    patchright installed.
+def _is_patchright_launch_timeout(exc: BaseException) -> bool:
+    """True iff `exc` is patchright's own TimeoutError. Only imports
+    patchright at the point an exception actually needs classifying (unlike
+    a module-level or fetch()-entry import), and tolerates patchright being
+    absent (a caller with a fake `_load_playwright` never needs the real
+    package, and must not have its own unrelated exception's handling
+    crash on an unrelated ModuleNotFoundError).
     """
-    from patchright.sync_api import TimeoutError as PlaywrightTimeoutError
-
-    return PlaywrightTimeoutError
+    try:
+        from patchright.sync_api import TimeoutError as PlaywrightTimeoutError
+    except ImportError:
+        return False
+    return isinstance(exc, PlaywrightTimeoutError)
 
 
 class BrowserFetcher:
@@ -138,7 +143,6 @@ class BrowserFetcher:
         validate_target(url, self._domain_policy)
         sync_playwright = _load_playwright()
         stealth = _load_stealth()()
-        timeout_error = _load_timeout_error()
 
         # Loopback IP-pinning egress-proxy: Chromium routes every connection
         # (primary + sub-resources) through it and never resolves the target
@@ -154,10 +158,12 @@ class BrowserFetcher:
                     args=strip_dangerous_browser_args([]),
                     timeout=self._launch_timeout_seconds * 1000,
                 )
-            except timeout_error as exc:
-                raise FetchError(
-                    f"browser launch exceeded {self._launch_timeout_seconds}s "
-                    "timeout") from exc
+            except Exception as exc:  # noqa: BLE001 -- narrowed just below
+                if _is_patchright_launch_timeout(exc):
+                    raise FetchError(
+                        f"browser launch exceeded "
+                        f"{self._launch_timeout_seconds}s timeout") from exc
+                raise
             try:
                 page = browser.new_page()
                 # JS-level stealth on top of patchright's launch patches, applied
