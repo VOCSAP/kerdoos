@@ -27,18 +27,19 @@ from kerdoos.registry.ports import DigestJob
 _POLICY = DomainPolicy(allowed_domains=frozenset({"kabum.com.br"}))
 
 
-def _job(name: str = "job1") -> DigestJob:
+def _job(name: str = "job1", timezone: str = "UTC") -> DigestJob:
     return DigestJob(
         id="job1", owner_id="owner1", name=name, frequency_kind="hourly",
-        schedule_cron="0 * * * *",
+        schedule_cron="0 * * * *", timezone=timezone,
     )
 
 
 def _record(
     source_id: str = "owner1:p1:kabum:aa", error: str | None = None,
+    ts: str = "2026-07-13T00:00:00+00:00",
 ) -> ScrapeRecord:
     return ScrapeRecord(
-        source_id=source_id, ts="2026-07-13T00:00:00+00:00", status=ScrapeStatus.OK,
+        source_id=source_id, ts=ts, status=ScrapeStatus.OK,
         price_pix_cents=755800, price_card_cents=755800, currency="BRL",
         availability=Availability.IN_STOCK, method="http", error=error,
     )
@@ -65,6 +66,29 @@ class FlatViewModelTest(unittest.TestCase):
         # No domain/registry type reachable at all -- every attribute access
         # above already proves this, but assert the concrete type too.
         self.assertIsInstance(line, DigestLineView)
+
+
+class DigestStalenessViewTest(unittest.TestCase):
+    def test_stale_record_html_carries_the_age_not_just_generated_at(self) -> None:
+        stale = _record(ts="2026-06-13T00:00:00+00:00")
+        view = build_digest_view(
+            _job(), [stale], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+        )
+        self.assertIn("(30d ago)", view.lines[0].scraped_at)
+        html = render_digest_html("default", view)
+        self.assertIn("(30d ago)", html)
+        self.assertIn("2026-06-13", html)
+
+    def test_scraped_at_uses_job_timezone(self) -> None:
+        # Sao Paulo is UTC-3 (no DST since 2019) -- 00:00 UTC is 21:00 the
+        # PRIOR day locally, proving the conversion actually runs, not just
+        # a passthrough of the UTC string.
+        record = _record(ts="2026-07-13T00:00:00+00:00")
+        view = build_digest_view(
+            _job(timezone="America/Sao_Paulo"), [record],
+            "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+        )
+        self.assertIn("2026-07-12 21:00", view.lines[0].scraped_at)
 
 
 class HrefSsrfGuardTest(unittest.TestCase):

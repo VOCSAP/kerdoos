@@ -7,7 +7,9 @@ vertical slice; the CLI prints this to stdout in dry-run).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from kerdoos.core.domain import ScrapeStatus
 from kerdoos.persistence.ports import ScrapeRecord
@@ -37,6 +39,30 @@ def _sanitize_error(error: str) -> str:
     if len(flat) > _MAX_ERROR_LEN:
         flat = flat[:_MAX_ERROR_LEN - 3] + "..."
     return flat
+
+
+def _parse_ts(ts: str) -> datetime:
+    parsed = datetime.fromisoformat(ts)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _scraped_at_label(
+    record_ts: str, generated_at: str, *, tz_name: str = "UTC",
+) -> str:
+    """Human label for WHEN a record's price was actually read, distinct from
+    generated_at (the digest's build time) -- card e9ee2b59: a source that
+    stopped being scraped must never let its last OK price read as current
+    (invariant #4). tz_name is job.timezone when a DigestJob is in scope,
+    else explicit UTC (render_digest has no job).
+    """
+    scraped = _parse_ts(record_ts).astimezone(ZoneInfo(tz_name))
+    stamp = scraped.strftime("%Y-%m-%d %H:%M %Z")
+    age_days = max(0, (_parse_ts(generated_at) - _parse_ts(record_ts)).days)
+    if age_days >= 1:
+        return f"scraped {stamp} ({age_days}d ago)"
+    return f"scraped {stamp}"
 
 
 def _price_field(record: ScrapeRecord, label: str | None = None) -> str:
@@ -82,8 +108,9 @@ def render_digest(
         counts[record.status] = counts.get(record.status, 0) + 1
         detail = _price_field(record, labels.get(record.source_id))
         avail = record.availability.value
+        scraped_at = _scraped_at_label(record.ts, generated_at)
         line = (f"[{record.status.value:>13}] {record.source_id}  "
-                f"{detail}  availability={avail}")
+                f"{detail}  availability={avail}  {scraped_at}")
         if record.error:
             line += f"  ({_sanitize_error(record.error)})"
         lines.append(line)

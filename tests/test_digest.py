@@ -5,14 +5,15 @@ from __future__ import annotations
 import unittest
 
 from kerdoos.core.domain import Availability, ScrapeStatus
-from kerdoos.digest.render import format_cents, render_digest
+from kerdoos.digest.render import _MAX_ERROR_LEN, format_cents, render_digest
 from kerdoos.persistence.ports import ScrapeRecord
 
 
 def _rec(source_id="p:kabum:aa", status=ScrapeStatus.OK, pix=755800, card=755800,
-         availability=Availability.IN_STOCK, method="http", error=None):
+         availability=Availability.IN_STOCK, method="http", error=None,
+         ts="2026-07-06T00:00:00+00:00"):
     return ScrapeRecord(
-        source_id=source_id, ts="2026-07-06T00:00:00+00:00", status=status,
+        source_id=source_id, ts=ts, status=status,
         price_pix_cents=pix, price_card_cents=card, currency="BRL",
         availability=availability, method=method, error=error,
     )
@@ -55,6 +56,24 @@ class DigestAggregationTest(unittest.TestCase):
         self.assertIn("Kerdoos daily digest", body)
 
 
+class DigestStalenessTest(unittest.TestCase):
+    def test_stale_ok_record_is_not_presented_as_current(self) -> None:
+        # An unscraped source's last OK record must read as aged, not fresh.
+        stale = _rec(ts="2026-06-06T00:00:00+00:00")
+        body = render_digest([stale], "2026-07-06T00:00:00+00:00")
+        record_line = next(l for l in body.splitlines() if l.startswith("["))
+        self.assertIn("scraped 2026-06-06", record_line)
+        self.assertIn("(30d ago)", record_line)
+        self.assertNotIn("generated_at: 2026-06-06", body)
+
+    def test_fresh_record_shows_no_misleading_age_suffix(self) -> None:
+        fresh = _rec(ts="2026-07-06T00:00:00+00:00")
+        body = render_digest([fresh], "2026-07-06T00:00:00+00:00")
+        record_line = next(l for l in body.splitlines() if l.startswith("["))
+        self.assertIn("scraped 2026-07-06", record_line)
+        self.assertNotIn("ago)", record_line)
+
+
 class DigestSanitizationTest(unittest.TestCase):
     def test_error_newlines_stripped(self) -> None:
         # m1: a hostile error must not forge extra digest lines (log injection).
@@ -73,9 +92,11 @@ class DigestSanitizationTest(unittest.TestCase):
         body = render_digest(
             [_rec(error="x" * 500, status=ScrapeStatus.INDETERMINATE)],
             "2026-07-06T00:00:00+00:00")
-        # Sanitized error is capped well under the raw 500 chars.
+        # Sanitized error SEGMENT is capped at _MAX_ERROR_LEN, well under the
+        # raw 500 chars -- asserted on the segment itself, not an arbitrary
+        # total line-length budget (which grows with unrelated fields).
         record_line = next(l for l in body.splitlines() if l.startswith("["))
-        self.assertLess(len(record_line), 260)
+        self.assertLessEqual(record_line.count("x"), _MAX_ERROR_LEN)
         self.assertIn("...", record_line)
 
 

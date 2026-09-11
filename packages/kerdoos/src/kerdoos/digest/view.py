@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from autolycos.errors import SSRFError
 from autolycos.safety import DomainPolicy, check_scheme_and_domain
 
-from kerdoos.digest.render import _price_field, _sanitize_error
+from kerdoos.digest.render import _price_field, _sanitize_error, _scraped_at_label
 from kerdoos.persistence.ports import ScrapeRecord
 from kerdoos.registry.ports import DigestJob
 
@@ -36,6 +36,7 @@ class DigestLineView:
     status_label: str
     price_line: str
     availability_label: str
+    scraped_at: str
     error: str | None
     href: str | None
 
@@ -81,6 +82,8 @@ def build_digest_view(
             status_label=record.status.value,
             price_line=_price_field(record, tier2_labels.get(record.source_id)),
             availability_label=record.availability.value,
+            scraped_at=_scraped_at_label(
+                record.ts, generated_at, tz_name=job.timezone),
             error=error,
             href=_safe_href(source_urls.get(record.source_id), domain_policy),
         ))

@@ -14,6 +14,7 @@
 <th>Status</th>
 <th>Price</th>
 <th>Availability</th>
+<th>Scraped</th>
 <th>Error</th>
 </tr>
 </thead>
@@ -30,6 +31,7 @@
 <td>{{ line.status_label }}</td>
 <td>{{ line.price_line }}</td>
 <td>{{ line.availability_label }}</td>
+<td>{{ line.scraped_at }}</td>
 <td>{{ line.error or "" }}</td>
 </tr>
 {% endfor %}
