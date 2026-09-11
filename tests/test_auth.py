@@ -328,6 +328,23 @@ class SetEmailTest(_AuthTestBase):
             with self.subTest(address=address):
                 self.service.set_email(Principal("o1", "user"), address)
 
+    def test_numeric_tld_domain_rejected(self) -> None:
+        # roadmap 4a8afdf2 follow-up: the final label must start with a
+        # letter -- an all-numeric or hex-numeric final label is not a
+        # real TLD and can itself encode an IP address.
+        self._add_owner("o1", "alice", "pw", email=None)
+        for address in ("a@10.0.0.1", "a@0x0a.0.0.1", "a@2130706433.1"):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError):
+                    self.service.set_email(Principal("o1", "user"), address)
+
+    def test_trailing_newline_rejected(self) -> None:
+        # roadmap 4a8afdf2 follow-up: $ matches before a trailing newline
+        # under re.match -- fullmatch closes that gap.
+        self._add_owner("o1", "alice", "pw", email=None)
+        with self.assertRaises(ValueError):
+            self.service.set_email(Principal("o1", "user"), "alice@example.com\n")
+
     def test_collision_rejected_as_named_error(self) -> None:
         self._add_owner("o1", "alice", "pw", email="taken@example.com")
         self._add_owner("o2", "bob", "pw", email=None)

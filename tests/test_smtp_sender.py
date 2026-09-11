@@ -597,6 +597,32 @@ class RetryTest(_SmtpSenderTestBase):
                 sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
         self.assertIn("[10.0.0.1]", str(ctx.exception))
 
+    def test_numeric_tld_domain_trips_the_guard_before_any_connection(self) -> None:
+        # roadmap 4a8afdf2 follow-up: an all-numeric final label is not a
+        # real TLD and can itself encode an IP address.
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "a@10.0.0.1", _SMTP_SETTINGS)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _ExplodingSMTP):
+            with self.assertRaises(_UnsafeRecipientError):
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+    def test_trailing_newline_domain_trips_the_guard_before_any_connection(
+        self,
+    ) -> None:
+        # roadmap 4a8afdf2 follow-up: $ matches before a trailing newline
+        # under re.match -- fullmatch closes that gap.
+        registry = _registry(_record().source_id, "https://www.kabum.com.br/p/1")
+        config_store = _FakeConfigStore({"owner1": registry})
+        sender = SmtpDigestSender(
+            config_store, _POLICY, lambda owner: "a@x.com\n", _SMTP_SETTINGS)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _ExplodingSMTP):
+            with self.assertRaises(_UnsafeRecipientError):
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
     def test_guard_still_fires_under_python_dash_o(self) -> None:
         """Gate C1a: the guard is `if ...: raise`, not `assert`, so it must
         survive python -O / PYTHONOPTIMIZE (which compiles out every

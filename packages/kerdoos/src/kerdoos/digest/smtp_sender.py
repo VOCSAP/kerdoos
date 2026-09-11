@@ -143,8 +143,12 @@ class _UnsafeRecipientError(Exception):
 
 # Mirrors core.app.auth._EMAIL_RE's domain part -- an independent, adapter-
 # side rampart (roadmap 4a8afdf2) so a row written before that regex was
-# tightened still fails closed here, before any SMTP connection opens.
-_VALID_DOMAIN_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+# tightened still fails closed here, before any SMTP connection opens. The
+# final label must start with a letter (or be an xn-- punycode label) so
+# an all-numeric TLD-position label (which can itself encode an IP
+# address) is rejected the same way a bracketed literal is.
+_VALID_DOMAIN_RE = re.compile(
+    r"^(?:[A-Za-z0-9-]+\.)+(?:[A-Za-z][A-Za-z0-9-]*|xn--[A-Za-z0-9-]+)$")
 
 
 # One retry "attempt" (_send_smtp_once) is NOT one timeout_seconds window:
@@ -275,7 +279,7 @@ class SmtpDigestSender:
             raise _UnsafeRecipientError(
                 f"SmtpDigestSender expects exactly one recipient, got {to_addr!r}")
         domain = to_addr.rsplit("@", 1)[-1]
-        if not _VALID_DOMAIN_RE.match(domain):
+        if not _VALID_DOMAIN_RE.fullmatch(domain):
             raise _UnsafeRecipientError(
                 f"SmtpDigestSender refuses a non-domain-label recipient host "
                 f"in {to_addr!r} (e.g. an IP-address literal) -- this relay "

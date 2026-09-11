@@ -259,6 +259,13 @@ de fin de stage (Q-f) verifie aussi la majeure de ce `chromedriver` copie.
 - `KERDOOS_CONFIG_DB` / `KERDOOS_STATE_DB` : paths de deploiement.
 - **Creds SMTP** (host/port/from/auth) : depuis la config, **jamais codes en dur**
   (`CLAUDE.md`). Injectes via `env_file` (`.env` gitignore) ou docker secrets.
+- **Politique reseau du relais SMTP** (roadmap 4a8afdf2) : le relais configure
+  ne doit PAS pouvoir livrer vers les plages privees/reservees (RFC 1918,
+  `127/8`, `169.254/16`, et les equivalents IPv6 `fc00::/7`/`::1`/`fe80::/10`).
+  La validation d'adresse email (`_EMAIL_RE`, `_VALID_DOMAIN_RE`) rejette un
+  litteral IP mais ne peut pas detecter un domaine public qui RESOUT vers une
+  IP interne (ex. `10.0.0.1.nip.io`) -- c'est une politique reseau du relais
+  lui-meme, hors du perimetre applicatif de Kerdoos.
 - `KERDOOS_COOKIE_SECURE` : `true` par defaut ; `false` uniquement pour un
   deploiement plain-http LAN.
 

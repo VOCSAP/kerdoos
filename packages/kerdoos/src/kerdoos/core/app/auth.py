@@ -52,9 +52,13 @@ DEFAULT_TOKEN_TTL = timedelta(days=90)
 # negated class -- roadmap 4a8afdf2: a bracketed IP-address literal
 # (a@[10.0.0.1]) would let a tenant make the configured SMTP relay connect
 # to an arbitrary host on port 25 (SSRF against the relay's own network
-# reach).
+# reach). The final label must start with a letter (or be an xn-- punycode
+# label) -- an all-numeric final label (a@10.0.0.1, a@2130706433.1) is not
+# a real TLD and can itself encode an IP address, the same SSRF surface
+# under a different notation.
 _EMAIL_RE = re.compile(
-    r'^[^@\s,;<>"()]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$')
+    r'^[^@\s,;<>"()]+@(?:[A-Za-z0-9-]+\.)+'
+    r'(?:[A-Za-z][A-Za-z0-9-]*|xn--[A-Za-z0-9-]+)$')
 
 
 def _utcnow() -> datetime:
@@ -202,7 +206,7 @@ class AuthService:
         EmailAlreadyTakenError (from the store) if a different owner already
         has that email -- never a raw sqlite3.IntegrityError.
         """
-        if email is not None and not _EMAIL_RE.match(email):
+        if email is not None and not _EMAIL_RE.fullmatch(email):
             raise ValueError(f"invalid email format: {email!r}")
         self._store.set_email(principal.owner_id, email)
 
