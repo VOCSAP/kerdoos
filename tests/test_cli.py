@@ -12,7 +12,9 @@ CLI is a thin AppService wrapper), so this test first goes through
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -165,6 +167,40 @@ class CliDigestTest(unittest.TestCase):
         self.assertIn("notified_jobs=1", out)
         self.assertIn("skipped_jobs=0", out)
         self.assertIn("errors=0", out)
+
+
+class CliStateDbDefaultTest(unittest.TestCase):
+    """Card 1af8b18b: --db defaults to KERDOOS_STATE_DB when set, so a
+    cron-scheduled `kerdoos digest` without --db shares the same state.db
+    (and BrowserGate lock directory) as the WebUI. _DEFAULT_STATE_DB is
+    computed once at module import, so the env var must be set/unset
+    BEFORE reloading the module."""
+
+    def setUp(self) -> None:
+        self._saved = os.environ.pop("KERDOOS_STATE_DB", None)
+
+    def tearDown(self) -> None:
+        if self._saved is None:
+            os.environ.pop("KERDOOS_STATE_DB", None)
+        else:
+            os.environ["KERDOOS_STATE_DB"] = self._saved
+        importlib.reload(cli)
+
+    def test_db_defaults_to_state_db_env_var_when_set(self) -> None:
+        os.environ["KERDOOS_STATE_DB"] = "/data/state.db"
+        module = importlib.reload(cli)
+        parser = module.build_parser_cli()
+        self.assertEqual(
+            parser.parse_args(["run", "--owner", "o1"]).db, "/data/state.db")
+        self.assertEqual(parser.parse_args(["digest"]).db, "/data/state.db")
+        self.assertEqual(
+            parser.parse_args(["config", "import"]).db, "/data/state.db")
+
+    def test_db_defaults_to_literal_when_state_db_unset(self) -> None:
+        module = importlib.reload(cli)
+        parser = module.build_parser_cli()
+        self.assertEqual(
+            parser.parse_args(["run", "--owner", "o1"]).db, "kerdoos.db")
 
 
 if __name__ == "__main__":

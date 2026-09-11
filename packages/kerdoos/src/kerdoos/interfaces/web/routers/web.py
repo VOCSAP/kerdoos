@@ -70,6 +70,7 @@ def dashboard(
     records = svc.list_state(owner)
     registry = svc.list_config(owner)
     run_status = queue.status_for(owner)
+    cooldown_remaining = queue.cooldown_remaining_seconds(owner)
 
     # Presentation join (invariant #9: orchestration, not business logic):
     # list_state yields ScrapeRecord keyed only by source_id, so pair each with
@@ -106,7 +107,9 @@ def dashboard(
         "to_watch": counts["indeterminate"] + counts["unavailable"],
     }
     ctx = _base(request, principal, csrf, "dashboard")
-    ctx.update(rows=rows, briefing=briefing, run_status=run_status)
+    ctx.update(
+        rows=rows, briefing=briefing, run_status=run_status,
+        cooldown_remaining=cooldown_remaining)
     return templates.TemplateResponse(request, "dashboard/index.html", ctx)
 
 

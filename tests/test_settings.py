@@ -17,10 +17,10 @@ import unittest
 
 from kerdoos.config import (
     DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
-    DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_RUN_QUEUE_MAX_RESTARTS,
-    DEFAULT_SMTP_PORT, DEFAULT_SMTP_RETRY_ATTEMPTS,
-    DEFAULT_SMTP_RETRY_BACKOFF_SECONDS, DEFAULT_SMTP_TIMEOUT_SECONDS,
-    DEFAULT_WORKERS, MAX_SMTP_RETRY_ATTEMPTS,
+    DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_RUN_NOW_COOLDOWN_SECONDS,
+    DEFAULT_RUN_QUEUE_MAX_RESTARTS, DEFAULT_SMTP_PORT,
+    DEFAULT_SMTP_RETRY_ATTEMPTS, DEFAULT_SMTP_RETRY_BACKOFF_SECONDS,
+    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS, MAX_SMTP_RETRY_ATTEMPTS,
     MIN_SMTP_RETRY_BACKOFF_SECONDS, get_settings,
 )
 
@@ -31,7 +31,7 @@ _SMTP_ENV_VARS = (
     "KERDOOS_SMTP_RETRY_BACKOFF_SECONDS", "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
     "KERDOOS_WORKERS", "KERDOOS_BROWSER_MAX_CONCURRENT",
     "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
-    "KERDOOS_RUN_QUEUE_MAX_RESTARTS",
+    "KERDOOS_RUN_QUEUE_MAX_RESTARTS", "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
 )
 
 
@@ -404,6 +404,41 @@ class RunQueueMaxRestartsFloorTest(_SettingsTestBase):
                     DEFAULT_RUN_QUEUE_MAX_RESTARTS)
                 self.assertTrue(
                     any("KERDOOS_RUN_QUEUE_MAX_RESTARTS" in msg
+                        for msg in cm.output), cm.output)
+
+
+class RunNowCooldownFloorTest(_SettingsTestBase):
+    """Card 1af8b18b: a malformed KERDOOS_RUN_NOW_COOLDOWN_SECONDS warns and
+    floors to the default instead of crashing at settings-read time."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.run_now_cooldown_seconds, DEFAULT_RUN_NOW_COOLDOWN_SECONDS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_RUN_NOW_COOLDOWN_SECONDS"] = "60"
+        settings = get_settings()
+        self.assertEqual(settings.run_now_cooldown_seconds, 60.0)
+
+    def test_zero_is_valid(self) -> None:
+        os.environ["KERDOOS_RUN_NOW_COOLDOWN_SECONDS"] = "0"
+        settings = get_settings()
+        self.assertEqual(settings.run_now_cooldown_seconds, 0)
+
+    def test_invalid_or_negative_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_RUN_NOW_COOLDOWN_SECONDS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.run_now_cooldown_seconds,
+                    DEFAULT_RUN_NOW_COOLDOWN_SECONDS)
+                self.assertTrue(
+                    any("KERDOOS_RUN_NOW_COOLDOWN_SECONDS" in msg
                         for msg in cm.output), cm.output)
 
 

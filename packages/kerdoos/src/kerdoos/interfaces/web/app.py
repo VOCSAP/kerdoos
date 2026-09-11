@@ -98,7 +98,8 @@ def create_app() -> FastAPI:
     # (now also gated by the browser gate above). Started unconditionally
     # below, not behind a flag.
     run_queue = RunQueue(
-        app_service, max_consumer_restarts=settings.run_queue_max_restarts)
+        app_service, max_consumer_restarts=settings.run_queue_max_restarts,
+        cooldown_seconds=settings.run_now_cooldown_seconds)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:

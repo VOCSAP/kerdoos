@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from kerdoos.core.run_queue import RunQueue, RunState, RunStatus
@@ -257,6 +258,71 @@ class RunSupervisedTest(unittest.IsolatedAsyncioTestCase):
             queue.status_for("queued-owner").state, RunState.QUEUED)
         self.assertEqual(
             queue.status_for("running-owner").state, RunState.ERROR)
+
+
+class CooldownTest(unittest.IsolatedAsyncioTestCase):
+    """Card 1af8b18b: cooldown_seconds bounds how often ONE owner may
+    re-enqueue after their last successful run_now."""
+
+    async def test_second_enqueue_within_cooldown_is_refused(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, cooldown_seconds=300)
+        finished = datetime.now(timezone.utc).isoformat()
+        queue._status["owner1"] = RunStatus(
+            state=RunState.DONE, finished_at=finished)
+
+        self.assertFalse(await queue.enqueue("owner1"))
+
+        remaining = queue.cooldown_remaining_seconds("owner1")
+        self.assertIsNotNone(remaining)
+        self.assertGreater(remaining, 0)
+        self.assertLessEqual(remaining, 300)
+        # The refusal must not touch the DONE status -- overwriting
+        # finished_at would break the cooldown window's own computation
+        # on the next attempt.
+        status = queue.status_for("owner1")
+        self.assertEqual(status.state, RunState.DONE)
+        self.assertEqual(status.finished_at, finished)
+
+    async def test_enqueue_accepted_after_cooldown_elapses(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, cooldown_seconds=1)
+        old = (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()
+        queue._status["owner1"] = RunStatus(
+            state=RunState.DONE, finished_at=old)
+
+        self.assertIsNone(queue.cooldown_remaining_seconds("owner1"))
+        self.assertTrue(await queue.enqueue("owner1"))
+
+    async def test_cooldown_disabled_by_default(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service)  # cooldown_seconds=0 default
+        finished = datetime.now(timezone.utc).isoformat()
+        queue._status["owner1"] = RunStatus(
+            state=RunState.DONE, finished_at=finished)
+
+        self.assertIsNone(queue.cooldown_remaining_seconds("owner1"))
+        self.assertTrue(await queue.enqueue("owner1"))
+
+    async def test_non_done_status_never_cooldown_refused(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, cooldown_seconds=300)
+        for state in (RunState.QUEUED, RunState.RUNNING, RunState.ERROR):
+            with self.subTest(state=state):
+                queue._status["owner-x"] = RunStatus(state=state)
+                self.assertIsNone(
+                    queue.cooldown_remaining_seconds("owner-x"))
+
+    async def test_cooldown_isolated_per_owner(self) -> None:
+        service = _FakeService()
+        queue = RunQueue(service, cooldown_seconds=300)
+        finished = datetime.now(timezone.utc).isoformat()
+        queue._status["owner-a"] = RunStatus(
+            state=RunState.DONE, finished_at=finished)
+
+        self.assertFalse(await queue.enqueue("owner-a"))
+        self.assertTrue(await queue.enqueue("owner-b"))
+        self.assertIsNone(queue.cooldown_remaining_seconds("owner-b"))
 
 
 if __name__ == "__main__":

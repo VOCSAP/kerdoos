@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -40,6 +41,15 @@ from kerdoos.registry.ports import SiteConfig
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 from kerdoos.registry.yaml_store import parse_products_yaml, parse_sites_yaml
 from kerdoos.persistence.sqlite_store import SqliteStateStore
+
+# Card 1af8b18b: --db falls back to KERDOOS_STATE_DB (same var the WebUI
+# reads via config.get_settings()) rather than a fixed literal, so a
+# cron-scheduled `kerdoos digest` without --db shares both the state.db
+# file AND the BrowserGate lock directory (derived from its parent) with
+# the WebUI, instead of silently bypassing the inter-process concurrency
+# bound env.example promises. KERDOOS_STATE_DB unset keeps the historical
+# literal, zero behavior change for existing deployments/tests.
+_DEFAULT_STATE_DB = os.environ.get("KERDOOS_STATE_DB", "kerdoos.db")
 
 
 def _build_browser_gate(state_db: str) -> BrowserGate:
@@ -274,8 +284,9 @@ def build_parser_cli() -> argparse.ArgumentParser:
     run.add_argument("--owner", required=True, help="owner id to run for")
     run.add_argument("--config-db", default="config.db",
                      help="SQLite ConfigStore path")
-    run.add_argument("--db", default="kerdoos.db",
-                     help="SQLite state store path (connection-per-operation; "
+    run.add_argument("--db", default=_DEFAULT_STATE_DB,
+                     help="SQLite state store path (defaults to KERDOOS_STATE_DB "
+                          "if set, else 'kerdoos.db'; connection-per-operation -- "
                           "':memory:' is a distinct in-memory DB per connection "
                           "and loses all data between operations, use a real "
                           "file path even for ephemeral runs)")
@@ -289,8 +300,9 @@ def build_parser_cli() -> argparse.ArgumentParser:
              "(ADR 0003 Decision 8 -- for external cron when KERDOOS_WORKERS > 1)")
     digest.add_argument("--config-db", default="config.db",
                         help="SQLite ConfigStore path")
-    digest.add_argument("--db", default="kerdoos.db",
-                        help="SQLite state store path (connection-per-operation; "
+    digest.add_argument("--db", default=_DEFAULT_STATE_DB,
+                        help="SQLite state store path (defaults to KERDOOS_STATE_DB "
+                             "if set, else 'kerdoos.db'; connection-per-operation -- "
                              "':memory:' is a distinct in-memory DB per connection "
                              "and loses all data between operations, use a real "
                              "file path even for ephemeral runs)")
@@ -303,7 +315,7 @@ def build_parser_cli() -> argparse.ArgumentParser:
     imp.add_argument("--config-dir", default="config",
                      help="directory holding sites.yaml + products.yaml")
     imp.add_argument("--config-db", default="config.db")
-    imp.add_argument("--db", default="kerdoos.db")
+    imp.add_argument("--db", default=_DEFAULT_STATE_DB)
     imp.add_argument("--owner", default=None,
                      help="also import products.yaml sources for this owner")
     imp.set_defaults(func=cmd_config_import)

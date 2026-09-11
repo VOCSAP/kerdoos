@@ -626,6 +626,43 @@ class RunQueueWebUITest(_WebUITestBase):
                 self.assertNotIn("run-status", text_b)
                 release.set()
 
+    def test_second_post_run_within_cooldown_is_refused_with_message(self):
+        # Card 1af8b18b: a re-click right after a DONE run must not trigger
+        # a second run_now, and the dashboard must say so in a neutral way.
+        from unittest import mock as _mock
+
+        from kerdoos.core.app.services import AppService, RunResult
+
+        calls: list[str] = []
+
+        def _fast_run_now(self, owner_id):  # noqa: ANN001
+            calls.append(owner_id)
+            return RunResult(records=[], generated_at="2026-01-01T00:00:00+00:00")
+
+        with _mock.patch.dict(
+            os.environ, {"KERDOOS_RUN_NOW_COOLDOWN_SECONDS": "300"}
+        ):
+            with _mock.patch.object(AppService, "run_now", _fast_run_now):
+                with TestClient(create_app()) as client:
+                    self._login_on(client, "alice", "s3cret")
+                    token = self._csrf_on(client)
+                    client.post("/run", data={"csrf_token": token})
+
+                    text = ""
+                    for _ in range(200):
+                        text = client.get("/").text
+                        if "run-status--done" in text:
+                            break
+                        import time
+                        time.sleep(0.02)
+                    self.assertIn("run-status--done", text)
+                    self.assertEqual(calls, ["o1"])
+
+                    client.post("/run", data={"csrf_token": token})
+                    text = client.get("/").text
+                    self.assertIn("réessayez dans quelques minutes", text)
+                    self.assertEqual(calls, ["o1"])  # run_now NOT called again
+
 
 if __name__ == "__main__":
     unittest.main()

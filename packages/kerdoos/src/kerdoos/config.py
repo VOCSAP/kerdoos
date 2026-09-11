@@ -61,6 +61,13 @@ either env var itself (invariant 2).
 KERDOOS_RUN_QUEUE_MAX_RESTARTS (card 65cef071): max times the WebUI's
 background run-queue consumer restarts itself after an unexpected crash
 before refusing new POST /run enqueues. Same floor-with-warning discipline.
+
+KERDOOS_RUN_NOW_COOLDOWN_SECONDS (card 1af8b18b): min seconds between the
+end of one owner's run_now and their next accepted POST /run enqueue.
+Bounds how often a single tenant can hammer the shared browser gate
+(max_concurrent=1 by default) and degrade the shared egress IP's anti-bot
+reputation for every OTHER tenant. 0 explicitly disables the guard. Same
+floor-with-warning discipline; keyed per owner_id (invariant 10).
 """
 
 from __future__ import annotations
@@ -129,6 +136,14 @@ DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS = 120
 # a transient bug without masking a persistently broken consumer forever.
 DEFAULT_RUN_QUEUE_MAX_RESTARTS = 5
 
+# Card 1af8b18b: min seconds between one owner's run_now finishing and
+# their next accepted manual re-run. 5 minutes is long enough to stop a
+# tenant clicking "Verifier maintenant" repeatedly from starving the
+# single shared browser gate and burning the shared egress IP's anti-bot
+# reputation, short enough not to punish a legitimate re-check after
+# fixing a config issue.
+DEFAULT_RUN_NOW_COOLDOWN_SECONDS = 300.0
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -151,6 +166,7 @@ class Settings:
     browser_max_concurrent: int
     browser_acquire_timeout_seconds: float
     run_queue_max_restarts: int
+    run_now_cooldown_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -265,4 +281,7 @@ def get_settings() -> Settings:
         run_queue_max_restarts=_env_number(
             "KERDOOS_RUN_QUEUE_MAX_RESTARTS",
             DEFAULT_RUN_QUEUE_MAX_RESTARTS, int, lambda v: v >= 0),
+        run_now_cooldown_seconds=_env_number(
+            "KERDOOS_RUN_NOW_COOLDOWN_SECONDS",
+            DEFAULT_RUN_NOW_COOLDOWN_SECONDS, float, lambda v: v >= 0),
     )

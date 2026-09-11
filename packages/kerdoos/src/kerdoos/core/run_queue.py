@@ -45,9 +45,11 @@ class RunQueue:
 
     def __init__(
         self, service: AppService, max_consumer_restarts: int = 5,
+        cooldown_seconds: float = 0,
     ) -> None:
         self._service = service
         self._max_consumer_restarts = max_consumer_restarts
+        self._cooldown_seconds = cooldown_seconds
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._queued_or_running: set[str] = set()
         self._status: dict[str, RunStatus] = {}
@@ -64,17 +66,44 @@ class RunQueue:
     def is_dead(self) -> bool:
         return self._dead
 
+    def cooldown_remaining_seconds(self, owner_id: str) -> float | None:
+        """Seconds left before owner_id may enqueue again, or None if not
+        in cooldown (disabled, never run, or last run isn't DONE -- a
+        QUEUED/RUNNING/ERROR status never blocks a re-enqueue on this
+        basis, only a recent successful one)."""
+        if self._cooldown_seconds <= 0:
+            return None
+        status = self._status.get(owner_id)
+        if status is None or status.state is not RunState.DONE:
+            return None
+        if status.finished_at is None:
+            return None
+        finished = datetime.fromisoformat(status.finished_at)
+        elapsed = (datetime.now(timezone.utc) - finished).total_seconds()
+        remaining = self._cooldown_seconds - elapsed
+        return remaining if remaining > 0 else None
+
     async def enqueue(self, owner_id: str) -> bool:
         """Enqueue owner_id unless a run for it is already queued or
-        running. Returns True iff this call actually enqueued it (False =
-        silently coalesced into the existing one, OR refused because the
-        consumer exhausted its restart budget -- status_for(owner_id)
-        distinguishes the two: ERROR for a refusal, QUEUED/RUNNING for a
-        coalesce)."""
+        running, or the owner is in its post-run cooldown (card 1af8b18b --
+        bounds how often one tenant can hammer the shared browser gate and
+        the shared egress IP's anti-bot reputation). Returns True iff this
+        call actually enqueued it (False = silently coalesced into the
+        existing one, refused by cooldown, OR refused because the consumer
+        exhausted its restart budget -- status_for(owner_id) plus
+        cooldown_remaining_seconds(owner_id) distinguish the three: ERROR
+        for a dead-queue refusal, a non-None cooldown_remaining_seconds for
+        a cooldown refusal (status stays DONE, untouched), QUEUED/RUNNING
+        for a coalesce)."""
         if self._dead:
             async with self._lock:
                 self._status[owner_id] = RunStatus(
                     state=RunState.ERROR, error=self._dead_reason)
+            return False
+        if self.cooldown_remaining_seconds(owner_id) is not None:
+            # Deliberately does not touch self._status: overwriting it
+            # would lose finished_at, breaking the cooldown window's own
+            # computation on the NEXT refused attempt.
             return False
         async with self._lock:
             if owner_id in self._queued_or_running:
