@@ -300,8 +300,10 @@ devient le resume actionnable du mail.
   `try/except` **par owner** + `continue` + log WARNING (sinon un owner defaillant
   tue le cycle entier).
 - **Retry + backoff borne** sur echec SMTP transitoire (connexion refusee,
-  greylisting 4xx), puis abandon pour cet owner ce cycle (le digest est quotidien :
-  un miss est recuperable au prochain run).
+  greylisting 4xx) : **NON IMPLEMENTE, et non repris par ADR 0003**. Comportement
+  reel : un echec d'envoi passe la ligne `job_runs` du job en `error`, ce qui
+  consomme la fenetre ; le job repart a sa fenetre suivante, sans nouvelle tentative
+  dans la fenetre courante.
 - **Digest partiel** : une source en blocage transitoire n'immobilise pas le digest
   entier ; elle apparait marquee `indetermine`.
 - L'echec d'envoi est **enregistre dans l'etat** pour visibilite operateur.

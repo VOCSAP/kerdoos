@@ -115,11 +115,20 @@ CREATE TABLE job_runs (
     window_start TEXT NOT NULL,   -- borne de la fenetre planifiee (clef d'idempotence, cf. D4)
     fired_at  TEXT NOT NULL,
     sent_at   TEXT,               -- NULL si echoue/skippe
-    status    TEXT NOT NULL,      -- 'sent'|'failed'|'skipped_no_email'|'partial'|'empty'
+    status    TEXT NOT NULL,      -- 'queued'|'running' (transitoires), puis 'sent'|'error'|'skipped_no_email'|'skipped_no_sources'
     error     TEXT,
     PRIMARY KEY (job_id, window_start)
 );
 ```
+
+Cycle reel d'une ligne `job_runs` : inseree en `queued`, passee en `running` avant
+l'envoi, puis terminale en `sent`, `error` (echec ou timeout d'envoi, ou ligne restee
+`queued`/`running` au-dela du delai maximal d'envoi et passee en `error` par le
+reaper) ou `skipped_no_email`. Un job sans source ecrit directement
+`skipped_no_sources`. Un refus d'envoi pour capacite (plafond de threads d'envoi
+orphelins atteint) n'ecrit **aucune** ligne : la fenetre reste rejouable au tick
+suivant. Toute ligne ecrite consomme sa fenetre (cle primaire). La colonne est un
+`TEXT` sans contrainte `CHECK`.
 
 ### Notes structurelles
 - **Piege #11162 EVITE** : les contraintes `UNIQUE` sont **inline dans le `CREATE
@@ -141,8 +150,10 @@ CREATE TABLE job_runs (
   job de B ET **0 scrape** declenche pour B sur l'URL de A.
 - **Cascade** : `ON DELETE CASCADE` sur les deux FK. Supprimer un job -> ses liaisons
   partent. Supprimer une source -> elle disparait de tous les jobs qui la referencaient.
-  Un job qui se retrouve a **zero source** est **skippe** par l'evaluateur (statut
-  `empty`) et signale dans la WebUI (jamais un mail vide).
+  Un job qui se retrouve a **zero source** est **skippe** par l'evaluateur : aucun
+  mail vide, une ligne `job_runs` au statut `skipped_no_sources`, fenetre consommee.
+  Il n'est **pas encore signale dans la WebUI** : l'affichage du dernier statut d'un
+  job n'existe pas (carte 3c557a9c).
 - **Pas de FK cross-DB** : `job_runs` (state.db) ne peut pas FK vers `digest_jobs`
   (config.db). Le lien est logique ; le `DigestService` lit les deux stores et joint
   en memoire (coherent avec `AppService` qui lit deja config + etat).
@@ -232,12 +243,15 @@ periodiquement (resolution proposee : **60 s**). A chaque tick, l'**evaluateur**
    `job_runs` contient deja une ligne `(job_id, window_start)`, **skip** (deja
    traite). Sinon, rendre + envoyer + INSERT `job_runs`.
 
-### Idempotence et catch-up (robuste au restart)
+### Idempotence et redemarrage
 La clef `(job_id, window_start)` rend chaque fenetre planifiee **exactement-une-fois**.
-Au boot (catch-up ADR 0002), si un job avait une fenetre due pendant que le container
-etait down, `window_start` de cette fenetre n'est pas dans `job_runs` -> il fire une
-fois au demarrage (jamais N fois). Un digest est idempotent (il lit l'etat settled,
-il n'ecrit pas de prix).
+Au redemarrage, **aucun rattrapage** (ADR 0002 Decision 1) : `window_start` est la
+derniere occurrence planifiee <= now, donc la fenetre courante, si elle est absente de
+`job_runs`, part au premier tick (une seule fois) ; les fenetres anterieures, manquees
+pendant l'arret, ne sont jamais emises. Un tick n'est **pas** en lecture seule : le
+Plan A scrape et ecrit des prix dans `state.db` dans le meme tick que le Plan B.
+L'idempotence porte sur l'**envoi** (une ligne `job_runs` par fenetre), pas sur l'etat
+des prix.
 
 ### Garde-fou workers>1 (herite ADR 0002 D1)
 `workers=1` par defaut : le scheduler tourne intra-process. Si `workers>1`, l'app **ne
