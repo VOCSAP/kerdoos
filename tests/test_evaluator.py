@@ -1214,5 +1214,73 @@ class LiveOrphanCeilingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "sent")
 
 
+class EmptyJobSourceGhostTest(_EvaluatorTestBase):
+    """ADR 0003:144-145 promises a job with zero linked sources is
+    skipped, never an empty digest email. Diagnostic probe (roadmap
+    3c557a9c item 4): confirms or refutes this by removing a job's only
+    source through the real public API (cascading digest_job_sources via
+    FK ON DELETE CASCADE, not a synthetic DB write) and observing whether
+    sender.send() fires with zero records."""
+
+    async def test_job_with_zero_sources_after_cascade_delete(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        job = self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        self._seed_history(
+            "owner1", sid, datetime(2026, 7, 13, 10, 0, 0, tzinfo=timezone.utc))
+
+        self.service.remove_source("owner1", sid)
+
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        sender = _RecordingSender()
+        summary = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+
+        self.assertEqual(sender.calls, [])
+        self.assertEqual(summary.notified_jobs, 0)
+        self.assertEqual(summary.skipped_jobs, 1)
+        window_start = compute_window_start(job.schedule_cron, job.timezone, tick_now)
+        with self.state._op() as conn:
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id=? AND window_start=?",
+                (job.id, window_start),
+            ).fetchone()
+        self.assertEqual(row["status"], "skipped_no_sources")
+
+    async def test_same_window_retry_is_blocked_not_resent(self) -> None:
+        sid = self._add_source("owner1", "p1", "https://www.kabum.com.br/p/1")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(sid,)))
+        self._seed_history(
+            "owner1", sid, datetime(2026, 7, 13, 10, 0, 0, tzinfo=timezone.utc))
+        self.service.remove_source("owner1", sid)
+
+        tick_now = datetime(2026, 7, 13, 10, 5, 0, tzinfo=timezone.utc)
+        sender = _RecordingSender()
+        await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now,
+        )
+
+        # Later tick, SAME window (same hourly bucket) -- must not
+        # re-attempt (the job stays sourceless, nothing to retry).
+        summary2 = await evaluate_tick(
+            config_store=self.config, state_store=self.state,
+            router=self.router, parser_factory=_fake_parser_factory,
+            sender=sender, now=tick_now + timedelta(minutes=10),
+        )
+
+        self.assertEqual(sender.calls, [])
+        self.assertEqual(summary2.notified_jobs, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

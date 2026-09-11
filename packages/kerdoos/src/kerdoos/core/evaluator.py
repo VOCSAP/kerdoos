@@ -300,6 +300,25 @@ async def _run_plan_b(
             if state_store.has_active_job_run(job.owner_id, job.id):
                 summary.skipped_jobs += 1
                 continue
+            if not job.source_ids:
+                # ADR 0003:144-145: a job with zero linked sources (its
+                # last source was removed, cascading the digest_job_sources
+                # link) must never send an empty digest. The window IS
+                # consumed -- nothing changes for this job before an
+                # operator reconfigures it, so a same-window retry would
+                # be pointless (unlike the capacity refusal below).
+                empty_window_start = compute_window_start(
+                    job.schedule_cron, job.timezone, tick_now)
+                empty_run = JobRun(
+                    job_id=job.id, owner_id=job.owner_id,
+                    window_start=empty_window_start, fired_at=now_iso,
+                    status="queued",
+                )
+                if state_store.record_job_run(empty_run):
+                    state_store.update_job_run(
+                        job.id, empty_window_start, status="skipped_no_sources")
+                summary.skipped_jobs += 1
+                continue
             if not send_executor.can_submit():
                 # Checked BEFORE record_job_run: no send was even
                 # attempted, so this must NOT consume the idempotence
