@@ -87,3 +87,17 @@ deployment detail, not a design constraint.
 ## License
 
 See [LICENSE](./LICENSE).
+
+### Third-party browser engines
+
+The `autonomous` image bundles browser engines that carry their own licenses,
+notably [Camoufox](https://github.com/daijro/camoufox) (MPL-2.0), a Firefox fork
+used to reach sites behind advanced bot protection. MPL-2.0 is a per-file
+copyleft: it applies to Camoufox's own files and leaves this repository's license
+untouched. Kerdoos uses Camoufox unmodified.
+
+Publishing this repository (source plus the Dockerfile that fetches the engine at
+build time) does not redistribute Camoufox, and carries no further obligation.
+Publishing a **built image** does redistribute it: ship the MPL-2.0 license text
+and copyright notices, and point recipients to the upstream sources at the pinned
+release tag. This is an engineering reading, not legal advice.
