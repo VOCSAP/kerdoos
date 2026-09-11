@@ -32,7 +32,9 @@ from unittest.mock import patch
 from autolycos.safety import DomainPolicy
 
 from kerdoos.core.domain import Availability, ScrapeStatus
-from kerdoos.digest.smtp_sender import SmtpDigestSender, SmtpSettings
+from kerdoos.digest.smtp_sender import (
+    SmtpDigestSender, SmtpSettings, _MAX_OPS_PER_ATTEMPT, _UnsafeRecipientError,
+)
 from kerdoos.parsers.ports import ParserSpec
 from kerdoos.persistence.ports import ScrapeRecord
 from kerdoos.registry.ports import (
@@ -463,6 +465,80 @@ class RetryTest(_SmtpSenderTestBase):
         self.assertIs(sent, True)
         self.assertEqual(_FlakyConnect.connect_attempts, 2)
 
+    def test_connection_reset_during_starttls_is_retried_with_fresh_verifying_context(
+        self,
+    ) -> None:
+        class _ResetOnFirstStarttls(_ScriptedSMTP):
+            starttls_calls = 0
+
+            def starttls(self, context=None) -> None:
+                cls = type(self)
+                cls.starttls_calls += 1
+                if cls.starttls_calls == 1:
+                    raise ConnectionResetError("connection reset during STARTTLS")
+                super().starttls(context=context)
+
+        sender, _config = self._sender(retry_attempts=2)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _ResetOnFirstStarttls):
+            sent = sender.send(
+                _job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertIs(sent, True)
+        self.assertEqual(_ResetOnFirstStarttls.connect_attempts, 2)
+        self.assertEqual(_ResetOnFirstStarttls.starttls_calls, 2)
+        # The retried attempt opens a FRESH connection and calls starttls()
+        # again with a verifying context -- never a stale/reused socket or
+        # a downgraded verification posture on retry.
+        second_instance = _FakeSMTP.instances[-1]
+        self.assertTrue(second_instance.started_tls)
+        context = second_instance.starttls_context
+        self.assertIsNotNone(context)
+        self.assertIs(context.check_hostname, True)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_starttls_explicit_4xx_reply_is_never_retried(self) -> None:
+        # A real 4xx reply TO THE STARTTLS COMMAND ITSELF (not
+        # SMTPNotSupportedError, which means the extension was never
+        # advertised at all) -- still occurs strictly before send_message,
+        # but is not a raw connection failure, so it must not be retried.
+        class _Starttls454(_ScriptedSMTP):
+            def starttls(self, context=None) -> None:
+                raise smtplib.SMTPResponseException(
+                    454, b"TLS not available due to temporary reason")
+
+        sender, _config = self._sender(retry_attempts=2)
+
+        with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _Starttls454):
+            with self.assertRaises(smtplib.SMTPResponseException) as ctx:
+                sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertEqual(ctx.exception.smtp_code, 454)
+        self.assertEqual(_Starttls454.connect_attempts, 1)
+
+    def test_budget_exhausted_using_max_ops_multiplier_via_mocked_clock(self) -> None:
+        # C2: a bare `remaining < timeout_seconds` check (the pre-gate-2
+        # behavior) would have let this retry proceed (100-95=5 >= 1); the
+        # multiplied check (5 < 1*_MAX_OPS_PER_ATTEMPT=8) correctly refuses,
+        # since one ATTEMPT is several smtplib operations, not one.
+        class _AlwaysTransient(_ScriptedSMTP):
+            send_script = [smtplib.SMTPDataError(451, b"greylisted")] * 5
+
+        sender, _config = self._sender(
+            timeout_seconds=1.0, retry_attempts=2, send_deadline_seconds=100.0)
+        clock = iter([0.0, 95.0, 95.0, 95.0, 95.0])
+
+        with patch(
+            "kerdoos.digest.smtp_sender.time.monotonic",
+            side_effect=lambda: next(clock),
+        ):
+            with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _AlwaysTransient):
+                with self.assertRaises(smtplib.SMTPDataError) as ctx:
+                    sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
+
+        self.assertEqual(ctx.exception.smtp_code, 451)
+        self.assertEqual(_AlwaysTransient.connect_attempts, 1)
+
     def test_budget_exhausted_before_any_retry_makes_no_second_attempt(self) -> None:
         # C2: send_deadline_seconds < timeout_seconds -- even a single
         # failed attempt leaves less than one timeout's worth of budget,
@@ -491,7 +567,7 @@ class RetryTest(_SmtpSenderTestBase):
         sender, _config = self._sender(retry_attempts=2)
 
         with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _Partial):
-            with self.assertRaises(AssertionError):
+            with self.assertRaises(_UnsafeRecipientError):
                 sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
 
         self.assertEqual(_Partial.connect_attempts, 1)
@@ -504,12 +580,25 @@ class RetryTest(_SmtpSenderTestBase):
             lambda owner: "a@example.com,b@example.com", _SMTP_SETTINGS)
 
         with patch("kerdoos.digest.smtp_sender.smtplib.SMTP", _ExplodingSMTP):
-            with self.assertRaises(AssertionError) as ctx:
+            with self.assertRaises(_UnsafeRecipientError) as ctx:
                 sender.send(_job(), [_record()], "2026-07-13T00:00:00+00:00", {})
-        # Message check, not just the exception TYPE: _ExplodingSMTP's own
-        # guard also raises AssertionError, so a type-only check would
-        # still pass even if THIS specific guard were removed.
         self.assertIn("exactly one recipient", str(ctx.exception))
+
+    def test_guard_still_fires_under_python_dash_o(self) -> None:
+        """Gate C1a: the guard is `if ...: raise`, not `assert`, so it must
+        survive python -O / PYTHONOPTIMIZE (which compiles out every
+        `assert` statement) -- proven by actually running under -O, not
+        just by code inspection."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        probe = Path(__file__).parent / "_unsafe_recipient_probe.py"
+        result = subprocess.run(
+            [sys.executable, "-O", str(probe)],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertIn("GUARD_FIRED", result.stdout, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

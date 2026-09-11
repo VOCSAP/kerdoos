@@ -19,7 +19,8 @@ from kerdoos.config import (
     DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
     DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_SMTP_PORT,
     DEFAULT_SMTP_RETRY_ATTEMPTS, DEFAULT_SMTP_RETRY_BACKOFF_SECONDS,
-    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS, get_settings,
+    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS,
+    MAX_SMTP_RETRY_ATTEMPTS, MIN_SMTP_RETRY_BACKOFF_SECONDS, get_settings,
 )
 
 _SMTP_ENV_VARS = (
@@ -231,6 +232,38 @@ class SmtpRetryFloorTest(_SettingsTestBase):
             settings = get_settings()
         self.assertEqual(
             settings.smtp_retry_backoff_seconds, DEFAULT_SMTP_RETRY_BACKOFF_SECONDS)
+
+    def test_attempts_above_the_cap_floors_to_default_with_warning(self) -> None:
+        # Gate LOW: the send_deadline_seconds budget bounds TIME, not the
+        # NUMBER of attempts -- an unbounded count with a relay that
+        # refuses instantly is a tight reconnect loop.
+        os.environ["KERDOOS_SMTP_RETRY_ATTEMPTS"] = str(MAX_SMTP_RETRY_ATTEMPTS + 1)
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.smtp_retry_attempts, DEFAULT_SMTP_RETRY_ATTEMPTS)
+        self.assertTrue(
+            any("KERDOOS_SMTP_RETRY_ATTEMPTS" in msg for msg in cm.output), cm.output)
+
+    def test_max_attempts_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_SMTP_RETRY_ATTEMPTS"] = str(MAX_SMTP_RETRY_ATTEMPTS)
+        settings = get_settings()
+        self.assertEqual(settings.smtp_retry_attempts, MAX_SMTP_RETRY_ATTEMPTS)
+
+    def test_zero_backoff_floors_to_default_with_warning(self) -> None:
+        # Gate LOW: backoff=0 combined with an instantly-refusing relay is
+        # the same tight-reconnect-loop risk as an unbounded attempt count.
+        os.environ["KERDOOS_SMTP_RETRY_BACKOFF_SECONDS"] = "0"
+        with self.assertLogs("kerdoos.config", level="WARNING"):
+            settings = get_settings()
+        self.assertEqual(
+            settings.smtp_retry_backoff_seconds, DEFAULT_SMTP_RETRY_BACKOFF_SECONDS)
+
+    def test_min_backoff_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_SMTP_RETRY_BACKOFF_SECONDS"] = str(
+            MIN_SMTP_RETRY_BACKOFF_SECONDS)
+        settings = get_settings()
+        self.assertEqual(
+            settings.smtp_retry_backoff_seconds, MIN_SMTP_RETRY_BACKOFF_SECONDS)
 
 
 class WorkersFloorTest(_SettingsTestBase):

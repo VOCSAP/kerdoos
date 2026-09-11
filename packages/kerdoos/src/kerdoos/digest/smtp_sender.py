@@ -62,11 +62,16 @@ point without an explicit 4xx -- a dropped connection, a raw timeout, a
 5xx reply, a capability/credential rejection -- is ambiguous or permanent
 and propagates unchanged, exactly as before this roadmap item (no retry,
 job_runs='error', window consumed). A self-imposed absolute deadline
-(SmtpSettings.send_deadline_seconds, computed once at the start of send())
-is checked before every attempt and before every backoff sleep, so a
-thread that outlives the evaluator's own wait_for budget (roadmap
-3c0b1c80's orphan problem) can never start a further attempt after that
-budget is spent, even though nothing can kill it from the outside.
+(SmtpSettings.send_deadline_seconds, computed once at the start of send(),
+set by digest.factory.build_sender with a margin below the reaper's own
+budget) is checked, multiplied by _MAX_OPS_PER_ATTEMPT, before every
+attempt and before every backoff sleep -- this guarantees only that no
+NEW attempt STARTS once that budget is exhausted. It does NOT guarantee
+an in-flight attempt finishes by the evaluator's own wait_for deadline
+(one attempt is several smtplib operations, each its own timeout_seconds
+window); no double-send follows either way (the primary key plus the
+non-deleting reaper still hold), only a job_runs='error' the reaper can
+later reap if the process outlives it.
 """
 
 from __future__ import annotations
@@ -123,6 +128,24 @@ class _RetryableSmtpFailure(Exception):
     def __init__(self, original: BaseException) -> None:
         super().__init__(str(original))
         self.original = original
+
+
+class _UnsafeRecipientError(Exception):
+    """Raised (never asserted -- `assert` statements are compiled out
+    under python -O / PYTHONOPTIMIZE, which would silently disable this
+    security guard) when the retry-safety single-recipient invariant is
+    violated: either to_addr itself looks like more than one address, or
+    send_message() refused some but not all recipients."""
+
+
+# One retry "attempt" (_send_smtp_once) is NOT one timeout_seconds window:
+# it is a SEQUENCE of smtplib operations, each individually bounded by
+# timeout_seconds but not collectively -- connect+banner, EHLO, STARTTLS,
+# EHLO-after-TLS, AUTH, MAIL FROM, RCPT TO, DATA-prompt, DATA-final-reply.
+# A remaining-budget check using a bare timeout_seconds could therefore
+# start an attempt that keeps running well past send_deadline_seconds.
+# This is a conservative round number, not an exact count.
+_MAX_OPS_PER_ATTEMPT = 8
 
 
 def _is_retryable_connect_failure(exc: BaseException) -> bool:
@@ -196,10 +219,11 @@ def _send_smtp_once(smtp: SmtpSettings, message: EmailMessage) -> None:
         # module), so refused must always be empty; a non-empty dict here
         # would mean that invariant broke, and silently returning "sent"
         # would be worse than failing loud.
-        assert not refused, (
-            f"SmtpDigestSender: send_message() refused some but not all "
-            f"recipients ({refused!r}) -- retry-safety assumes exactly one "
-            f"recipient, this violates that invariant")
+        if refused:
+            raise _UnsafeRecipientError(
+                f"SmtpDigestSender: send_message() refused some but not all "
+                f"recipients ({refused!r}) -- retry-safety assumes exactly one "
+                f"recipient, this violates that invariant")
 
 
 class SmtpDigestSender:
@@ -235,10 +259,12 @@ class SmtpDigestSender:
         # exactly ONE recipient (a partial accept/refuse split is then
         # impossible) -- measured: owners.email is a single TEXT column
         # (registry.auth_store.SqliteAuthStore.get_email), no Cc/Bcc
-        # anywhere in this module. Guard the assumption instead of
-        # silently trusting it.
-        assert "," not in to_addr, (
-            f"SmtpDigestSender expects exactly one recipient, got {to_addr!r}")
+        # anywhere in this module, and auth.py's _EMAIL_RE rejects a comma
+        # at write time. This is a second, independent rampart (a row
+        # written before that regex tightening could still carry one).
+        if "," in to_addr:
+            raise _UnsafeRecipientError(
+                f"SmtpDigestSender expects exactly one recipient, got {to_addr!r}")
 
         # S2: owner-scoped read only -- never a global/unscoped registry sweep.
         registry = self._config.load(job.owner_id)
@@ -264,11 +290,14 @@ class SmtpDigestSender:
 
         # S8 (roadmap f3b644ab): the absolute deadline is computed ONCE
         # here, from this call's own configured timeouts -- checked before
-        # every attempt and before every backoff, so a thread that outlives
-        # the evaluator's wait_for budget can never start a further
-        # attempt after that budget is spent (roadmap 3c0b1c80's orphan
-        # problem: nothing can kill this thread from the outside).
+        # every attempt and before every backoff, so no NEW attempt starts
+        # once that budget is spent (roadmap 3c0b1c80's orphan problem:
+        # nothing can kill this thread from the outside). The threshold is
+        # a full attempt's worst case (_MAX_OPS_PER_ATTEMPT * timeout_
+        # seconds), not a bare timeout_seconds -- one attempt is several
+        # smtplib operations, not one.
         deadline = time.monotonic() + self._smtp.send_deadline_seconds
+        budget_per_attempt = self._smtp.timeout_seconds * _MAX_OPS_PER_ATTEMPT
         attempts_left = self._smtp.retry_attempts + 1
         while True:
             attempts_left -= 1
@@ -279,14 +308,14 @@ class SmtpDigestSender:
                 if attempts_left <= 0:
                     raise wrapped.original from None
                 remaining = deadline - time.monotonic()
-                if remaining < self._smtp.timeout_seconds:
+                if remaining < budget_per_attempt:
                     raise wrapped.original from None
                 backoff = min(
                     self._smtp.retry_backoff_seconds,
-                    remaining - self._smtp.timeout_seconds)
+                    remaining - budget_per_attempt)
                 if backoff > 0:
                     time.sleep(backoff)
-                if deadline - time.monotonic() < self._smtp.timeout_seconds:
+                if deadline - time.monotonic() < budget_per_attempt:
                     raise wrapped.original from None
 
 

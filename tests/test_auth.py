@@ -296,6 +296,18 @@ class SetEmailTest(_AuthTestBase):
             conn.close()
         self.assertIsNone(email)   # rejected before it ever reached the store
 
+    def test_forbidden_characters_rejected(self) -> None:
+        # roadmap f3b644ab gate C1: any of these lets a stored value be
+        # reinterpreted as multiple addresses or forge header structure
+        # once placed in an email "To" header -- first line of defense,
+        # rejected at write time regardless of downstream guards.
+        self._add_owner("o1", "alice", "pw", email=None)
+        for forbidden in (",", ";", "<", ">", '"', "(", ")"):
+            with self.subTest(forbidden=forbidden):
+                with self.assertRaises(ValueError):
+                    self.service.set_email(
+                        Principal("o1", "user"), f"alice{forbidden}@example.com")
+
     def test_collision_rejected_as_named_error(self) -> None:
         self._add_owner("o1", "alice", "pw", email="taken@example.com")
         self._add_owner("o2", "bob", "pw", email=None)

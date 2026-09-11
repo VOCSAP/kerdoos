@@ -40,8 +40,13 @@ DEFAULT_TOKEN_TTL = timedelta(days=90)
 
 # Basic format check only (not RFC 5322): "something@something.tld". The
 # store enforces real uniqueness; this just rejects obviously-malformed input
-# before it ever reaches SQL.
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# before it ever reaches SQL. Also excludes , ; < > " ( ) -- roadmap
+# f3b644ab gate C1: a comma in the local part passed the old pattern and
+# let a stored value be reinterpreted as TWO recipients once placed in an
+# email "To" header (digest.smtp_sender's retry-safety reasoning assumes
+# exactly one recipient); the other characters can forge address/header
+# structure the same way.
+_EMAIL_RE = re.compile(r'^[^@\s,;<>"()]+@[^@\s,;<>"()]+\.[^@\s,;<>"()]+$')
 
 
 def _utcnow() -> datetime:

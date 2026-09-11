@@ -95,6 +95,14 @@ DEFAULT_SMTP_TIMEOUT_SECONDS = 30
 DEFAULT_SMTP_RETRY_ATTEMPTS = 2
 DEFAULT_SMTP_RETRY_BACKOFF_SECONDS = 2.0
 
+# The send_deadline_seconds budget bounds TIME, not the NUMBER of
+# attempts -- with backoff=0 and a relay that refuses instantly, an
+# unbounded attempt count is a tight reconnect loop (risks the relay
+# banning this host). MAX caps attempts; MIN floors backoff so every
+# retry cycle costs at least a beat.
+MAX_SMTP_RETRY_ATTEMPTS = 5
+MIN_SMTP_RETRY_BACKOFF_SECONDS = 1.0
+
 # Single-process default (ADR 0003 Decision 4).
 DEFAULT_WORKERS = 1
 
@@ -227,10 +235,11 @@ def get_settings() -> Settings:
             float, lambda v: True),
         smtp_retry_attempts=_env_number(
             "KERDOOS_SMTP_RETRY_ATTEMPTS", DEFAULT_SMTP_RETRY_ATTEMPTS, int,
-            lambda v: v >= 0),
+            lambda v: 0 <= v <= MAX_SMTP_RETRY_ATTEMPTS),
         smtp_retry_backoff_seconds=_env_number(
             "KERDOOS_SMTP_RETRY_BACKOFF_SECONDS",
-            DEFAULT_SMTP_RETRY_BACKOFF_SECONDS, float, lambda v: v >= 0),
+            DEFAULT_SMTP_RETRY_BACKOFF_SECONDS, float,
+            lambda v: v >= MIN_SMTP_RETRY_BACKOFF_SECONDS),
         digest_reaper_timeout_seconds=_env_number(
             "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
             DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, int, lambda v: v > 0),
