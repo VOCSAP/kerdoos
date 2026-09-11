@@ -63,10 +63,15 @@ class _FakeFetcher:
 class _StubRouter:
     """Router.select keyed by fetcher_name. A mapped BaseException instance
     is raised instead of returning a Fetcher, to simulate a per-source
-    routing failure."""
+    routing failure. tier_available defaults to always-True (this double
+    models routing, not deployment-tier availability) -- pass `unavailable`
+    to simulate card 3aeb8a19's guard rejecting specific tiers."""
 
-    def __init__(self, mapping: dict[str, object]) -> None:
+    def __init__(
+        self, mapping: dict[str, object], unavailable: frozenset[str] = frozenset(),
+    ) -> None:
         self._mapping = mapping
+        self._unavailable = unavailable
 
     def select(self, fetcher_name: str, subresource_domains=()):
         target = self._mapping[fetcher_name]
@@ -75,10 +80,7 @@ class _StubRouter:
         return target
 
     def tier_available(self, fetcher_name: str) -> bool:
-        # This double models routing (select), never deployment-tier
-        # availability (card 3aeb8a19) -- always report available so
-        # AppService.add_source/run_now's new guard is a no-op here.
-        return True
+        return fetcher_name not in self._unavailable
 
 
 class _FakeParser:
@@ -258,6 +260,35 @@ class PlanAScrapeDedupTest(_EvaluatorTestBase):
         )
         self.assertEqual(summary.scraped_sources, 1)
         self.assertEqual(summary.errors, 1)
+        self.assertEqual(self.fetcher.calls, ["https://www.kabum.com.br/p/1"])
+
+    async def test_source_with_unavailable_tier_writes_no_record_across_ticks(
+        self,
+    ) -> None:
+        # Card 3aeb8a19 BLOCKER: _run_plan_a is the PRODUCTION scrape path
+        # (WebUI lifespan evaluator + `kerdoos digest` cron) -- it must skip
+        # an unavailable tier identically to AppService.run_now, not just log
+        # an error and retry forever every tick.
+        good_sid = self._add_source(
+            "owner1", "p1", "https://www.kabum.com.br/p/1", site="kabum")
+        bad_sid = self._add_source(
+            "owner1", "p2", "https://broken.example/p/2", site="brokensite")
+        self.service.create_job(
+            Principal(owner_id="owner1"),
+            DigestJobSpec(name="job1", frequency_kind="hourly",
+                          source_ids=(good_sid, bad_sid)))
+        router = _StubRouter(
+            {"http": self.fetcher, "broken": RuntimeError("must not be called")},
+            unavailable=frozenset({"broken"}),
+        )
+        for _ in range(2):
+            summary = await evaluate_tick(
+                config_store=self.config, state_store=self.state,
+                router=router, parser_factory=_fake_parser_factory,
+                sender=_RecordingSender(),
+            )
+        self.assertEqual(summary.errors, 0)
+        self.assertEqual(self.state.history("owner1", bad_sid, limit=10), [])
         self.assertEqual(self.fetcher.calls, ["https://www.kabum.com.br/p/1"])
 
 

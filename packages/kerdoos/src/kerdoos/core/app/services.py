@@ -21,10 +21,11 @@ from autolycos.ports import Router
 from autolycos.safety import DomainPolicy
 
 from kerdoos.core.domain import Availability, ScrapeStatus
+from kerdoos.core.fetcher_guard import tier_unavailable
 from kerdoos.core.orchestrator import scrape_and_record
 from kerdoos.parsers.ports import Parser, ParserSpec
 from kerdoos.persistence.ports import ScrapeRecord, StateStore
-from kerdoos.registry.errors import FetcherTierUnavailableError
+from kerdoos.registry.errors import ConfigError, FetcherTierUnavailableError
 from kerdoos.registry.ports import (
     DigestJob,
     MutableConfigStore,
@@ -152,6 +153,14 @@ class AppService:
             raise PermissionError(
                 f"principal {principal.owner_id!r} (role={principal.role!r}) "
                 "is not allowed to add a site"
+            )
+        # A fetcher name typo (e.g. "uC") would otherwise fall through to
+        # select()'s UnknownFetcherError at every scrape, forever -- same
+        # class of defect as an unavailable tier (card 3aeb8a19 MAJOR).
+        if spec.fetcher not in self._router.known_tiers():
+            raise ConfigError(
+                f"site {spec.name!r} references unknown fetcher tier "
+                f"{spec.fetcher!r} (known: {sorted(self._router.known_tiers())})"
             )
         self._config.add_site(spec)
         return spec
@@ -289,14 +298,9 @@ class AppService:
         for _product, source, site in registry.iter_sources():
             if site.tier2_label:
                 tier2_labels[source.source_id] = site.tier2_label
-            # Deployment-mismatch skip (card 3aeb8a19): a source added before
-            # this guard existed (or before a redeploy from autonomous to
-            # slim) can still reference an unavailable tier. Skip it -- same
-            # treatment as a source absent from the registry (invariant #3) --
-            # instead of writing an INDETERMINATE record every cadence
-            # forever, which add_source's guard alone cannot retroactively
-            # prevent. No record for this source this cycle.
-            if not self._router.tier_available(site.fetcher):
+            # Skip sources whose tier is not installed here: an INDETERMINATE
+            # record would replay a permanent deployment error every cadence.
+            if tier_unavailable(self._router, site):
                 continue
             # Per-source guard (invariants #3/#8): a failing source (unknown
             # fetcher/parser tier, store error, ...) must never abort the run

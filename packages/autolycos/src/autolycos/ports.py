@@ -61,3 +61,11 @@ class Router(Protocol):
         succeed" without triggering the very deferred import it is trying to
         avoid on a deployment image that lacks the tier's tool."""
         ...
+
+    def known_tiers(self) -> frozenset[str]:
+        """Every fetcher tier name this router can ever resolve (independent
+        of whether its optional dependency is installed here). Lets core/
+        reject a fetcher NAME typo (e.g. "uC") at add_site time instead of
+        it falling through to select()'s UnknownFetcherError at every
+        scrape."""
+        ...

@@ -46,6 +46,7 @@ from croniter import croniter
 
 from autolycos.ports import Router
 
+from kerdoos.core.fetcher_guard import tier_unavailable
 from kerdoos.core.orchestrator import scrape_and_record
 from kerdoos.core.scheduler import compute_window_start
 from kerdoos.parsers.ports import Parser, ParserSpec
@@ -157,6 +158,11 @@ async def _run_plan_a(
             if history and (tick_now - _parse_ts(history[0].ts)) < period:
                 continue  # fresh enough, no scrape needed this tick
             _product, source, site = entry
+            # Skip sources whose tier is not installed here: an INDETERMINATE
+            # record would replay a permanent deployment error every cadence
+            # (card 3aeb8a19; same guard as AppService.run_now).
+            if tier_unavailable(router, site):
+                continue
             fetcher = router.select(site.fetcher, site.subresource_domains)
             parser = parser_factory(site.parser)
             await asyncio.to_thread(

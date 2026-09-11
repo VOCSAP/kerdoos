@@ -197,8 +197,12 @@ class ProductsCsrfTest(_WebUITestBase):
 
     def test_add_source_unavailable_tier_is_400_not_500(self):
         # Card 3aeb8a19: a site needing a fetcher tier this deployment lacks
-        # (uc/seleniumbase not installed in this test venv, confirmed absent)
         # must be rejected as a domain error (4xx), not crash to a 500.
+        # Forced missing rather than relied-upon-absent: this must stay red
+        # for the right reason even in a full (autonomous) venv.
+        from unittest import mock
+
+        from autolycos import router as router_mod
         from kerdoos.parsers.ports import ParserSpec
         from kerdoos.registry.ports import SiteConfig
         store = SqliteConfigStore(self.config_db)
@@ -212,11 +216,15 @@ class ProductsCsrfTest(_WebUITestBase):
         token = self._csrf()
         self.client.post(
             "/products", data={"product_key": "tv55", "csrf_token": token})
-        resp = self.client.post(
-            "/sources",
-            data={"product_key": "tv55", "site": "magalu",
-                  "url": "https://www.magazineluiza.com.br/p/1",
-                  "csrf_token": token})
+        with mock.patch.dict(
+            router_mod._TIER_MODULES,
+            {"uc": "kerdoos_test_definitely_not_a_real_module_xyz"},
+        ):
+            resp = self.client.post(
+                "/sources",
+                data={"product_key": "tv55", "site": "magalu",
+                      "url": "https://www.magazineluiza.com.br/p/1",
+                      "csrf_token": token})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Source refusée", resp.text)
 

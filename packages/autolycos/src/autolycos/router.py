@@ -93,6 +93,12 @@ def tier_available(fetcher_name: str) -> bool:
     return importlib.util.find_spec(module) is not None
 
 
+def known_tiers() -> frozenset[str]:
+    """Every fetcher tier name select() can ever resolve, regardless of
+    whether its optional dependency is installed (mirrors _FACTORIES)."""
+    return frozenset(_TIER_MODULES)
+
+
 class UnknownFetcherError(KeyError):
     """The site config references a fetcher tier with no adapter wired."""
 
@@ -122,3 +128,6 @@ class StaticRouter:
 
     def tier_available(self, fetcher_name: str) -> bool:
         return tier_available(fetcher_name)
+
+    def known_tiers(self) -> frozenset[str]:
+        return known_tiers()

@@ -1,19 +1,14 @@
 """Deployment-mismatch guard for an unavailable fetcher tier (card 3aeb8a19).
 
-A site's configured fetcher tier (SiteConfig.fetcher) can require an optional
-dependency not installed on THIS deployment image (e.g. a `browser`/`uc` site
-on a `slim` build). Before this fix, that surfaced only at the first scrape as
-a ModuleNotFoundError, caught by services.py's broad per-source except and
-replayed forever as ScrapeStatus.INDETERMINATE. This file exercises the three
-guards that replace that: autolycos.router.tier_available (detection),
-AppService.add_source (reject at write time), AppService.run_now (skip at
-scrape time, zero records) -- plus the cross-owner read and the boot-time log
-that make the condition operator-visible.
+Exercises tier_available/known_tiers detection, the add_source/add_site/
+run_now guards, the cross-owner read, and the WebUI/CLI boot-time log.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -24,14 +19,15 @@ from autolycos import router as router_mod
 from autolycos.ports import FetchResult
 from autolycos.router import StaticRouter, tier_available
 
-from kerdoos.core.app.services import AppService, ProductSpec
+from kerdoos.core.app.services import AppService, Principal, ProductSpec
 from kerdoos.core.domain import Availability, Extract, ScrapeStatus
 from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
+from kerdoos.interfaces.cli import main as cli
 from kerdoos.parsers.factory import build_parser
 from kerdoos.parsers.ports import ParserSpec
 from kerdoos.persistence.sqlite_store import SqliteStateStore
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
-from kerdoos.registry.errors import FetcherTierUnavailableError
+from kerdoos.registry.errors import ConfigError, FetcherTierUnavailableError
 from kerdoos.registry.ports import SiteConfig
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 
@@ -151,6 +147,31 @@ class AddSourceGuardTest(_AppServiceTestBase):
         self.assertEqual(source.site, "kabum")
 
 
+class AddSiteUnknownTierTest(_AppServiceTestBase):
+    def test_typo_d_tier_name_is_rejected(self) -> None:
+        # A typo ("uC") is a different defect than a genuinely unavailable
+        # KNOWN tier -- it would otherwise fall through to select()'s
+        # UnknownFetcherError at every scrape, forever (card 3aeb8a19 MAJOR).
+        typo_site = SiteConfig(
+            name="typo-site", fetcher="uC", domain="example.com.br",
+            parser=ParserSpec(kind="statejson", pix="a", card="b",
+                              availability="c"),
+        )
+        with self.assertRaises(ConfigError):
+            self.service.add_site(
+                Principal(owner_id="root", role="admin"), typo_site)
+        self.assertNotIn(
+            "typo-site", self.service.list_config("owner1").sites)
+
+    def test_known_tier_is_unaffected(self) -> None:
+        new_site = SiteConfig(
+            name="terabyte", fetcher="tls", domain="terabyteshop.com.br",
+            parser=ParserSpec(kind="dom", pix="a", card="b", availability="c"),
+        )
+        self.service.add_site(Principal(owner_id="root", role="admin"), new_site)
+        self.assertIn("terabyte", self.service.list_config("owner1").sites)
+
+
 class RunNowSkipTest(_AppServiceTestBase):
     def setUp(self) -> None:
         super().setUp()
@@ -260,6 +281,72 @@ class BootLogTest(_AppServiceTestBase):
         with mock.patch.object(logger, "error") as spy:
             log_unavailable_fetcher_tiers(self.config)  # must not raise
         spy.assert_not_called()
+
+
+class _BootWiringTestBase(unittest.TestCase):
+    """Seeds a real config.db with a magalu (uc) source, THROUGH AppService
+    (not log_unavailable_fetcher_tiers directly), so these tests fail if
+    create_app()/cmd_run/cmd_digest stop calling the boot check -- unlike
+    BootLogTest above, which only proves the helper itself works."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="kerdoos-boot-wiring-")
+        self.addCleanup(shutil.rmtree, self._dir, ignore_errors=True)
+        self.config_db = os.path.join(self._dir, "config.db")
+        self.state_db = os.path.join(self._dir, "state.db")
+        config = SqliteConfigStore(self.config_db)
+        try:
+            config.add_site(SiteConfig(
+                name="magalu", fetcher="uc",
+                parser=ParserSpec(kind="statejson"),
+                domain="magazineluiza.com.br"))
+            with _tier_forced_available("uc"):
+                service = AppService(
+                    config, SqliteStateStore(self.state_db), StaticRouter(
+                        CatalogueDomainPolicy(config)),
+                    CatalogueDomainPolicy(config), build_parser)
+                service.add_product("owner1", ProductSpec("tv55"))
+                service.add_source(
+                    "owner1", "tv55", "magalu",
+                    "https://www.magazineluiza.com.br/p/1")
+        finally:
+            config.close()
+
+
+class WebAppBootWiringTest(_BootWiringTestBase):
+    def test_create_app_logs_the_unavailable_tier(self) -> None:
+        from kerdoos.interfaces.web.app import create_app
+
+        env = {
+            "KERDOOS_SESSION_SECRET": "test-session-secret-padded-to-32chars",
+            "KERDOOS_CONFIG_DB": self.config_db,
+            "KERDOOS_STATE_DB": self.state_db,
+            "KERDOOS_COOKIE_SECURE": "false",
+        }
+        with mock.patch.dict(os.environ, env), _tier_forced_missing("uc"), \
+             self.assertLogs(
+                "kerdoos.interfaces.boot_checks", level="ERROR") as cm:
+            create_app()
+        self.assertIn("uc", cm.output[0])
+
+
+class CliBootWiringTest(_BootWiringTestBase):
+    def _args(self, *extra: str):
+        return cli.build_parser_cli().parse_args([
+            *extra, "--config-db", self.config_db, "--db", self.state_db,
+        ])
+
+    def test_cmd_run_logs_the_unavailable_tier(self) -> None:
+        with _tier_forced_missing("uc"), self.assertLogs(
+            "kerdoos.interfaces.boot_checks", level="ERROR") as cm:
+            cli.cmd_run(self._args("run", "--owner", "owner1"))
+        self.assertIn("uc", cm.output[0])
+
+    def test_cmd_digest_logs_the_unavailable_tier(self) -> None:
+        with _tier_forced_missing("uc"), self.assertLogs(
+            "kerdoos.interfaces.boot_checks", level="ERROR") as cm:
+            cli.cmd_digest(self._args("digest"))
+        self.assertIn("uc", cm.output[0])
 
 
 if __name__ == "__main__":

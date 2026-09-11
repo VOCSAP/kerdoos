@@ -192,7 +192,10 @@ partage (deps), deux targets finaux -> deux tags :
   sur cette image est fail-closed PAR SOURCE : signale une fois au demarrage
   (log), refuse tout ajout d'une nouvelle source vers ce site, et chaque source
   deja configuree est ignoree au scrape (aucun ScrapeRecord ecrit) au lieu
-  d'etre rejouee indefiniment en INDETERMINATE (card 3aeb8a19).
+  d'etre rejouee indefiniment en INDETERMINATE (card 3aeb8a19). La detection
+  ne verifie que la PRESENCE du paquet Python (`importlib.util.find_spec`) :
+  un `seleniumbase` installe sans navigateur Chrome disponible est quand
+  meme compte comme "disponible" -- perimetre assume, pas couvert ici.
 - **`kerdoos:autonomous`** : + tiers `browser` (patchright) + `uc` (seleniumbase).
   Embarque le Chromium **de patchright** (pas celui de playwright vanilla).
 
