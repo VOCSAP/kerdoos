@@ -293,7 +293,15 @@ semaphore d'envoi par instance (`max_concurrent_sends`, defaut 1) et un plafond 
 threads d'envoi orphelins (au-dela, l'envoi est refuse sans consommer la fenetre) ;
 cote memoire, la porte Chromium (`KERDOOS_BROWSER_MAX_CONCURRENT`, ADR 0002
 Decision 2). La **detection de backlog** recommandee par -5 (metrique de profondeur
-de file + warning WebUI) n'est **pas implementee** (carte 3c557a9c). Le
+de file + warning WebUI) est **partiellement implementee** (carte 3c557a9c). Cote
+`run_now`, la `RunQueue` expose une profondeur de file : le nombre d'owners
+**distincts** en file ou en cours, puisque les demandes sont fusionnees par owner et
+que le consumer traite un owner a la fois. Quand cette profondeur atteint
+`KERDOOS_RUN_QUEUE_BACKLOG_WARN_THRESHOLD` (defaut 5 ; 0 desactive), un WARNING est
+journalise une seule fois par franchissement (reamorce quand la profondeur repasse
+sous le seuil), et le tableau de bord affiche un bandeau reserve au role admin. Cote
+envoi (Plan B), il n'y a pas de metrique de backlog : le semaphore d'envoi et le
+plafond de threads orphelins (carte 3c0b1c80) bornent deja le backlog d'envoi. Le
 singleton-par-job est **remonte a l'operateur pour confirmation** (Q-g).
 
 ### Options ecartees
@@ -457,7 +465,8 @@ gate code Phase 6.
   (coalescing)** minimum vital + plafonds de concurrence + detection de backlog
   (detaille en D4). Realisation : aucune file commune ; le singleton par job, le
   semaphore d'envoi, le plafond d'orphelins d'envoi et la porte Chromium sont en
-  place, la detection de backlog ne l'est pas (D4). Distinct du garde-fou frequence
+  place ; la detection de backlog est partielle (profondeur et seuil d'avertissement
+  cote `run_now`, pas de metrique cote envoi, D4). Distinct du garde-fou frequence
   (D7).
 - **S5 [LOW/CONFIRME] SSTI ferme** par l'approche liste-blanche (D5) : templates
   dev-authored versionnes + options = enum ferme, jamais du texte libre injecte dans la
