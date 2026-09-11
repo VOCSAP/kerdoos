@@ -2,8 +2,8 @@
 
 Top escalation tier for sites behind Akamai Bot Manager (Magazine Luiza): plain
 requests get 403, curl_cffi and Playwright receive the Akamai challenge; only a
-real undetected Chrome (SeleniumBase UC, headful under xvfb) resolves the JS
-challenge. This adapter is the ONLY reason the uc tier exists.
+real undetected Chrome (SeleniumBase UC, headless) resolves the JS challenge.
+This adapter is the ONLY reason the uc tier exists.
 
 Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
   * validate_target runs FIRST, before SeleniumBase is imported and before Chrome
