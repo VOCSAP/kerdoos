@@ -261,12 +261,14 @@ class BrowserFetcher:
                  gate: BrowserGate | None = None,
                  launch_timeout_seconds: float = BROWSER_LAUNCH_TIMEOUT_SECONDS,
                  fetch_timeout_seconds: float = BROWSER_FETCH_TIMEOUT_SECONDS,
+                 max_abandoned_fetches: int = MAX_ABANDONED_FETCH_THREADS,
                  ) -> None:
         self._domain_policy = domain_policy
         self._subresource_domains = _normalize_domains(subresource_domains)
         self._gate = gate if gate is not None else default_browser_gate()
         self._launch_timeout_seconds = launch_timeout_seconds
         self._fetch_timeout_seconds = fetch_timeout_seconds
+        self._max_abandoned_fetches = max_abandoned_fetches
 
     def _subresource_allowed(self, host: str) -> bool:
         """Suffix-match a request host against the render-CDN allowlist."""
@@ -283,11 +285,19 @@ class BrowserFetcher:
         global _abandoned_fetch_thread_count
         with _abandoned_fetch_threads_lock:
             abandoned_now = _abandoned_fetch_thread_count
-            refuse = abandoned_now >= MAX_ABANDONED_FETCH_THREADS
+            refuse = abandoned_now >= self._max_abandoned_fetches
         if refuse:
+            # ERROR, not just the FetchError raised below: this is the only
+            # signal an operator gets before the caller degrades this to an
+            # upstream INDETERMINATE, which looks like an anti-bot block, not
+            # a resource-exhaustion refusal.
+            logger.error(
+                "browser tier: refusing new fetch, %d abandoned fetch(es) "
+                "at or above ceiling %d", abandoned_now,
+                self._max_abandoned_fetches)
             raise FetchError(
                 f"browser tier refused: {abandoned_now} abandoned fetch(es) "
-                f"not yet resolved (ceiling {MAX_ABANDONED_FETCH_THREADS})")
+                f"not yet resolved (ceiling {self._max_abandoned_fetches})")
 
         sync_playwright = _load_playwright()
         stealth_cls = _load_stealth()

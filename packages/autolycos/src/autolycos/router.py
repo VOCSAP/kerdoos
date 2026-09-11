@@ -41,7 +41,8 @@ def _make_browser(domain_policy: DomainPolicy,
                    subresource_domains: Iterable[str],
                    browser_gate: BrowserGate,
                    launch_timeout_seconds: float | None = None,
-                   fetch_timeout_seconds: float | None = None) -> Fetcher:
+                   fetch_timeout_seconds: float | None = None,
+                   max_abandoned_fetches: int | None = None) -> Fetcher:
     # Deferred import: Playwright is optional and only needed for the browser
     # tier (SPA sites whose price is injected by client-side JS). The per-site
     # render-CDN sub-resource allowlist flows in here.
@@ -52,6 +53,8 @@ def _make_browser(domain_policy: DomainPolicy,
         kwargs["launch_timeout_seconds"] = launch_timeout_seconds
     if fetch_timeout_seconds is not None:
         kwargs["fetch_timeout_seconds"] = fetch_timeout_seconds
+    if max_abandoned_fetches is not None:
+        kwargs["max_abandoned_fetches"] = max_abandoned_fetches
     return BrowserFetcher(domain_policy, subresource_domains, browser_gate, **kwargs)
 
 
@@ -141,6 +144,7 @@ class StaticRouter:
         browser_launch_timeout_seconds: float | None = None,
         uc_orphan_sweep_delay_seconds: float | None = None,
         browser_fetch_timeout_seconds: float | None = None,
+        browser_max_abandoned_fetches: int | None = None,
     ) -> None:
         self._domain_policy = domain_policy
         # Defaults to the SAME module-level singleton as a directly-
@@ -151,11 +155,12 @@ class StaticRouter:
         # None leaves each tier's own default in effect.
         # KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071),
         # KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS (roadmap b3213f3c),
-        # KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce) and
-        # KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS (roadmap d8b7b8fd) are
+        # KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce),
+        # KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS and
+        # KERDOOS_BROWSER_MAX_ABANDONED_FETCHES (roadmap d8b7b8fd) are
         # injected by the kerdoos composition root -- autolycos itself never
         # reads any of these env vars (invariant 2).
-        self._extra_kwargs: dict[str, dict[str, float]] = {}
+        self._extra_kwargs: dict[str, dict[str, float | int]] = {}
         if uc_launch_timeout_seconds is not None:
             self._extra_kwargs.setdefault("uc", {})[
                 "launch_timeout_seconds"] = uc_launch_timeout_seconds
@@ -168,6 +173,9 @@ class StaticRouter:
         if browser_fetch_timeout_seconds is not None:
             self._extra_kwargs.setdefault("browser", {})[
                 "fetch_timeout_seconds"] = browser_fetch_timeout_seconds
+        if browser_max_abandoned_fetches is not None:
+            self._extra_kwargs.setdefault("browser", {})[
+                "max_abandoned_fetches"] = browser_max_abandoned_fetches
         self._cache: dict[tuple[str, frozenset[str]], Fetcher] = {}
 
     def select(

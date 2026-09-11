@@ -126,6 +126,7 @@ from typing import TypeVar
 from autolycos.adapters.browser import (
     BROWSER_FETCH_TIMEOUT_SECONDS as _BROWSER_TIER_FETCH_TIMEOUT_SECONDS,
     BROWSER_LAUNCH_TIMEOUT_SECONDS as _BROWSER_TIER_LAUNCH_TIMEOUT_SECONDS,
+    MAX_ABANDONED_FETCH_THREADS as _BROWSER_TIER_MAX_ABANDONED_FETCHES,
     NAV_TIMEOUT_MS as _BROWSER_TIER_NAV_TIMEOUT_MS,
 )
 from autolycos.adapters.uc import (
@@ -237,6 +238,10 @@ DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS = float(
 DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS = float(
     _BROWSER_TIER_FETCH_TIMEOUT_SECONDS)
 
+# Roadmap d8b7b8fd: single source of truth shared with the browser tier
+# itself (same rationale as DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS above).
+DEFAULT_BROWSER_MAX_ABANDONED_FETCHES = _BROWSER_TIER_MAX_ABANDONED_FETCHES
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -268,6 +273,7 @@ class Settings:
     login_rate_limit_row_cap: int
     uc_orphan_sweep_delay_seconds: float
     browser_fetch_timeout_seconds: float
+    browser_max_abandoned_fetches: int
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -416,6 +422,9 @@ def get_settings() -> Settings:
     browser_fetch_timeout_seconds = _env_number(
         "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS",
         DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    browser_max_abandoned_fetches = _env_number(
+        "KERDOOS_BROWSER_MAX_ABANDONED_FETCHES",
+        DEFAULT_BROWSER_MAX_ABANDONED_FETCHES, int, lambda v: v > 0)
     _warn_if_browser_fetch_timeout_out_of_order(
         browser_fetch_timeout_seconds, browser_launch_timeout_seconds,
         browser_acquire_timeout_seconds)
@@ -471,6 +480,7 @@ def get_settings() -> Settings:
         uc_launch_timeout_seconds=uc_launch_timeout_seconds,
         browser_launch_timeout_seconds=browser_launch_timeout_seconds,
         browser_fetch_timeout_seconds=browser_fetch_timeout_seconds,
+        browser_max_abandoned_fetches=browser_max_abandoned_fetches,
         login_rate_limit_window_seconds=_env_number(
             "KERDOOS_LOGIN_RATE_LIMIT_WINDOW_SECONDS",
             DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS, float, lambda v: v > 0),

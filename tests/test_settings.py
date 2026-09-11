@@ -17,10 +17,12 @@ import os
 import unittest
 from unittest import mock
 
+import kerdoos.config as kerdoos_config
 from kerdoos.config import (
     DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS,
     DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS,
-    DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS, DEFAULT_BROWSER_MAX_CONCURRENT,
+    DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS,
+    DEFAULT_BROWSER_MAX_ABANDONED_FETCHES, DEFAULT_BROWSER_MAX_CONCURRENT,
     DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
     DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS,
     DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP,
@@ -50,12 +52,22 @@ _SMTP_ENV_VARS = (
     "KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP",
     "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
     "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS",
+    "KERDOOS_BROWSER_MAX_ABANDONED_FETCHES",
 )
 
 
 class _SettingsTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self._saved = {var: os.environ.pop(var, None) for var in _SMTP_ENV_VARS}
+        # The ordering-warning latches are process-wide (warn-once, roadmap
+        # d8b7b8fd), so each test needs a fresh state to observe its own
+        # warning regardless of what an earlier test already triggered.
+        self._saved_below_launch_warned = (
+            kerdoos_config._browser_fetch_timeout_below_launch_warned)
+        self._saved_above_acquire_warned = (
+            kerdoos_config._browser_fetch_timeout_above_acquire_warned)
+        kerdoos_config._browser_fetch_timeout_below_launch_warned = False
+        kerdoos_config._browser_fetch_timeout_above_acquire_warned = False
 
     def tearDown(self) -> None:
         for var, value in self._saved.items():
@@ -63,6 +75,10 @@ class _SettingsTestBase(unittest.TestCase):
                 os.environ.pop(var, None)
             else:
                 os.environ[var] = value
+        kerdoos_config._browser_fetch_timeout_below_launch_warned = (
+            self._saved_below_launch_warned)
+        kerdoos_config._browser_fetch_timeout_above_acquire_warned = (
+            self._saved_above_acquire_warned)
 
 
 class SmtpUnsetDefaultsTest(_SettingsTestBase):
@@ -790,6 +806,53 @@ class BrowserFetchTimeoutOrderingWarningTest(_SettingsTestBase):
         with mock.patch.object(logger, "warning") as spy:
             get_settings()
         spy.assert_not_called()
+
+    def test_same_out_of_order_value_warns_once_across_multiple_calls(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS"] = "40"
+        os.environ["KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS"] = "50"
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+            get_settings()
+            get_settings()
+        self.assertEqual(spy.call_count, 1)
+
+
+class BrowserMaxAbandonedFetchesFloorTest(_SettingsTestBase):
+    """Roadmap d8b7b8fd F3: a malformed or non-positive
+    KERDOOS_BROWSER_MAX_ABANDONED_FETCHES warns and floors to the default
+    instead of crashing at settings-read time -- 0 would refuse every
+    browser-tier fetch unconditionally, indistinguishable from a
+    permanently broken tier, so it is treated the same as any other
+    invalid value."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.browser_max_abandoned_fetches,
+            DEFAULT_BROWSER_MAX_ABANDONED_FETCHES)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_BROWSER_MAX_ABANDONED_FETCHES"] = "10"
+        settings = get_settings()
+        self.assertEqual(settings.browser_max_abandoned_fetches, 10)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_BROWSER_MAX_ABANDONED_FETCHES"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.browser_max_abandoned_fetches,
+                    DEFAULT_BROWSER_MAX_ABANDONED_FETCHES)
+                self.assertTrue(
+                    any("KERDOOS_BROWSER_MAX_ABANDONED_FETCHES" in msg
+                        for msg in cm.output), cm.output)
 
 
 if __name__ == "__main__":

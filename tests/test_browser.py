@@ -708,6 +708,25 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
                             "https://mercadolivre.com.br/p/MLB1")
                     load_pw.assert_not_called()
 
+    def test_ceiling_refusal_logs_at_error_level(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        with mock.patch.object(
+            browser, "_abandoned_fetch_thread_count",
+            browser.MAX_ABANDONED_FETCH_THREADS,
+        ):
+            with mock.patch.object(safety.socket, "getaddrinfo",
+                                   return_value=_addrinfo("104.18.0.1")):
+                with mock.patch.object(browser, "_load_playwright"):
+                    with self.assertLogs(
+                        "autolycos.adapters.browser", level="ERROR"
+                    ) as cm:
+                        with self.assertRaises(FetchError):
+                            browser.BrowserFetcher(_POLICY, gate=gate).fetch(
+                                "https://mercadolivre.com.br/p/MLB1")
+                    self.assertTrue(
+                        any("refusing new fetch" in msg for msg in cm.output),
+                        cm.output)
+
     def test_five_confirmed_kills_never_trip_the_ceiling_sixth_accepted(
             self) -> None:
         """Incrementing the ceiling counter must be tied to whether the
@@ -1004,6 +1023,25 @@ class StaticRouterBrowserFetchTimeoutTest(unittest.TestCase):
         fetcher = router.select("browser")
         self.assertEqual(fetcher._launch_timeout_seconds, 7.0)
         self.assertEqual(fetcher._fetch_timeout_seconds, 42.0)
+
+
+class StaticRouterBrowserMaxAbandonedFetchesTest(unittest.TestCase):
+    """Roadmap d8b7b8fd F3: KERDOOS_BROWSER_MAX_ABANDONED_FETCHES is
+    injected by the kerdoos composition root through
+    StaticRouter/_make_browser -- never read by autolycos itself
+    (invariant 2)."""
+
+    def test_injected_value_reaches_the_built_browser_fetcher(self) -> None:
+        router = StaticRouter(_POLICY, browser_max_abandoned_fetches=9)
+        fetcher = router.select("browser")
+        self.assertEqual(fetcher._max_abandoned_fetches, 9)
+
+    def test_no_value_injected_keeps_the_tier_s_own_default(self) -> None:
+        router = StaticRouter(_POLICY)
+        fetcher = router.select("browser")
+        self.assertEqual(
+            fetcher._max_abandoned_fetches,
+            browser.MAX_ABANDONED_FETCH_THREADS)
 
 
 if __name__ == "__main__":
