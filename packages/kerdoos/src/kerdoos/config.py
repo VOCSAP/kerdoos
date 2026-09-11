@@ -6,7 +6,8 @@ default, required for the WebUI), KERDOOS_CONFIG_DB / KERDOOS_STATE_DB (SQLite
 paths), KERDOOS_COOKIE_SECURE (set the cookie Secure flag; default on, set
 "false" for a plain-http LAN deployment), KERDOOS_WORKERS (process count the
 operator has deployed; drives the digest evaluator's workers>1 guard-rail,
-ADR 0003 Decision 4 -- default "1"), KERDOOS_DIGEST_EVALUATOR_ENABLED (opt-in
+ADR 0003 Decision 4 -- default "1"; a non-integer value floors to the
+default with a warning, roadmap 6697af90), KERDOOS_DIGEST_EVALUATOR_ENABLED (opt-in
 switch for the WebUI's intra-process evaluator lifespan task; default off so
 existing deployments/tests see zero behavior change until explicitly enabled).
 
@@ -68,6 +69,10 @@ DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS = 300
 # strictly below DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS.
 DEFAULT_SMTP_TIMEOUT_SECONDS = 30
 
+# Single-process default (ADR 0003 Decision 4) -- also should_start_intra_
+# process_evaluator's own <= 1 threshold for "safe to start the evaluator".
+DEFAULT_WORKERS = 1
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -119,6 +124,24 @@ def _safe_reaper_timeout(raw: int) -> int:
     return DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS
 
 
+def _safe_workers(raw: str) -> int:
+    """roadmap 6697af90: KERDOOS_WORKERS feeds a bare int() at create_app()
+    import time -- any non-integer value (empty string, text, a value with
+    embedded whitespace) raised an unhandled ValueError on every code path
+    that does not go through the Dockerfile's shell-level case guard (direct
+    uvicorn, the CLI, dev runs). Mirrors _safe_reaper_timeout: fall back to
+    the default with a warning naming the variable and the value received,
+    rather than let a malformed value crash the process."""
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "KERDOOS_WORKERS=%r is not a valid integer: falling back to "
+            "the default (%d).", raw, DEFAULT_WORKERS,
+        )
+        return DEFAULT_WORKERS
+
+
 def get_settings() -> Settings:
     return Settings(
         session_secret=os.environ.get("KERDOOS_SESSION_SECRET"),
@@ -126,7 +149,8 @@ def get_settings() -> Settings:
         state_db=os.environ.get("KERDOOS_STATE_DB", "state.db"),
         cookie_secure=(
             os.environ.get("KERDOOS_COOKIE_SECURE", "true").lower() != "false"),
-        workers=int(os.environ.get("KERDOOS_WORKERS", "1")),
+        workers=_safe_workers(
+            os.environ.get("KERDOOS_WORKERS", str(DEFAULT_WORKERS))),
         digest_evaluator_enabled=(
             os.environ.get("KERDOOS_DIGEST_EVALUATOR_ENABLED", "false").lower()
             == "true"),

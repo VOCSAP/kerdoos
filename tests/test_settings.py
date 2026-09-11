@@ -17,13 +17,14 @@ import unittest
 
 from kerdoos.config import (
     DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, DEFAULT_SMTP_PORT,
-    DEFAULT_SMTP_TIMEOUT_SECONDS, get_settings,
+    DEFAULT_SMTP_TIMEOUT_SECONDS, DEFAULT_WORKERS, get_settings,
 )
 
 _SMTP_ENV_VARS = (
     "KERDOOS_SMTP_HOST", "KERDOOS_SMTP_PORT", "KERDOOS_SMTP_FROM",
     "KERDOOS_SMTP_USERNAME", "KERDOOS_SMTP_PASSWORD", "KERDOOS_SMTP_USE_TLS",
     "KERDOOS_SMTP_TIMEOUT_SECONDS", "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
+    "KERDOOS_WORKERS",
 )
 
 
@@ -128,6 +129,43 @@ class ReaperTimeoutFloorTest(_SettingsTestBase):
         os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "1"
         settings = get_settings()
         self.assertEqual(settings.digest_reaper_timeout_seconds, 1)
+
+
+class WorkersFloorTest(_SettingsTestBase):
+    """roadmap 6697af90: KERDOOS_WORKERS fed a bare int() at create_app()
+    import time -- a malformed value must warn and fall back, never crash
+    the process (the Dockerfile's shell guard only protects the image's own
+    CMD, not direct uvicorn/CLI/dev invocations)."""
+
+    def test_empty_string_floors_to_default_with_warning(self) -> None:
+        os.environ["KERDOOS_WORKERS"] = ""
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.workers, DEFAULT_WORKERS)
+        self.assertTrue(any("KERDOOS_WORKERS" in msg for msg in cm.output), cm.output)
+
+    def test_non_numeric_text_floors_to_default_with_warning(self) -> None:
+        os.environ["KERDOOS_WORKERS"] = "banana"
+        with self.assertLogs("kerdoos.config", level="WARNING"):
+            settings = get_settings()
+        self.assertEqual(settings.workers, DEFAULT_WORKERS)
+
+    def test_shell_injection_shaped_value_floors_to_default_with_warning(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_WORKERS"] = "1 --reload --app-dir /tmp"
+        with self.assertLogs("kerdoos.config", level="WARNING"):
+            settings = get_settings()
+        self.assertEqual(settings.workers, DEFAULT_WORKERS)
+
+    def test_unset_uses_default_unaffected_by_validation(self) -> None:
+        settings = get_settings()
+        self.assertEqual(settings.workers, DEFAULT_WORKERS)
+
+    def test_valid_positive_integer_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_WORKERS"] = "4"
+        settings = get_settings()
+        self.assertEqual(settings.workers, 4)
 
 
 if __name__ == "__main__":
