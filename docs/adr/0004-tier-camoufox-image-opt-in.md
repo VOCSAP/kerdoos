@@ -35,7 +35,8 @@ Faits mesures pendant le spike 5e84a704 et la mesure de RAM qui l'a suivi :
   642 a 652 Mo pour Chromium sur la meme page. Retour a la base apres fermeture : la
   memoire n'est consommee que pendant le fetch.
 - Sans init dans le conteneur, chaque fetch Camoufox laisse 4 process zombies
-  (Chromium : 2), meme cause que la carte d8b7b8fd.
+  (Chromium : 2), meme cause que la carte d8b7b8fd. Cette cause est levee depuis :
+  tini est en PID 1 dans l'image (carte d8b7b8fd, merge 761bf17).
 - **MercadoLivre, deuxieme site candidat** (mesure sur **un seul echantillon**, une
   requete sur la meme fiche produit, a confirmer en T4) : le tier `browser` actuel
   (patchright, Chromium complet, user-agent sans "Headless") recoit un 200 mais sur un
@@ -73,8 +74,10 @@ en bout.
   seulement : il ne voit ni les service workers, ni les WebSockets, ni les popups, ni le
   trafic interne du navigateur (constat de la revue security-auditor).
 - **Image** : un Dockerfile multi-stage, stages `base`, `slim`, `autonomous` ; compose
-  a deux profils exclusifs, `slim` et `autonomous`. Pas encore d'init en PID 1 dans
-  l'image (carte d8b7b8fd en cours). L'image `autonomous` s'execute en root.
+  a deux profils exclusifs, `slim` et `autonomous`. tini est en PID 1 dans toutes
+  les cibles (`ENTRYPOINT ["/usr/bin/tini", "-s", "--"]` du stage `base`, carte
+  d8b7b8fd) ; le compose n'a pas d'`init: true`. L'image `slim` s'execute en
+  non-root (`USER 10001`), l'image `autonomous` en root.
 - **WebUI** : l'indicateur d'echelle des tiers attend `uc_selenium` alors que le tier
   rapporte `uc` ; il affiche aujourd'hui une profondeur 0 pour `uc` (defaut
   preexistant, releve a cette occasion).
@@ -293,11 +296,14 @@ exigees ici des la tranche T1 :
   `create_time` (resolution d'une seconde, mesuree inerte ou nuisible).
 - **Porte liberee apres la mort effective** des process tues (`wait_procs`), jamais
   avant.
-- **Threads abandonnes comptes et plafonnes**, avec un plafond configurable, un log
-  ERROR quand il est atteint, et une decrementation sur tous les chemins.
+- **Threads abandonnes comptes et plafonnes**, avec un plafond configurable sur le
+  modele de `KERDOOS_BROWSER_MAX_ABANDONED_FETCHES` (tier `browser`), un log ERROR
+  quand il est atteint, et une decrementation sur tous les chemins.
 - **psutil declare dans l'extra du tier**, et son import protege.
-- **Init en PID 1 dans l'image** (tini), herite de `autonomous` une fois d8b7b8fd
-  merge : sans init, 4 zombies par fetch Camoufox (mesure).
+- **Init en PID 1 dans l'image** (tini) : fait, herite du stage `base` par
+  `autonomous` puis par `autonomous-camoufox` (carte d8b7b8fd, merge 761bf17).
+  Sans init, 4 zombies par fetch Camoufox (mesure) ; la preuve en image reste due
+  en T4.
 - **Acceptation** (T4, dans l'image) : un Firefox fige (SIGSTOP) apres le lancement
   rend un FetchError dans l'echeance, la porte est liberee apres la mort des process,
   aucun process du lancement ne survit a 5 s, et 5 fetches consecutifs laissent
@@ -338,8 +344,8 @@ exigees ici des la tranche T1 :
 
 | Tranche | Contenu | Depend de |
 |---|---|---|
-| T0 | Prerequis : d8b7b8fd merge (tini dans le Dockerfile, cycle de fetch borne avec C1 a C3 de son gate fermes) ; decision de 6521bbce sur l'ensemble fige | -- |
-| T0.5 | Condition C1 : allowlist de domaines a l'autorite du CONNECT dans `egress_proxy.py`, appliquee au tier `browser` existant ; tests du proxy (hote hors allowlist refuse sans resolution, loopback) | T0 (`browser.py` est modifie par d8b7b8fd) |
+| T0 | **FAIT.** Prerequis : d8b7b8fd (tini dans le Dockerfile, cycle de fetch borne avec C1 a C3 de son gate fermes), merge 761bf17 ; 6521bbce (ensemble fige, pas de `create_time`), merge 733715a | -- |
+| T0.5 | **En cours** (carte 5806b7d7). Condition C1 : allowlist de domaines a l'autorite du CONNECT dans `egress_proxy.py`, appliquee au tier `browser` existant ; tests du proxy (hote hors allowlist refuse sans resolution, loopback) | T0 (levee : fait) |
 | T1 | Adaptateur autolycos : extra, import paresseux, zero telechargement (C5 cote code), preferences imposees (C2), garde de contexte (C3), liveness de la Decision 5, registre du routeur, disponibilite paquet + binaire + version, tests unitaires avec un faux Camoufox ; mesure des durees de lancement et de navigation pour fixer les defauts | T0, T0.5 (API du proxy) |
 | T2 | Dockerfile : cible `autonomous-camoufox`, bibliotheques systeme, telechargement deterministe epingle (C4), assertion de version au build (C5), durcissement (Decision 8) ; compose : profil `camoufox` durci ; `env.example` (variables, note de RAM) ; taille d'image mesuree | T0, T1 (l'extra existe dans `uv.lock`) |
 | T3 | Cablage kerdoos : variables dans `get_settings`, WARNING d'ordre, injection par la racine de composition (WebUI et CLI), tests de cablage par racine, indicateur WebUI (barreau `camoufox`, cle `uc` corrigee), catalogue Magalu et MercadoLivre -> `camoufox`, documentation d'exploitation (dont `CLAUDE.md` invariant 6 et `AGENTS.md`) | T1 ; en parallele de T2 |
@@ -426,3 +432,6 @@ Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
   validation de la revue security-auditor. Ajout de MercadoLivre comme deuxieme site
   candidat, mesure sur un seul echantillon, a confirmer en T4. Les trois questions
   operateur restent ouvertes.
+- **2026-09-11 -- T0 fait**. Cartes d8b7b8fd (merge 761bf17) et 6521bbce (merge
+  733715a) mergees : tini en PID 1 dans l'image, cycle de fetch `browser` borne. La
+  dependance de T0.5 est levee ; T0.5 est en cours (carte 5806b7d7).

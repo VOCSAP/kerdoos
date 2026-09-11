@@ -185,12 +185,24 @@ d'environnement** (l'enveloppe OOM depend de la machine cible). `workers=1` est 
     porte ;
   - a l'echeance : `FetchError`, puis releve `INDETERMINATE`, et la porte est
     liberee. Une valeur invalide ou <= 0 retombe sur le defaut, avec un warning ;
-  - aucune validation croisee : l'ordre attendu (lancement < navigation, 30 s
-    codees en dur pour le tier `browser`, < attente de la porte) n'est pas verifie.
-- **Limite connue** (carte d8b7b8fd) : apres le lancement, les etapes du tier
-  `browser` hors navigation (`new_page`, stealth, `page.content()`,
-  `browser.close()`) n'ont pas de timeout explicite. Un Chromium fige a ce moment
-  garde la porte.
+  - validation croisee par avertissement, jamais par refus (carte d8b7b8fd) : au
+    chargement de la configuration, un WARNING signale une echeance de fetch
+    (ci-dessous) inferieure ou egale a lancement + navigation, ou superieure ou
+    egale a l'attente de la porte. Chaque condition n'est signalee qu'une fois par
+    process. La navigation reste codee en dur a 30 s pour le tier `browser`.
+    Aucune verification equivalente pour le tier `uc`.
+- **Echeance totale du fetch `browser`** (carte d8b7b8fd) :
+  - `KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS` (defaut 90) borne tout le cycle du
+    tier `browser` (lancement, page, navigation, lecture, fermeture), execute dans
+    un thread proprietaire ;
+  - a l'echeance : kill cible de l'arbre de process de CE lancement, identifie par
+    un marqueur propre au lancement porte par la ligne de commande de Chromium,
+    puis `FetchError`, releve `INDETERMINATE` ;
+  - la porte n'est liberee qu'apres la mort effective des process tues
+    (`psutil.wait_procs`), jamais avant ;
+  - les threads abandonnes sont comptes et plafonnes par
+    `KERDOOS_BROWSER_MAX_ABANDONED_FETCHES` (defaut 5) : au plafond, un nouveau
+    fetch est refuse avec un log ERROR.
 
 ### Justification
 1. SQLite ne gagne rien en debit d'ecriture avec N process writers.
@@ -275,6 +287,16 @@ changement, deja valide au gate Phase 0, conforme ADR 0001 S8. **Amende par
 [ADR 0004](./0004-tier-camoufox-image-opt-in.md)** : une troisieme cible opt-in,
 `autonomous-camoufox`, construite a partir de `autonomous` ; l'image
 `autonomous` par defaut reste inchangee.
+
+### Init en PID 1 (carte d8b7b8fd)
+- tini est installe dans le stage `base` et sert d'`ENTRYPOINT`
+  (`["/usr/bin/tini", "-s", "--"]`) : toutes les cibles en heritent. Le CMD
+  lance uvicorn par `exec`, donc uvicorn est l'enfant direct de tini, qui relaie
+  SIGTERM et recolte les process orphelins (sans init, Chromium laisse des
+  zygotes zombies a chaque fetch `browser`, meme reussi) ;
+- l'image porte cette garantie seule : le compose n'a plus d'`init: true` ;
+- `kerdoos:slim` s'execute en non-root (`USER 10001`), `kerdoos:autonomous` en
+  root.
 
 ### Correction Q-e -- pre-fetch de l'undetected-chromedriver au build
 Le tier `uc` (seleniumbase) telecharge son `undetected-chromedriver` **au runtime**
@@ -473,3 +495,9 @@ l'invariant #7.
   quotidien = commande dediee **`kerdoos digest`** (scrape-all + agregation + envoi),
   DISTINCTE de `run_now` (per-owner a la demande via UI/MCP). Le garde-fou `workers>1`
   invite a un cron externe appelant `kerdoos digest`.
+- **2026-09-11 -- alignement sur la carte d8b7b8fd (merge 761bf17)**. Decision 2 :
+  la limite connue du tier `browser` est levee (echeance totale du fetch, kill cible,
+  porte liberee apres la mort effective, plafond des threads abandonnes) et la
+  validation croisee des timeouts devient un WARNING emis une fois par process.
+  Decision 5 : tini en PID 1 dans toutes les cibles, plus d'`init: true` dans le
+  compose, `slim` non-root et `autonomous` en root.
