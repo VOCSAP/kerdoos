@@ -89,7 +89,7 @@ DEFAULT_WORKERS = 1
 # patchright + uc tier seleniumbase, sharing ONE gate) alive at once.
 DEFAULT_BROWSER_MAX_CONCURRENT = 1
 
-# Card ca30b736 C2a: max wait for the browser gate before a source is
+# Card ca30b736: max wait for the browser gate before a source is
 # reported as a (retryable) FetchError instead of blocking forever. A
 # contending fetch's own worst case is roughly one retry cycle at the uc
 # tier's UC_PAGE_LOAD_TIMEOUT_SECONDS (45s) plus RECONNECT_TIME/RENDER_WAIT

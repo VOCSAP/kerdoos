@@ -62,8 +62,8 @@ MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 RECONNECT_TIME = 6.0
 RENDER_WAIT = 3.0
 _STATUS_FALLBACK = 200
-# Card ca30b736 C2b: bounds the WebDriver navigation itself, so a frozen
-# Chrome raises instead of holding the browser gate forever. Generous vs.
+# Card ca30b736: bounds the WebDriver navigation itself, so a frozen Chrome
+# raises instead of holding the browser gate forever. Generous vs.
 # RECONNECT_TIME + RENDER_WAIT (~9s) to tolerate a slow Akamai challenge.
 UC_PAGE_LOAD_TIMEOUT_SECONDS = 45.0
 
@@ -193,7 +193,7 @@ class UcFetcher:
         with self._gate.acquire():
             driver = driver_cls(**driver_kwargs)
             try:
-                # Bounds the navigation itself (card ca30b736 C2b): without
+                # Bounds the navigation itself (card ca30b736): without
                 # this, a frozen Chrome holds the gate forever regardless of
                 # any acquisition-side deadline.
                 driver.set_page_load_timeout(UC_PAGE_LOAD_TIMEOUT_SECONDS)

@@ -253,7 +253,7 @@ class BrowserMaxConcurrentFloorTest(_SettingsTestBase):
 
 
 class BrowserAcquireTimeoutFloorTest(_SettingsTestBase):
-    """Card ca30b736 C2a: a malformed KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS
+    """Card ca30b736: a malformed KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS
     warns and floors to the default instead of crashing at settings-read
     time."""
 

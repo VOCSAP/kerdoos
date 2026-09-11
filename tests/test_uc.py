@@ -219,7 +219,7 @@ class UcFetcherWiringTest(unittest.TestCase):
         self.assertEqual(driver.opened[0], _MAGALU_URL)
 
     def test_page_load_timeout_is_set_before_navigation(self) -> None:
-        # Card ca30b736 C2b: a frozen Chrome must not hold the browser gate
+        # Card ca30b736: a frozen Chrome must not hold the browser gate
         # forever -- set_page_load_timeout is what bounds the navigation.
         _, driver = self._run("<html>ok</html>")
         self.assertEqual(driver.page_load_timeout, uc.UC_PAGE_LOAD_TIMEOUT_SECONDS)

@@ -65,7 +65,7 @@ class _LiveTracker:
 
 class GateConcurrencyTest(unittest.TestCase):
     def test_max_concurrent_one_serializes_two_holders(self) -> None:
-        gate = BrowserGate(max_concurrent=1)
+        gate = BrowserGate(max_concurrent=1, acquire_timeout_seconds=2)
         tracker = _LiveTracker()
         a_holding = threading.Event()
         b_blocked_confirmed = threading.Event()
@@ -89,8 +89,8 @@ class GateConcurrencyTest(unittest.TestCase):
                 b_acquired.set()
                 tracker.exit()
 
-        ta = threading.Thread(target=holder_a)
-        tb = threading.Thread(target=holder_b)
+        ta = threading.Thread(target=holder_a, daemon=True)
+        tb = threading.Thread(target=holder_b, daemon=True)
         ta.start()
         tb.start()
         b_blocked_confirmed.wait(timeout=2)
@@ -102,7 +102,7 @@ class GateConcurrencyTest(unittest.TestCase):
         self.assertEqual(tracker.max_live, 1)
 
     def test_max_concurrent_two_admits_two_blocks_a_third(self) -> None:
-        gate = BrowserGate(max_concurrent=2)
+        gate = BrowserGate(max_concurrent=2, acquire_timeout_seconds=2)
         tracker = _LiveTracker()
         # 3 parties: ta, tb, AND this test thread -- the barrier only trips
         # once all three arrive, which proves ta and tb are both past
@@ -119,8 +119,8 @@ class GateConcurrencyTest(unittest.TestCase):
                 release_all.wait(timeout=2)
                 tracker.exit()
 
-        ta = threading.Thread(target=holder)
-        tb = threading.Thread(target=holder)
+        ta = threading.Thread(target=holder, daemon=True)
+        tb = threading.Thread(target=holder, daemon=True)
         ta.start()
         tb.start()
         both_holding.wait(timeout=2)  # a and b both confirmed holding
@@ -132,7 +132,7 @@ class GateConcurrencyTest(unittest.TestCase):
                 c_acquired.set()
                 tracker.exit()
 
-        tc = threading.Thread(target=holder_c)
+        tc = threading.Thread(target=holder_c, daemon=True)
         tc.start()
         c_blocked_confirmed.wait(timeout=2)
         self.assertFalse(c_acquired.is_set())  # a slot must free first
@@ -144,7 +144,7 @@ class GateConcurrencyTest(unittest.TestCase):
         self.assertEqual(tracker.max_live, 2)
 
     def test_gate_released_when_guarded_block_raises(self) -> None:
-        gate = BrowserGate(max_concurrent=1)
+        gate = BrowserGate(max_concurrent=1, acquire_timeout_seconds=2)
         with self.assertRaises(ValueError):
             with gate.acquire():
                 raise ValueError("simulated fetch failure")
@@ -155,7 +155,7 @@ class GateConcurrencyTest(unittest.TestCase):
             with gate.acquire():
                 acquired.set()
 
-        t = threading.Thread(target=worker)
+        t = threading.Thread(target=worker, daemon=True)
         t.start()
         t.join(timeout=2)
         self.assertTrue(acquired.is_set())
@@ -163,7 +163,7 @@ class GateConcurrencyTest(unittest.TestCase):
     def test_shared_gate_bounds_two_different_callers_together(self) -> None:
         # Simulates the browser tier and the uc tier sharing ONE gate: two
         # DIFFERENT logical callers, same BrowserGate instance, still capped.
-        gate = BrowserGate(max_concurrent=1)
+        gate = BrowserGate(max_concurrent=1, acquire_timeout_seconds=2)
         tracker = _LiveTracker()
         browser_holding = threading.Event()
         uc_blocked_confirmed = threading.Event()
@@ -185,8 +185,8 @@ class GateConcurrencyTest(unittest.TestCase):
                 uc_acquired.set()
                 tracker.exit()
 
-        t_browser = threading.Thread(target=browser_tier_call)
-        t_uc = threading.Thread(target=uc_tier_call)
+        t_browser = threading.Thread(target=browser_tier_call, daemon=True)
+        t_uc = threading.Thread(target=uc_tier_call, daemon=True)
         t_browser.start()
         t_uc.start()
         uc_blocked_confirmed.wait(timeout=2)
@@ -224,14 +224,14 @@ def _fake_fcntl(flock_side_effect=None):
 
 
 class GateFailureModesTest(unittest.TestCase):
-    """Card ca30b736 gate conditions C1 (semaphore leak) and C2a (no
-    acquisition deadline), reviewer+security+architect, both MEASURED on
-    Linux via a probe reproduced here deterministically with a fake fcntl."""
+    """Card ca30b736: a slot-acquisition failure must not leak the semaphore,
+    and acquire() must honor a deadline instead of blocking forever."""
 
     def test_os_open_failure_does_not_leak_the_semaphore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.object(gate_mod, "fcntl", _fake_fcntl()):
-            gate = BrowserGate(max_concurrent=1, lock_dir=Path(tmp))
+            gate = BrowserGate(
+                max_concurrent=1, lock_dir=Path(tmp), acquire_timeout_seconds=2)
             with mock.patch.object(
                 gate_mod.os, "open",
                 side_effect=OSError(errno.EMFILE, "too many open files"),
@@ -246,7 +246,7 @@ class GateFailureModesTest(unittest.TestCase):
                 with gate.acquire():
                     acquired.set()
 
-            t = threading.Thread(target=worker)
+            t = threading.Thread(target=worker, daemon=True)
             t.start()
             t.join(timeout=2)
             self.assertTrue(acquired.is_set())
@@ -256,7 +256,9 @@ class GateFailureModesTest(unittest.TestCase):
             flock_side_effect=OSError(errno.ENOLCK, "no locks available"))
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(gate_mod, "fcntl", broken_fcntl):
-                gate = BrowserGate(max_concurrent=1, lock_dir=Path(tmp))
+                gate = BrowserGate(
+                    max_concurrent=1, lock_dir=Path(tmp),
+                    acquire_timeout_seconds=2)
                 start = time.monotonic()
                 with self.assertRaises(OSError):
                     gate.acquire()
@@ -270,7 +272,7 @@ class GateFailureModesTest(unittest.TestCase):
                     with gate.acquire():
                         acquired.set()
 
-            t = threading.Thread(target=worker)
+            t = threading.Thread(target=worker, daemon=True)
             t.start()
             t.join(timeout=2)
             self.assertTrue(acquired.is_set())
@@ -360,14 +362,15 @@ class GateInterProcessTest(unittest.TestCase):
 
             # The kernel released the flock on process death -- a fresh
             # acquire from THIS process must succeed without blocking.
-            gate = BrowserGate(max_concurrent=1, lock_dir=lock_dir)
+            gate = BrowserGate(
+                max_concurrent=1, lock_dir=lock_dir, acquire_timeout_seconds=2)
             acquired = threading.Event()
 
             def worker() -> None:
                 with gate.acquire():
                     acquired.set()
 
-            t = threading.Thread(target=worker)
+            t = threading.Thread(target=worker, daemon=True)
             t.start()
             t.join(timeout=2)
             self.assertTrue(acquired.is_set())
@@ -375,8 +378,8 @@ class GateInterProcessTest(unittest.TestCase):
 
 class DefaultGateWarningTest(unittest.TestCase):
     def test_warns_once_on_first_use_and_reuses_the_singleton(self) -> None:
-        # Architect F3: a composition root that forgets to inject a gate
-        # must not lose the bound silently.
+        # A composition root that forgets to inject a gate must not lose
+        # the bound silently.
         with mock.patch.object(gate_mod, "_default_gate", None):
             with self.assertLogs(
                 "autolycos.browser_gate", level="WARNING") as cm:
@@ -392,7 +395,9 @@ class GateWindowsFallbackTest(unittest.TestCase):
             with mock.patch.object(gate_mod, "fcntl", None), \
                  self.assertLogs(
                     "autolycos.browser_gate", level="WARNING") as cm:
-                gate = BrowserGate(max_concurrent=1, lock_dir=Path(tmp))
+                gate = BrowserGate(
+                    max_concurrent=1, lock_dir=Path(tmp),
+                    acquire_timeout_seconds=2)
             self.assertEqual(len(cm.output), 1)
             self.assertIn("Windows", cm.output[0])
             # Still enforces the IN-PROCESS bound correctly.
@@ -402,7 +407,7 @@ class GateWindowsFallbackTest(unittest.TestCase):
                 with gate.acquire():
                     acquired.set()
 
-            t = threading.Thread(target=worker)
+            t = threading.Thread(target=worker, daemon=True)
             t.start()
             t.join(timeout=2)
             self.assertTrue(acquired.is_set())
