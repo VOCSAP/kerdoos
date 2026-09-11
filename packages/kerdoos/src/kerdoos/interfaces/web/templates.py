@@ -23,7 +23,7 @@ _TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 # Fetcher escalation ladder (invariant #6): the tier micro-indicator shows how
 # hard we had to push to read this price. Order is cost-ascending.
-_TIER_LADDER = ("http", "tls", "browser", "uc_selenium")
+_TIER_LADDER = ("http", "tls", "browser", "uc")
 
 
 def format_brl(cents: int | None) -> str:
