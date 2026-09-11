@@ -24,6 +24,14 @@ FROM --platform=linux/amd64 python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1
 
 RUN pip install --no-cache-dir uv==0.10.4
 
+# tini as PID 1 reaps orphaned zombie children regardless of the runtime
+# orchestrator (docker run, podman, k8s) -- unlike compose's own `init: true`,
+# which only applies under `docker compose up` (roadmap d8b7b8fd F1).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
 WORKDIR /app
 
 # Manifests only in this layer (no src/ yet) so the dependency-download layer
