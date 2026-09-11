@@ -28,6 +28,7 @@ from kerdoos.persistence.ports import ScrapeRecord, StateStore
 from kerdoos.registry.errors import (
     ConfigError,
     ConfigImportError,
+    ConfigImportPartialError,
     FetcherTierUnavailableError,
 )
 from kerdoos.registry.ports import (
@@ -170,6 +171,19 @@ class AppService:
 
     # -- write --------------------------------------------------------------
 
+    def _unknown_fetcher_tier_error(self, spec: SiteConfig) -> str | None:
+        # A fetcher name typo (e.g. "uC") would otherwise fall through to
+        # select()'s UnknownFetcherError at every scrape, forever -- same
+        # class of defect as an unavailable tier (card 3aeb8a19 MAJOR).
+        # Single predicate shared by add_site (write time) and
+        # import_config's pre-validation pass (card a8d6ee3a) so the two
+        # never drift apart.
+        if spec.fetcher not in self._router.known_tiers():
+            return (
+                f"site {spec.name!r} references unknown fetcher tier "
+                f"{spec.fetcher!r} (known: {sorted(self._router.known_tiers())})")
+        return None
+
     def add_site(self, principal: Principal, spec: SiteConfig) -> SiteConfig:
         # sites are a global admin-only catalogue (Q3): a regular tenant
         # cannot extend the domain allowlist by inventing a site. Checked
@@ -179,14 +193,9 @@ class AppService:
                 f"principal {principal.owner_id!r} (role={principal.role!r}) "
                 "is not allowed to add a site"
             )
-        # A fetcher name typo (e.g. "uC") would otherwise fall through to
-        # select()'s UnknownFetcherError at every scrape, forever -- same
-        # class of defect as an unavailable tier (card 3aeb8a19 MAJOR).
-        if spec.fetcher not in self._router.known_tiers():
-            raise ConfigError(
-                f"site {spec.name!r} references unknown fetcher tier "
-                f"{spec.fetcher!r} (known: {sorted(self._router.known_tiers())})"
-            )
+        error = self._unknown_fetcher_tier_error(spec)
+        if error is not None:
+            raise ConfigError(error)
         self._config.add_site(spec)
         return spec
 
@@ -230,7 +239,7 @@ class AppService:
         return source
 
     def import_config(
-        self, owner: str | None,
+        self, principal: Principal, owner: str | None,
         sites: dict[str, SiteConfig],
         products: list[tuple[str, list[tuple[str, str]]]],
     ) -> ImportSummary:
@@ -239,14 +248,23 @@ class AppService:
         add_source apply to a single entry, and writes nothing if any
         entry fails -- add_product committing before that product's own
         source is validated otherwise leaves a product with zero sources
-        in config.db on a rejected source."""
+        in config.db on a rejected source.
+
+        Security (gate finding C1, CWE-862): sites is the GLOBAL catalogue
+        -- add_site's own admin-only rampart applies here too, checked
+        BEFORE any validation/write so a non-admin caller with sites in
+        the batch is refused with zero side effects, not just a refused
+        write partway through."""
+        if sites and principal.role != "admin":
+            raise PermissionError(
+                f"principal {principal.owner_id!r} (role={principal.role!r}) "
+                "is not allowed to add a site"
+            )
         errors: list[str] = []
         for site in sites.values():
-            if site.fetcher not in self._router.known_tiers():
-                errors.append(
-                    f"site {site.name!r} references unknown fetcher tier "
-                    f"{site.fetcher!r} (known: "
-                    f"{sorted(self._router.known_tiers())})")
+            error = self._unknown_fetcher_tier_error(site)
+            if error is not None:
+                errors.append(error)
 
         # The batch's own sites aren't committed yet -- widen the domain
         # policy for validation only, so a product source referencing a
@@ -293,15 +311,24 @@ class AppService:
         if errors:
             raise ConfigImportError(errors)
 
-        for site in sites.values():
-            self._config.add_site(site)
-        imported_products = 0
-        if owner:
-            for product_key, sources in products:
-                self.add_product(owner, ProductSpec(product_key))
-                for site_name, url in sources:
-                    self.add_source(owner, product_key, site_name, url)
-                imported_products += 1
+        # LOW (gate a8d6ee3a): validation passed, but the write phase
+        # itself can still fail (infra error, a race) -- reported as a
+        # dedicated PARTIAL error instead of a raw traceback. Full
+        # transactional atomicity across the whole batch (a store-level
+        # rollback) is out of scope; this only guarantees a clean report.
+        try:
+            for site in sites.values():
+                self.add_site(principal, site)
+            imported_products = 0
+            if owner:
+                for product_key, sources in products:
+                    self.add_product(owner, ProductSpec(product_key))
+                    for site_name, url in sources:
+                        self.add_source(owner, product_key, site_name, url)
+                    imported_products += 1
+        except Exception as exc:  # noqa: BLE001 -- write phase: report, never a raw traceback
+            raise ConfigImportPartialError(
+                f"write phase interrupted, import PARTIAL: {exc}") from exc
         return ImportSummary(sites=len(sites), products=imported_products)
 
     def remove_source(self, owner: str, source_id: str) -> None:

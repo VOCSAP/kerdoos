@@ -29,3 +29,10 @@ class ConfigImportError(ConfigError):
     def __init__(self, errors: list[str]) -> None:
         self.errors = errors
         super().__init__(f"{len(errors)} error(s): " + "; ".join(errors))
+
+
+class ConfigImportPartialError(ConfigError):
+    """AppService.import_config's write phase raised AFTER validation
+    passed (infra error, a race) -- some entries may already be
+    committed. Distinct from ConfigImportError (which always means zero
+    writes) so the caller never reports a false "0 writes"."""

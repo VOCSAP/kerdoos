@@ -16,7 +16,7 @@ from pathlib import Path
 from autolycos.router import StaticRouter
 from autolycos.safety import DomainPolicy
 
-from kerdoos.core.app.services import AppService, ProductSpec
+from kerdoos.core.app.services import AppService, Principal, ProductSpec
 from kerdoos.interfaces.cli import main as cli
 from kerdoos.parsers.factory import build_parser
 from kerdoos.parsers.ports import ParserSpec
@@ -301,6 +301,74 @@ class ConfigImportExportTest(unittest.TestCase):
                 self.assertEqual(store.load("").sites, {})
             finally:
                 store.close()
+
+    def test_non_admin_principal_with_sites_is_refused_with_zero_writes(
+        self,
+    ) -> None:
+        # Gate a8d6ee3a C1 (CWE-862): import_config writes the GLOBAL sites
+        # catalogue -- a non-admin principal must be refused BEFORE any
+        # validation/write, mirroring add_site's own admin-only rampart.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.config = SqliteConfigStore(d / "config.db")
+            self.state = SqliteStateStore(d / "state.db")
+            router = StaticRouter(_DOMAIN_POLICY)
+            service = AppService(
+                self.config, self.state, router, _DOMAIN_POLICY, build_parser)
+            try:
+                with self.assertRaises(PermissionError):
+                    service.import_config(
+                        Principal(owner_id="tenant1", role="user"),
+                        "tenant1", {"kabum": _SITE}, [])
+                registry = service.list_config("tenant1")
+                self.assertEqual(registry.sites, {})
+                self.assertEqual(len(registry.products), 0)
+            finally:
+                self.config.close()
+                self.state.close()
+
+    def test_write_phase_crash_reports_partial_cleanly(self) -> None:
+        # LOW (gate a8d6ee3a): validation passes, but the write phase
+        # itself raises (infra error, a race) -- must surface as a clean
+        # PARTIAL message via the CLI, never a raw traceback.
+        from unittest import mock
+
+        from kerdoos.core.app.services import AppService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            config_dir = d / "config"
+            config_dir.mkdir()
+            (config_dir / "sites.yaml").write_text(_SITES_YAML, encoding="utf-8")
+            (config_dir / "products.yaml").write_text(
+                _PRODUCTS_YAML, encoding="utf-8")
+
+            config_db = d / "config.db"
+            state_db = d / "state.db"
+            args = cli.build_parser_cli().parse_args([
+                "config", "import",
+                "--config-dir", str(config_dir),
+                "--config-db", str(config_db),
+                "--db", str(state_db),
+                "--owner", "owner1",
+            ])
+
+            import io
+            from contextlib import redirect_stderr
+
+            captured = io.StringIO()
+            with mock.patch.object(
+                AppService, "add_product",
+                side_effect=RuntimeError("disk full"),
+            ):
+                with redirect_stderr(captured):
+                    exit_code = cli.cmd_config_import(args)
+
+            self.assertEqual(exit_code, 1)
+            message = captured.getvalue()
+            self.assertIn("write phase interrupted", message)
+            self.assertIn("PARTIAL", message)
+            self.assertIn("disk full", message)
 
 
 if __name__ == "__main__":

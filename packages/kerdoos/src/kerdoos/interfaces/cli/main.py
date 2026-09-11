@@ -162,8 +162,13 @@ def cmd_config_import(args: argparse.Namespace) -> int:
             products_path = config_dir / "products.yaml"
             if products_path.exists():
                 products = parse_products_yaml(products_path, sites)
+        # The CLI is an operator-trusted composition root (card a8d6ee3a
+        # gate C1): import_config's admin-only sites catalogue check
+        # (mirrors add_site's own rampart) is satisfied by an explicit
+        # admin Principal here, never by a tenant-supplied role.
+        principal = Principal(owner_id=args.owner or "cli-import", role="admin")
         try:
-            summary = service.import_config(args.owner, sites, products)
+            summary = service.import_config(principal, args.owner, sites, products)
         except ConfigImportError as exc:
             print(
                 "config import: rejected, 0 writes "
