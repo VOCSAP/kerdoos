@@ -816,5 +816,40 @@ class SqliteAuthStoreEmailUniquenessTest(unittest.TestCase):
         self.assertIsInstance(store, SqliteAuthStore)
 
 
+class LoginAttemptsIndexTest(_AuthTestBase):
+    """roadmap f1048ab8 follow-up: the purge and eviction queries must use
+    idx_login_attempts_window, not a full table scan."""
+
+    def test_purge_and_eviction_use_the_index_not_a_scan(self) -> None:
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=5,
+            login_rate_limit_window_seconds=900,
+            login_rate_limit_row_cap=10000)
+        for i in range(200):
+            store.reserve_login_attempt(f"user-{i}", now=float(i))
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            purge_plan = [
+                row[3] for row in conn.execute(
+                    "EXPLAIN QUERY PLAN DELETE FROM login_attempts "
+                    "WHERE window_start <= ?", (100.0,)).fetchall()
+            ]
+            evict_plan = [
+                row[3] for row in conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT identifier_key "
+                    "FROM login_attempts ORDER BY window_start ASC LIMIT 1"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        for plan in (purge_plan, evict_plan):
+            self.assertTrue(
+                any("idx_login_attempts_window" in step for step in plan),
+                plan)
+            self.assertFalse(
+                any(step == "SCAN login_attempts" for step in plan), plan)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     failure_count  INTEGER NOT NULL,
     window_start   REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_login_attempts_window
+    ON login_attempts(window_start);
 """
 
 _BUSY_TIMEOUT_MS = 5000
