@@ -260,6 +260,11 @@ class AppService:
                 f"principal {principal.owner_id!r} (role={principal.role!r}) "
                 "is not allowed to add a site"
             )
+        if principal.role != "admin" and owner not in (None, principal.owner_id):
+            raise PermissionError(
+                f"principal {principal.owner_id!r} (role={principal.role!r}) "
+                f"is not allowed to import products for owner {owner!r}"
+            )
         errors: list[str] = []
         for site in sites.values():
             error = self._unknown_fetcher_tier_error(site)
@@ -326,6 +331,8 @@ class AppService:
                     for site_name, url in sources:
                         self.add_source(owner, product_key, site_name, url)
                     imported_products += 1
+        except PermissionError:
+            raise
         except Exception as exc:  # noqa: BLE001 -- write phase: report, never a raw traceback
             raise ConfigImportPartialError(
                 f"write phase interrupted, import PARTIAL: {exc}") from exc

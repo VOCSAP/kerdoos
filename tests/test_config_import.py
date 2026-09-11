@@ -327,6 +327,47 @@ class ConfigImportExportTest(unittest.TestCase):
                 self.config.close()
                 self.state.close()
 
+    def test_non_admin_principal_importing_for_another_owner_is_refused_with_zero_writes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.config = SqliteConfigStore(d / "config.db")
+            self.state = SqliteStateStore(d / "state.db")
+            router = StaticRouter(_DOMAIN_POLICY)
+            service = AppService(
+                self.config, self.state, router, _DOMAIN_POLICY, build_parser)
+            try:
+                with self.assertRaises(PermissionError):
+                    service.import_config(
+                        Principal(owner_id="tenant1", role="user"),
+                        "tenant2", {}, [("aw3225qf", [])])
+                registry = service.list_config("tenant2")
+                self.assertEqual(registry.sites, {})
+                self.assertEqual(len(registry.products), 0)
+            finally:
+                self.config.close()
+                self.state.close()
+
+    def test_non_admin_principal_importing_for_own_owner_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.config = SqliteConfigStore(d / "config.db")
+            self.state = SqliteStateStore(d / "state.db")
+            router = StaticRouter(_DOMAIN_POLICY)
+            service = AppService(
+                self.config, self.state, router, _DOMAIN_POLICY, build_parser)
+            try:
+                summary = service.import_config(
+                    Principal(owner_id="tenant1", role="user"),
+                    "tenant1", {}, [("aw3225qf", [])])
+                self.assertEqual(summary.products, 1)
+                registry = service.list_config("tenant1")
+                self.assertEqual(len(registry.products), 1)
+            finally:
+                self.config.close()
+                self.state.close()
+
     def test_write_phase_crash_reports_partial_cleanly(self) -> None:
         # LOW (gate a8d6ee3a): validation passes, but the write phase
         # itself raises (infra error, a race) -- must surface as a clean
