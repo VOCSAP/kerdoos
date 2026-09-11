@@ -1274,8 +1274,8 @@ class EmptyJobSourceGhostTest(_EvaluatorTestBase):
         self.service.add_job_source("owner1", job.id, new_sid)
         self._seed_history("owner1", new_sid, tick_now - _minutes(1))
 
-        # Later tick, SAME day (daily window) -- the fix must not have
-        # burned the window on the earlier, sourceless attempt.
+        # Later tick, SAME day (daily window) -- an empty-digest skip
+        # must not consume the window.
         later_tick = tick_now + timedelta(hours=2)
         summary2 = await evaluate_tick(
             config_store=self.config, state_store=self.state,
