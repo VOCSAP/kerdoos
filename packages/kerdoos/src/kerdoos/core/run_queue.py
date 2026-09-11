@@ -82,10 +82,10 @@ class RunQueue:
     @property
     def queued_count(self) -> int:
         """Number of DISTINCT owners currently queued or running. A plain
-        read (no lock), same discipline as is_dead/status_for: asyncio's
-        single-threaded cooperative scheduling means no other coroutine
-        can run between the start and end of this len() call, so there is
-        no intermediate/torn state to observe."""
+        read (no lock), same discipline as is_dead/status_for: the GIL
+        makes this single set.__len__() call atomic regardless of which
+        thread calls it (a sync route handler runs on a thread-pool
+        worker, not the event loop), so there is no torn read to observe."""
         return len(self._queued_or_running)
 
     @property
