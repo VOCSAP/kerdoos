@@ -140,12 +140,12 @@ class ConfigImportExportTest(unittest.TestCase):
             self.assertEqual(sites["kabum"].domain, "kabum.com.br")
             self.assertEqual(len(products), 1)
 
-    def test_rejected_source_reports_clearly_and_partial_state(self) -> None:
-        # Roadmap c06082a5: a raw traceback is not an acceptable CLI failure
-        # mode. Measures (not assumes) that config import is PARTIAL: rows
-        # processed before the rejected entry, INCLUDING the failing
-        # product's own row (added before its source is validated), are
-        # already committed.
+    def test_rejected_source_leaves_zero_products_and_reports_all_errors(
+        self,
+    ) -> None:
+        # Card a8d6ee3a: a rejected entry must abort the WHOLE import with
+        # zero writes, not leave the product that owns the rejected source
+        # committed with no sources.
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             config_dir = d / "config"
@@ -187,23 +187,118 @@ class ConfigImportExportTest(unittest.TestCase):
             self.assertIn("bad-one", message)
             self.assertIn("kabum", message)
             self.assertIn("produto/2", message)
-            self.assertIn("PARTIAL", message)
+            self.assertIn("0 writes", message)
 
             store = SqliteConfigStore(config_db)
             try:
                 registry = store.load("owner1")
+                # MEASURED FIX (was: both products persisted, bad-one with
+                # zero sources): nothing is written, not even the site or
+                # the unrelated valid product.
+                self.assertEqual(registry.sites, {})
+                self.assertEqual(len(registry.products), 0)
+            finally:
+                store.close()
+
+    def test_valid_file_imports_everything(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            config_dir = d / "config"
+            config_dir.mkdir()
+            (config_dir / "sites.yaml").write_text(_SITES_YAML, encoding="utf-8")
+            products_yaml = (
+                "products:\n"
+                "  - id: good-one\n"
+                "    sources:\n"
+                "      - site: kabum\n"
+                "        url: https://www.kabum.com.br/produto/1\n"
+                "  - id: good-two\n"
+                "    sources:\n"
+                "      - site: kabum\n"
+                "        url: https://www.kabum.com.br/produto/2\n"
+            )
+            (config_dir / "products.yaml").write_text(
+                products_yaml, encoding="utf-8")
+
+            config_db = d / "config.db"
+            state_db = d / "state.db"
+            args = cli.build_parser_cli().parse_args([
+                "config", "import",
+                "--config-dir", str(config_dir),
+                "--config-db", str(config_db),
+                "--db", str(state_db),
+                "--owner", "owner1",
+            ])
+            self.assertEqual(cli.cmd_config_import(args), 0)
+
+            store = SqliteConfigStore(config_db)
+            try:
+                registry = store.load("owner1")
+                self.assertEqual(set(registry.sites), {"kabum"})
                 product_ids = {p.id for p in registry.products}
-                # MEASURED: both products are persisted (add_product commits
-                # before the source is validated) -- only the rejected
-                # source itself is missing.
-                self.assertEqual(product_ids, {"good-one", "bad-one"})
+                self.assertEqual(product_ids, {"good-one", "good-two"})
                 sources_by_product = {
                     p.id: [s.url for s in p.sources] for p in registry.products
                 }
                 self.assertEqual(
                     sources_by_product["good-one"],
                     ["https://www.kabum.com.br/produto/1"])
-                self.assertEqual(sources_by_product["bad-one"], [])
+                self.assertEqual(
+                    sources_by_product["good-two"],
+                    ["https://www.kabum.com.br/produto/2"])
+            finally:
+                store.close()
+
+    def test_unknown_fetcher_tier_in_sites_yaml_rejected_with_zero_writes(
+        self,
+    ) -> None:
+        # Card a8d6ee3a: sites.yaml's own fetcher-tier-known check
+        # (AppService.add_site's known_tiers() guard) was bypassed
+        # entirely by the CLI calling MutableConfigStore.add_site()
+        # directly. import_config enforces it, atomically across ALL
+        # sites in the file.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            config_dir = d / "config"
+            config_dir.mkdir()
+            sites_yaml = _SITES_YAML + (
+                "  bogus:\n"
+                "    fetcher: not-a-real-tier\n"
+                "    domain: bogus.example.com\n"
+                "    parser:\n"
+                "      kind: statejson\n"
+                "      pix: a\n"
+                "      card: b\n"
+                "      availability: c\n"
+            )
+            (config_dir / "sites.yaml").write_text(sites_yaml, encoding="utf-8")
+
+            config_db = d / "config.db"
+            state_db = d / "state.db"
+            args = cli.build_parser_cli().parse_args([
+                "config", "import",
+                "--config-dir", str(config_dir),
+                "--config-db", str(config_db),
+                "--db", str(state_db),
+            ])
+
+            import io
+            from contextlib import redirect_stderr
+
+            captured = io.StringIO()
+            with redirect_stderr(captured):
+                exit_code = cli.cmd_config_import(args)
+
+            self.assertEqual(exit_code, 1)
+            message = captured.getvalue()
+            self.assertIn("bogus", message)
+            self.assertIn("not-a-real-tier", message)
+            self.assertIn("0 writes", message)
+
+            store = SqliteConfigStore(config_db)
+            try:
+                # Zero sites written, not even the valid "kabum" entry.
+                self.assertEqual(store.load("").sites, {})
             finally:
                 store.close()
 

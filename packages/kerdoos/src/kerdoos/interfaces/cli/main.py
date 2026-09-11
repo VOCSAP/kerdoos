@@ -29,7 +29,7 @@ import yaml
 from autolycos.browser_gate import BrowserGate
 from autolycos.router import StaticRouter
 
-from kerdoos.core.app.services import AppService, Principal, ProductSpec
+from kerdoos.core.app.services import AppService, Principal
 from kerdoos.core.evaluator import evaluate_tick
 from kerdoos.config import get_settings
 from kerdoos.digest.factory import build_sender
@@ -37,6 +37,7 @@ from kerdoos.digest.render import render_digest
 from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
 from kerdoos.parsers.factory import build_parser
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
+from kerdoos.registry.errors import ConfigError, ConfigImportError
 from kerdoos.registry.ports import SiteConfig
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 from kerdoos.registry.yaml_store import parse_products_yaml, parse_sites_yaml
@@ -147,42 +148,34 @@ def cmd_digest(args: argparse.Namespace) -> int:
 
 
 def cmd_config_import(args: argparse.Namespace) -> int:
+    # Card a8d6ee3a: the WHOLE batch (sites.yaml + products.yaml) is
+    # validated before any write -- AppService.import_config raises
+    # ConfigImportError (every rejected entry, not just the first) rather
+    # than committing sites/products one at a time and leaving a partially
+    # imported catalogue on a later rejection.
     config_dir = Path(args.config_dir)
     service, config_store, state_store = _build_app_service(args.config_db, args.db)
     try:
         sites = parse_sites_yaml(config_dir / "sites.yaml")
-        for site in sites.values():
-            config_store.add_site(site)
+        products: list[tuple[str, list[tuple[str, str]]]] = []
         if args.owner:
             products_path = config_dir / "products.yaml"
             if products_path.exists():
-                for product_key, sources in parse_products_yaml(
-                    products_path, sites
-                ):
-                    try:
-                        service.add_product(args.owner, ProductSpec(product_key))
-                    except (ValueError, KeyError) as exc:
-                        print(
-                            f"config import: product {product_key!r} rejected: "
-                            f"{exc}\nImport is PARTIAL: sites and any earlier "
-                            "products/sources are already committed to "
-                            "config.db.", file=sys.stderr)
-                        return 1
-                    for site_name, url in sources:
-                        try:
-                            service.add_source(
-                                args.owner, product_key, site_name, url)
-                        except (ValueError, KeyError) as exc:
-                            print(
-                                f"config import: source rejected "
-                                f"(product={product_key!r}, site={site_name!r}, "
-                                f"url={url!r}): {exc}\nImport is PARTIAL: this "
-                                "product and any earlier products/sources are "
-                                "already committed to config.db; this "
-                                "source is not.", file=sys.stderr)
-                            return 1
-        print(f"imported {len(sites)} site(s)"
+                products = parse_products_yaml(products_path, sites)
+        try:
+            summary = service.import_config(args.owner, sites, products)
+        except ConfigImportError as exc:
+            print(
+                "config import: rejected, 0 writes "
+                f"({len(exc.errors)} error(s)):", file=sys.stderr)
+            for error in exc.errors:
+                print(f"  - {error}", file=sys.stderr)
+            return 1
+        print(f"imported {summary.sites} site(s)"
               + (f" for owner {args.owner!r}" if args.owner else ""))
+    except ConfigError as exc:
+        print(f"config import: {exc}", file=sys.stderr)
+        return 1
     finally:
         config_store.close()
         state_store.close()

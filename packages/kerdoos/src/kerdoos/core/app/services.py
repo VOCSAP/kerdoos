@@ -25,7 +25,11 @@ from kerdoos.core.fetcher_guard import tier_unavailable
 from kerdoos.core.orchestrator import scrape_and_record
 from kerdoos.parsers.ports import Parser, ParserSpec
 from kerdoos.persistence.ports import ScrapeRecord, StateStore
-from kerdoos.registry.errors import ConfigError, FetcherTierUnavailableError
+from kerdoos.registry.errors import (
+    ConfigError,
+    ConfigImportError,
+    FetcherTierUnavailableError,
+)
 from kerdoos.registry.ports import (
     DigestJob,
     MutableConfigStore,
@@ -41,6 +45,21 @@ from kerdoos.registry.ports import (
     validate_timezone,
 )
 from kerdoos.registry.url_validation import validate_source_url
+
+
+class _CombinedDomainPolicy:
+    """Validation-time view for import_config: the batch's OWN sites are
+    not committed yet when their products' source URLs are pre-validated,
+    so the live (DB-backed) domain policy alone would reject every one of
+    them. Allows a host if either the live policy already covers it, or
+    the batch itself declares a site for that domain."""
+
+    def __init__(self, base: DomainPolicy, batch: DomainPolicy) -> None:
+        self._base = base
+        self._batch = batch
+
+    def domain_allowed(self, host: str) -> bool:
+        return self._base.domain_allowed(host) or self._batch.domain_allowed(host)
 
 
 def _utcnow_iso() -> str:
@@ -103,6 +122,12 @@ class RunResult:
     records: list[ScrapeRecord]
     generated_at: str
     tier2_labels: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ImportSummary:
+    sites: int
+    products: int
 
 
 class AppService:
@@ -203,6 +228,81 @@ class AppService:
             source_id=source_id, product_id=product_key, site=site, url=url)
         self._config.add_source(owner, source)
         return source
+
+    def import_config(
+        self, owner: str | None,
+        sites: dict[str, SiteConfig],
+        products: list[tuple[str, list[tuple[str, str]]]],
+    ) -> ImportSummary:
+        """Bulk import (card a8d6ee3a, `kerdoos config import`): validates
+        the WHOLE batch first, using the exact predicates add_site/
+        add_source apply to a single entry, and writes nothing if any
+        entry fails -- add_product committing before that product's own
+        source is validated otherwise leaves a product with zero sources
+        in config.db on a rejected source."""
+        errors: list[str] = []
+        for site in sites.values():
+            if site.fetcher not in self._router.known_tiers():
+                errors.append(
+                    f"site {site.name!r} references unknown fetcher tier "
+                    f"{site.fetcher!r} (known: "
+                    f"{sorted(self._router.known_tiers())})")
+
+        # The batch's own sites aren't committed yet -- widen the domain
+        # policy for validation only, so a product source referencing a
+        # site FROM THIS SAME FILE isn't rejected as "unknown domain"
+        # purely because the write order hasn't happened yet.
+        validation_domain_policy = _CombinedDomainPolicy(
+            self._domain_policy,
+            DomainPolicy(frozenset(site.domain for site in sites.values())))
+
+        if owner:
+            for product_key, sources in products:
+                try:
+                    validate_product_key(product_key)
+                except ValueError as exc:
+                    errors.append(f"product {product_key!r}: {exc}")
+                for site_name, url in sources:
+                    # parse_products_yaml already rejects an unknown site
+                    # reference structurally before import_config is ever
+                    # called for the CLI path -- this stays defense-in-depth
+                    # for callers that do not go through that parser.
+                    site_config = sites.get(site_name)
+                    if site_config is None:
+                        errors.append(
+                            f"product {product_key!r} source "
+                            f"(site={site_name!r}): unknown site")
+                        continue
+                    if not self._router.tier_available(site_config.fetcher):
+                        errors.append(
+                            f"product {product_key!r} source "
+                            f"(site={site_name!r}): fetcher tier "
+                            f"{site_config.fetcher!r} not available in "
+                            "this deployment")
+                    try:
+                        validate_source_url(
+                            url, ctx=(
+                                f"import_config(owner={owner!r}, "
+                                f"product_key={product_key!r})"),
+                            domain_policy=validation_domain_policy)
+                    except ValueError as exc:
+                        errors.append(
+                            f"product {product_key!r} source "
+                            f"(site={site_name!r}, url={url!r}): {exc}")
+
+        if errors:
+            raise ConfigImportError(errors)
+
+        for site in sites.values():
+            self._config.add_site(site)
+        imported_products = 0
+        if owner:
+            for product_key, sources in products:
+                self.add_product(owner, ProductSpec(product_key))
+                for site_name, url in sources:
+                    self.add_source(owner, product_key, site_name, url)
+                imported_products += 1
+        return ImportSummary(sites=len(sites), products=imported_products)
 
     def remove_source(self, owner: str, source_id: str) -> None:
         self._config.remove_source(owner, source_id)

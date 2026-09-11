@@ -19,3 +19,13 @@ class FetcherTierUnavailableError(ConfigError):
     `slim` image, card 3aeb8a19). A ValueError/ConfigError subclass so the
     existing `except (ValueError, KeyError)` domain-error handling at the
     WebUI/CLI boundary catches it without any route change."""
+
+
+class ConfigImportError(ConfigError):
+    """A bulk import batch (AppService.import_config, card a8d6ee3a) failed
+    validation. Carries every rejected entry's message, not just the first
+    -- the caller reports them all and writes nothing."""
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__(f"{len(errors)} error(s): " + "; ".join(errors))

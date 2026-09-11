@@ -354,45 +354,26 @@ class CliBootWiringTest(_BootWiringTestBase):
 
 
 class ConfigImportTypoTierTest(unittest.TestCase):
-    """F1: `kerdoos config import` bypasses AppService.add_site's
-    known_tiers() validation entirely -- cmd_config_import (cli/main.py)
-    calls config_store.add_site directly, and yaml_store.py only checks the
-    `fetcher` field is present, not that it names a real tier. A typo'd
-    fetcher lands in config.db this way; tier_available's fail-closed
-    default on an unknown name is the ONE check that still catches it,
-    regardless of which door it came through."""
+    """`kerdoos config import` now rejects an unknown fetcher tier before
+    any write (card a8d6ee3a, AppService.import_config). A bad row can
+    still reach product_sources through another door (a direct store
+    write, a migration, a future interface) -- tier_available's
+    fail-closed default on an unknown name is the guard that catches it
+    regardless of which door it came through, so these tests seed the
+    typo'd site directly at the store layer rather than via import."""
 
     def setUp(self) -> None:
         self._dir = tempfile.mkdtemp(prefix="kerdoos-import-typo-")
         self.addCleanup(shutil.rmtree, self._dir, ignore_errors=True)
-        config_dir = Path(self._dir) / "config"
-        config_dir.mkdir()
-        (config_dir / "sites.yaml").write_text(
-            "sites:\n"
-            "  typo:\n"
-            "    fetcher: uC\n"
-            "    domain: example.com.br\n"
-            "    parser:\n"
-            "      kind: statejson\n"
-            "      pix: a\n"
-            "      card: b\n"
-            "      availability: c\n",
-            encoding="utf-8",
-        )
         self.config_db = os.path.join(self._dir, "config.db")
         self.state_db = os.path.join(self._dir, "state.db")
-        args = cli.build_parser_cli().parse_args([
-            "config", "import", "--config-dir", str(config_dir),
-            "--config-db", self.config_db, "--db", self.state_db,
-            "--owner", "owner1",
-        ])
-        self.assertEqual(cli.cmd_config_import(args), 0)
-
-    def test_import_lands_the_typo_unvalidated(self) -> None:
-        # Proves the bypass is real: cmd_config_import does not reject it.
         config = SqliteConfigStore(self.config_db)
         try:
-            self.assertIn("typo", config.load("owner1").sites)
+            config.add_site(SiteConfig(
+                name="typo", fetcher="uC", domain="example.com.br",
+                parser=ParserSpec(
+                    kind="statejson", pix="a", card="b", availability="c"),
+            ))
         finally:
             config.close()
 
