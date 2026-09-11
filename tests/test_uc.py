@@ -10,6 +10,7 @@ covered without a real browser. Real UC E2E is a blocking-before-prod fast-follo
 
 from __future__ import annotations
 
+import importlib.util
 import socket
 import unittest
 from pathlib import Path
@@ -191,7 +192,14 @@ class UcFetcherWiringTest(unittest.TestCase):
     def test_pins_and_builds_result_from_page_source(self) -> None:
         page = "<html>" + "x" * 5000 + "</html>"
         result, driver = self._run(page)
-        arg = driver.kwargs["chromium_arg"]
+        chromium_arg = driver.kwargs["chromium_arg"]
+        # A list, not a bare string: seleniumbase splits a STRING chromium_arg
+        # on commas (browser_launcher.py), which would truncate this rule's
+        # internal commas into bogus standalone switches and silently drop
+        # the deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
+        self.assertIsInstance(chromium_arg, list)
+        self.assertEqual(len(chromium_arg), 1)
+        arg = chromium_arg[0]
         self.assertIn(
             "--host-resolver-rules=MAP www.magazineluiza.com.br 104.18.0.1", arg)
         self.assertIn("MAP * ~NOTFOUND", arg)
@@ -229,6 +237,173 @@ class UcFetcherWiringTest(unittest.TestCase):
                 with self.assertRaises(Exception):
                     uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
         self.assertTrue(holder["driver"].quit_called)
+
+
+_HAS_SELENIUMBASE = importlib.util.find_spec("seleniumbase") is not None
+
+
+@unittest.skipUnless(
+    _HAS_SELENIUMBASE, "SeleniumBase not installed (autolycos[uc] extra)")
+class ChromiumArgSurvivesSeleniumBaseParsingTest(unittest.TestCase):
+    """Roadmap dde2d243: seleniumbase splits a STRING chromium_arg on commas
+    (browser_launcher.py get_local_driver/_set_chrome_options), truncating a
+    host-resolver-rules value's internal commas into bogus standalone
+    switches and silently dropping the deny-by-default MAP * ~NOTFOUND. Drives
+    the real kwarg through SeleniumBase's own option-construction function
+    (no Chrome launch) to prove the FULL rule survives as one argument -- a
+    test that only froze the list shape at the UcFetcher call site would not
+    have caught this regression class.
+    """
+
+    def _build_chrome_options(self, chromium_arg):
+        from seleniumbase import config as sb_config
+        from seleniumbase.core import browser_launcher
+        from seleniumbase.fixtures import constants
+
+        sb_config._ext_dirs = []
+        return browser_launcher._set_chrome_options(
+            browser_name=constants.Browser.GOOGLE_CHROME,
+            downloads_path=None, headless=True, locale_code=None,
+            proxy_string=None, proxy_auth=None, proxy_user=None,
+            proxy_pass=None, proxy_scheme=None, proxy_bypass_list=None,
+            proxy_pac_url=None, multi_proxy=None, user_agent=None,
+            recorder_ext=False, disable_cookies=False, disable_js=False,
+            disable_csp=False, enable_ws=False, enable_sync=False,
+            use_auto_ext=False, undetectable=True, uc_cdp_events=False,
+            uc_subprocess=False, log_cdp_events=False, no_sandbox=True,
+            disable_gpu=False, headless1=False, headless2=False,
+            incognito=False, guest_mode=False, dark_mode=False,
+            devtools=False, remote_debug=False, enable_3d_apis=False,
+            swiftshader=False, ad_block_on=False, host_resolver_rules=None,
+            block_images=False, do_not_track=False, chromium_arg=chromium_arg,
+            user_data_dir=None, extension_zip=None, extension_dir=None,
+            disable_features=None, binary_location=None, driver_version=None,
+            page_load_strategy=None, external_pdf=False, servername=None,
+            mobile_emulator=False, device_width=None, device_height=None,
+            device_pixel_ratio=None,
+        )
+
+    def test_list_shape_keeps_the_full_rule_as_one_argument(self) -> None:
+        rule = uc._host_resolver_rules(
+            _target("104.18.0.1"), ["mlcdn.com.br"])
+        options = self._build_chrome_options([f"--host-resolver-rules={rule}"])
+        matching = [a for a in options.arguments if "host-resolver-rules" in a]
+        self.assertEqual(matching, [f"--host-resolver-rules={rule}"])
+        # No bogus standalone switches from a comma-split.
+        self.assertFalse(any(a.startswith("--MAP") for a in options.arguments))
+        self.assertFalse(
+            any(a.startswith("--EXCLUDE") for a in options.arguments))
+
+    def test_flat_string_shape_truncates_into_bogus_switches(self) -> None:
+        # RED reference: proves this test actually catches the regression
+        # class, not just the CURRENT UcFetcher call site.
+        rule = uc._host_resolver_rules(
+            _target("104.18.0.1"), ["mlcdn.com.br"])
+        options = self._build_chrome_options(f"--host-resolver-rules={rule}")
+        self.assertIn(
+            "--host-resolver-rules=MAP www.magazineluiza.com.br 104.18.0.1",
+            options.arguments)
+        # The deny-by-default and the CDN exclude are LOST as real switches.
+        self.assertIn("--MAP * ~NOTFOUND", options.arguments)
+        self.assertIn("--EXCLUDE mlcdn.com.br", options.arguments)
+
+
+def _real_chromium_available() -> bool:
+    if not _HAS_SELENIUMBASE:
+        return False
+    from autolycos.adapters.uc import _find_patchright_chromium
+    return _find_patchright_chromium() is not None
+
+
+_HAS_REAL_CHROMIUM = _real_chromium_available()
+
+
+_NEUTRAL_POLICY = DomainPolicy(frozenset({"example.com"}))
+
+
+@unittest.skipUnless(
+    _HAS_REAL_CHROMIUM,
+    "needs a real patchright Chromium (autonomous image), not just SeleniumBase")
+class UcPinExecutionTest(unittest.TestCase):
+    """Roadmap dde2d243 acceptance test: rerunnable, real Chrome launch,
+    neutral targets ONLY (never Magalu -- IP reputation + cadence). Judges by
+    navigation exception / fetch() outcome, never by html_len or a substring
+    search in /proc/<pid>/cmdline (both are documented measurement traps for
+    this exact bug class: Chrome's error page can be large, and cmdline
+    substring search does not reveal whether a rule was truncated).
+
+    Drives the REAL UcFetcher.fetch() call to capture the ACTUAL
+    driver_kwargs it builds (via the same Driver-substitution the other
+    UcFetcherWiringTest cases use), then launches a real Chrome with those
+    EXACT captured kwargs -- so a future regression to a flat-string
+    chromium_arg in uc.py itself changes what gets launched here too,
+    unlike a test that only reconstructs its own hardcoded kwarg shape.
+    """
+
+    def _capture_real_kwargs(self, url: str, subresource_domains) -> dict:
+        holder: dict = {}
+
+        def _factory(**kwargs):
+            holder["kwargs"] = kwargs
+            return _FakeDriver("<html></html>", **kwargs)
+
+        with mock.patch.object(uc, "_load_seleniumbase",
+                               return_value=_factory):
+            uc.UcFetcher(_NEUTRAL_POLICY, subresource_domains).fetch(url)
+        return holder["kwargs"]
+
+    def test_bogus_pin_makes_navigation_fail(self) -> None:
+        # A bogus, non-routable IP fails validate_target's ip_is_safe guard
+        # (by design -- fail-closed), so it can never reach UcFetcher.fetch()
+        # for real. This directly exercises the rule builder + Driver launch
+        # the way UcFetcherWiringTest does, with a REAL Chrome instead of a
+        # fake, to prove the pin itself is honored end-to-end.
+        target = ValidatedTarget(url="https://example.com/", scheme="https",
+                                 host="example.com", port=443, ip="192.0.2.1")
+        rule = uc._host_resolver_rules(target, [])
+        from autolycos.adapters.uc import _find_patchright_chromium
+        from seleniumbase import Driver
+
+        binary = _find_patchright_chromium()
+        driver = Driver(uc=True, headless=True, binary_location=binary,
+                        chromium_arg=[f"--host-resolver-rules={rule}"])
+        try:
+            with self.assertRaises(Exception) as ctx:
+                driver.get("https://example.com/")
+            self.assertIn("ERR_CONNECTION_REFUSED", str(ctx.exception))
+        finally:
+            driver.quit()
+
+    def test_deny_by_default_blocks_unlisted_host_but_allows_excluded_cdn(
+            self) -> None:
+        # www.iana.org, not the bare "iana.org" -- the latter 301-redirects
+        # to the former, and a redirect target not itself EXCLUDEd would be
+        # blocked, giving a false negative unrelated to this bug.
+        real_kwargs = self._capture_real_kwargs(
+            "https://example.com/", ["www.iana.org"])
+        from seleniumbase import Driver
+
+        driver = Driver(**real_kwargs)
+        try:
+            driver.get("https://example.com/")
+            driver.sleep(2)
+            # mode: "no-cors" resolves on ANY successful connection (opaque
+            # response) regardless of CORS headers, and throws ONLY on a
+            # real network/DNS-level failure -- unlike a default-mode
+            # fetch(), whose "Failed to fetch" is ambiguous between a CORS
+            # rejection and an actual connection failure.
+            unlisted = driver.execute_script(
+                "return fetch('https://example.org/', {mode: 'no-cors'})"
+                ".then(r => 'RESOLVED:' + r.type)"
+                ".catch(e => 'THREW:' + e.message)")
+            self.assertTrue(unlisted.startswith("THREW"), unlisted)
+            excluded = driver.execute_script(
+                "return fetch('https://www.iana.org/', {mode: 'no-cors'})"
+                ".then(r => 'RESOLVED:' + r.type)"
+                ".catch(e => 'THREW:' + e.message)")
+            self.assertTrue(excluded.startswith("RESOLVED"), excluded)
+        finally:
+            driver.quit()
 
 
 if __name__ == "__main__":

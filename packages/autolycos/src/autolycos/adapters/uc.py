@@ -169,7 +169,13 @@ class UcFetcher:
         driver_kwargs = {
             "uc": True,
             "headless": True,
-            "chromium_arg": f"--host-resolver-rules={rule}",
+            # A list, not a bare string: SeleniumBase splits a string
+            # chromium_arg on commas (browser_launcher.py get_local_driver),
+            # which truncates this rule's internal commas (Chromium's own
+            # syntax for composing MAP/EXCLUDE sub-rules in one flag value)
+            # into bogus standalone switches, silently dropping the
+            # deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
+            "chromium_arg": [f"--host-resolver-rules={rule}"],
         }
         binary_location = _find_patchright_chromium()
         if binary_location is not None:
