@@ -41,6 +41,7 @@ settle (networkidle) is request COMPLETION, NOT retry (retry lives in the core).
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import uuid
@@ -53,6 +54,8 @@ from ..egress_proxy import PinningProxy, strip_dangerous_browser_args
 from ..errors import FetchError
 from ..ports import FetchResult
 from ..safety import DomainPolicy, validate_target
+
+logger = logging.getLogger(__name__)
 
 MAX_HTML_BYTES = 5 * 1024 * 1024   # 5 MiB cap (largest recon dump ~1.5 MiB)
 NAV_TIMEOUT_MS = 30_000
@@ -85,6 +88,13 @@ _LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
 # killed and unblocks -- refuse new fetches past this ceiling rather than
 # grow it without limit.
 MAX_ABANDONED_FETCH_THREADS = 5
+# Max seconds to wait for a SIGKILLed process tree to actually finish dying
+# before releasing the browser gate. A bare kill() only SENDS the signal
+# and returns immediately -- measured, an instrumented gate saw the
+# targeted processes still genuinely running for ~0.5s after kill()
+# returned, a window in which another caller could acquire the
+# just-released gate slot while THIS fetch's Chromium is still alive.
+_KILL_WAIT_SECONDS = 5.0
 
 _abandoned_fetch_threads_lock = threading.Lock()
 _abandoned_fetch_thread_count = 0
@@ -150,6 +160,8 @@ def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
     is patchright's own Node driver process (cmdline contains
     "patchright"), and all of their descendants (zygote/renderer/gpu/
     utility children, which do not carry the marker in their own argv).
+    Only ever called from _kill_launch_processes, which already confirmed
+    psutil is importable -- no ImportError guard needed here.
     """
     import psutil
 
@@ -184,20 +196,50 @@ def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
     return list(tree.values())
 
 
-def _kill_launch_processes(marker: str) -> None:
-    """Best-effort: kill only the process tree of the fetch tagged with
-    `marker`, so a fetch abandoned at the deadline never leaves a live (or
-    stopped/frozen) Chromium behind without also hitting a concurrent,
-    unrelated fetch's own process. SIGKILL works on a stopped process
-    without needing SIGCONT first (measured). psutil is optional (declared
-    under the `browser` extra); any error here is swallowed -- this is
-    cleanup, not correctness.
+def _kill_launch_processes(marker: str) -> bool:
+    """Best-effort: kill the process tree of the fetch tagged with `marker`
+    and WAIT (bounded by _KILL_WAIT_SECONDS) for it to actually finish
+    dying before returning, so a caller releasing the browser gate right
+    after this call never does so while a process from THIS fetch could
+    still be alive -- a bare kill() only SENDS SIGKILL and returns
+    immediately, before the kernel finishes tearing the process down
+    (measured). SIGKILL works on a stopped process without needing SIGCONT
+    first (measured).
+
+    psutil is declared under the `browser` extra, but its import is
+    guarded rather than assumed: a broken or partial install must still
+    let the caller raise its own FetchError instead of an unrelated
+    ModuleNotFoundError escaping uncaught.
+
+    Returns True if every matched process is confirmed dead (or none
+    matched at all), False if some survived the wait or psutil itself
+    could not be imported -- the caller uses this to decide whether the
+    abandoned-fetch ceiling should still count this fetch as a live risk.
     """
-    for proc in _launch_process_tree(marker):
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001 -- any import failure, not just missing
+        logger.warning(
+            "browser tier: psutil is unavailable -- cannot verify or kill "
+            "the process tree for fetch marker %s; its Chromium may still "
+            "be running.", marker)
+        return False
+
+    tree = _launch_process_tree(marker)
+    if not tree:
+        return True
+    for proc in tree:
         try:
             proc.kill()
         except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
             pass
+    _gone, alive = psutil.wait_procs(tree, timeout=_KILL_WAIT_SECONDS)
+    if alive:
+        logger.warning(
+            "browser tier: %d process(es) tagged %s survived SIGKILL + "
+            "%.1fs wait: %s", len(alive), marker, _KILL_WAIT_SECONDS,
+            [(p.pid, p.name()) for p in alive])
+    return not alive
 
 
 class BrowserFetcher:
@@ -241,7 +283,8 @@ class BrowserFetcher:
         global _abandoned_fetch_thread_count
         with _abandoned_fetch_threads_lock:
             abandoned_now = _abandoned_fetch_thread_count
-        if abandoned_now >= MAX_ABANDONED_FETCH_THREADS:
+            refuse = abandoned_now >= MAX_ABANDONED_FETCH_THREADS
+        if refuse:
             raise FetchError(
                 f"browser tier refused: {abandoned_now} abandoned fetch(es) "
                 f"not yet resolved (ceiling {MAX_ABANDONED_FETCH_THREADS})")
@@ -340,12 +383,12 @@ class BrowserFetcher:
                 holder[kind] = value
             else:
                 # The deadline already fired and the main thread moved on:
-                # this fetch's result is unreachable either way, so kill its
-                # process tree (idempotent if the main thread's own kill
-                # already ran) and stop counting it as abandoned.
+                # this fetch's result is unreachable either way. The main
+                # thread's own timeout branch already killed (and waited
+                # for) this process tree and is solely responsible for the
+                # abandoned-fetch ceiling; this call is a harmless,
+                # idempotent backstop, not a second source of truth.
                 _kill_launch_processes(marker)
-                with _abandoned_fetch_threads_lock:
-                    _abandoned_fetch_thread_count -= 1
 
         # Gate acquired around the whole launch-to-close cycle (card
         # ca30b736: ADR 0002 Decision 1's single-Chromium OOM-coherence
@@ -357,9 +400,19 @@ class BrowserFetcher:
             run_thread.start()
             run_thread.join(timeout=self._fetch_timeout_seconds)
             if run_thread.is_alive() and _claim():
-                with _abandoned_fetch_threads_lock:
-                    _abandoned_fetch_thread_count += 1
-                _kill_launch_processes(marker)
+                killed_cleanly = _kill_launch_processes(marker)
+                if not killed_cleanly:
+                    # Only a CONFIRMED-still-alive process tree counts
+                    # against the ceiling: once _kill_launch_processes
+                    # returns True, this fetch holds no OS resources
+                    # anymore, regardless of whether the abandoned Python
+                    # thread itself ever notices and returns. Incrementing
+                    # unconditionally at the deadline would turn a
+                    # resource-leak safety net into a permanent refusal
+                    # after enough confirmed-clean freezes (roadmap
+                    # d8b7b8fd).
+                    with _abandoned_fetch_threads_lock:
+                        _abandoned_fetch_thread_count += 1
                 raise FetchError(
                     f"browser fetch exceeded {self._fetch_timeout_seconds}s "
                     "total timeout")

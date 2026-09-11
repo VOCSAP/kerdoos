@@ -16,8 +16,11 @@ dependencies = [
 # patchright (drop-in playwright fork) launches an undetected Chromium (deep
 # launch-time patches, Kleos #11050); playwright-stealth layers JS-level
 # evasion on each page. The vanilla playwright dep is intentionally dropped
-# here -- patchright provides the same sync_api surface (Phase 2b).
-browser = ["patchright>=1.49", "playwright-stealth>=2.0"]
+# here -- patchright provides the same sync_api surface (Phase 2b). psutil
+# kills any Chromium process tree left behind when a fetch is abandoned at
+# BROWSER_FETCH_TIMEOUT_SECONDS (roadmap d8b7b8fd) -- required, not optional
+# cleanup, since it runs on every browser fetch's launch-to-close path.
+browser = ["patchright>=1.49", "playwright-stealth>=2.0", "psutil>=5.9"]
 tls = ["curl_cffi>=0.7"]
 # psutil kills any chromedriver/Chrome process left behind when a uc launch
 # is abandoned at UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071) -- required,

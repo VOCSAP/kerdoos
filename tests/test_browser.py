@@ -442,6 +442,20 @@ class _HangingBrowser:
         self.closed = True
 
 
+class _NeverReturningBrowser:
+    """A launched Chromium standing in: new_page() blocks forever WITHOUT
+    spawning any real OS process -- used only where the process side of
+    the kill is irrelevant to what is being tested (e.g. psutil itself
+    being unavailable, roadmap d8b7b8fd).
+    """
+
+    def new_page(self):  # noqa: ANN201
+        threading.Event().wait()  # never set: blocks this thread forever
+
+    def close(self) -> None:
+        pass
+
+
 class _HangingThenUnblockedBrowser:
     """Simulates a real frozen Chromium's pipe read: new_page() blocks until
     `unblock_event` is set (standing in for the OS finally reporting the
@@ -560,6 +574,18 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
     tree, never a concurrent unrelated fetch's.
     """
 
+    def setUp(self) -> None:
+        # The abandoned-fetch counter is a module-level global (roadmap
+        # d8b7b8fd): isolate each test from whatever an earlier one left
+        # behind.
+        with browser._abandoned_fetch_threads_lock:
+            self._saved_abandoned_count = browser._abandoned_fetch_thread_count
+            browser._abandoned_fetch_thread_count = 0
+
+    def tearDown(self) -> None:
+        with browser._abandoned_fetch_threads_lock:
+            browser._abandoned_fetch_thread_count = self._saved_abandoned_count
+
     def _hanging_chromium(self, spawned: list) -> _FakeChromium:
         chromium = _FakeChromium(browser_obj=None)
 
@@ -620,6 +646,22 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
         self.assertIsNotNone(
             proc.poll(), "the spawned child process was not killed")
 
+    def test_process_confirmed_dead_before_fetch_even_returns(self) -> None:
+        """A bare kill() sends SIGKILL and returns immediately, before the
+        kernel finishes tearing the process down -- measured, an
+        instrumented gate saw the targeted processes still genuinely
+        running ~0.5s after kill() returned (roadmap d8b7b8fd).
+        _kill_launch_processes must WAIT for the actual death before
+        fetch() ever raises, so THIS check (no extra wait of its own,
+        unlike the sibling test above) proves the confirmation already
+        happened inside fetch()."""
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        self._fetch_with_frozen_step(gate, spawned)
+        self.assertIsNotNone(
+            spawned[0].poll(),
+            "the process was not yet confirmed dead when fetch() returned")
+
     def test_frozen_fetch_kills_only_its_own_process_tree(self) -> None:
         gate = BrowserGate(max_concurrent=2)
         own_spawned: list = []
@@ -665,6 +707,112 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
                         browser.BrowserFetcher(_POLICY, gate=gate).fetch(
                             "https://mercadolivre.com.br/p/MLB1")
                     load_pw.assert_not_called()
+
+    def test_five_confirmed_kills_never_trip_the_ceiling_sixth_accepted(
+            self) -> None:
+        """Incrementing the ceiling counter must be tied to whether the
+        kill could actually be confirmed, not to the deadline firing by
+        itself (roadmap d8b7b8fd): 5 real freezes, each genuinely
+        SIGKILLed and confirmed dead, must never count against the
+        ceiling at all, so a 6th fetch is accepted normally."""
+        gate = BrowserGate(max_concurrent=1)
+        for _ in range(5):
+            spawned: list = []
+            _, raised = self._fetch_with_frozen_step(
+                gate, spawned, fetch_timeout_seconds=0.2)
+            self.assertIsInstance(raised, FetchError)
+            spawned[0].wait(timeout=5)
+
+        with browser._abandoned_fetch_threads_lock:
+            count = browser._abandoned_fetch_thread_count
+        self.assertEqual(
+            count, 0,
+            "a fetch whose process tree was confirmed dead must never "
+            "count against the abandoned-fetch ceiling")
+
+        page = _FakePage("<html>ok</html>", 200)
+        chromium = _FakeChromium(browser_obj=_FakeBrowser(page))
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                result = browser.BrowserFetcher(_POLICY, gate=gate).fetch(
+                    "https://mercadolivre.com.br/p/MLB1")
+        self.assertEqual(result.method, "browser")
+
+    def test_unconfirmed_kill_does_count_against_the_ceiling(self) -> None:
+        """The ceiling must still protect against a GENUINE leak: if
+        psutil.wait_procs reports a survivor (the kill could not be
+        confirmed), the fetch counts against MAX_ABANDONED_FETCH_THREADS."""
+        gate = BrowserGate(max_concurrent=1)
+        spawned: list = []
+        survivor = mock.MagicMock()
+        survivor.pid = 999_999
+        survivor.name.return_value = "chrome-headless"
+        with mock.patch("psutil.wait_procs", return_value=([], [survivor])):
+            self._fetch_with_frozen_step(
+                gate, spawned, fetch_timeout_seconds=0.2)
+        with browser._abandoned_fetch_threads_lock:
+            count = browser._abandoned_fetch_thread_count
+        self.assertEqual(
+            count, 1,
+            "a kill that could not be confirmed must still count against "
+            "the ceiling")
+        spawned[0].kill()
+
+
+class BrowserFetchPsutilAbsentTest(unittest.TestCase):
+    """Roadmap d8b7b8fd: psutil is declared under the `browser` extra,
+    but a broken/partial install must still degrade to a clean
+    FetchError -- never an uncaught ModuleNotFoundError escaping fetch()'s
+    timeout branch, and the ceiling must treat "cannot even check" as an
+    unconfirmed (dangerous) kill.
+    """
+
+    def setUp(self) -> None:
+        with browser._abandoned_fetch_threads_lock:
+            self._saved_abandoned_count = browser._abandoned_fetch_thread_count
+            browser._abandoned_fetch_thread_count = 0
+
+    def tearDown(self) -> None:
+        with browser._abandoned_fetch_threads_lock:
+            browser._abandoned_fetch_thread_count = self._saved_abandoned_count
+
+    def test_missing_psutil_raises_fetch_error_not_module_not_found_error(
+            self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        chromium = _FakeChromium(browser_obj=None)
+
+        def _launch(**kwargs):  # noqa: ANN003
+            chromium.launch_kwargs = kwargs
+            return _NeverReturningBrowser()
+
+        chromium.launch = _launch  # noqa: SLF001 -- test-only override
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+
+        # sys.modules[name] = None forces a bare `import psutil` inside the
+        # code under test to raise ImportError.
+        with mock.patch.dict(sys.modules, {"psutil": None}):
+            with mock.patch.object(safety.socket, "getaddrinfo",
+                                   return_value=_addrinfo("104.18.0.1")):
+                with mock.patch.object(browser, "_load_playwright",
+                                       return_value=fake_sync_playwright), \
+                     mock.patch.object(browser, "_load_stealth",
+                                       return_value=_FakeStealth):
+                    fetcher = browser.BrowserFetcher(
+                        _POLICY, gate=gate, fetch_timeout_seconds=0.2)
+                    with self.assertRaises(FetchError):
+                        fetcher.fetch("https://mercadolivre.com.br/p/MLB1")
+
+        with browser._abandoned_fetch_threads_lock:
+            count = browser._abandoned_fetch_thread_count
+        self.assertEqual(
+            count, 1,
+            "psutil being unavailable must count as an unconfirmed "
+            "(dangerous) kill, not a silent no-op")
 
 
 _HAS_POSIX_SHELL = os.name == "posix" and Path("/bin/sh").exists()

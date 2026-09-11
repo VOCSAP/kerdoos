@@ -107,6 +107,7 @@ dependencies = [
 browser = [
     { name = "patchright" },
     { name = "playwright-stealth" },
+    { name = "psutil" },
 ]
 tls = [
     { name = "curl-cffi" },
@@ -127,6 +128,7 @@ requires-dist = [
     { name = "curl-cffi", marker = "extra == 'tls'", specifier = ">=0.7" },
     { name = "patchright", marker = "extra == 'browser'", specifier = ">=1.49" },
     { name = "playwright-stealth", marker = "extra == 'browser'", specifier = ">=2.0" },
+    { name = "psutil", marker = "extra == 'browser'", specifier = ">=5.9" },
     { name = "psutil", marker = "extra == 'uc'", specifier = ">=5.9" },
     { name = "requests", specifier = ">=2.34" },
     { name = "seleniumbase", marker = "extra == 'uc'", specifier = ">=4.24" },
