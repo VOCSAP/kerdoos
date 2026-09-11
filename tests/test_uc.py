@@ -11,6 +11,7 @@ covered without a real browser. Real UC E2E is a blocking-before-prod fast-follo
 from __future__ import annotations
 
 import importlib.util
+import os
 import socket
 import unittest
 from pathlib import Path
@@ -321,9 +322,6 @@ _HAS_REAL_CHROMIUM = _real_chromium_available()
 _NEUTRAL_POLICY = DomainPolicy(frozenset({"example.com"}))
 
 
-@unittest.skipUnless(
-    _HAS_REAL_CHROMIUM,
-    "needs a real patchright Chromium (autonomous image), not just SeleniumBase")
 class UcPinExecutionTest(unittest.TestCase):
     """Roadmap dde2d243 acceptance test: rerunnable, real Chrome launch,
     neutral targets ONLY (never Magalu -- IP reputation + cadence). Judges by
@@ -339,6 +337,17 @@ class UcPinExecutionTest(unittest.TestCase):
     chromium_arg in uc.py itself changes what gets launched here too,
     unlike a test that only reconstructs its own hardcoded kwarg shape.
     """
+
+    def setUp(self) -> None:
+        if _HAS_REAL_CHROMIUM:
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but no real patchright "
+                "Chromium was found -- run inside the autonomous image")
+        self.skipTest(
+            "needs a real patchright Chromium (autonomous image), not just "
+            "SeleniumBase")
 
     def _capture_real_kwargs(self, url: str, subresource_domains) -> dict:
         holder: dict = {}
@@ -402,6 +411,58 @@ class UcPinExecutionTest(unittest.TestCase):
                 ".then(r => 'RESOLVED:' + r.type)"
                 ".catch(e => 'THREW:' + e.message)")
             self.assertTrue(excluded.startswith("RESOLVED"), excluded)
+        finally:
+            driver.quit()
+
+    def _fetch_no_cors(self, driver, url: str) -> str:
+        return driver.execute_script(
+            "return fetch(arguments[0], {mode: 'no-cors'})"
+            ".then(r => 'RESOLVED:' + r.type)"
+            ".catch(e => 'THREW:' + e.message)", url)
+
+    def test_deny_by_default_blocks_literal_ip_targets(self) -> None:
+        # Card c06082a5 (URL-to-JS injection in uc_open_with_reconnect):
+        # severity depends on whether MAP * ~NOTFOUND -- proven above for
+        # DNS names -- ALSO covers literal IPs reached directly from injected
+        # page JS, never resolved by name. Both the security and debugger
+        # tracks currently ASSUME it does; this measures it. Reported target
+        # by target: one passing target does not imply the others do.
+        real_kwargs = self._capture_real_kwargs("https://example.com/", [])
+        from seleniumbase import Driver
+
+        driver = Driver(**real_kwargs)
+        try:
+            driver.get("https://example.com/")
+            driver.sleep(2)
+            targets = {
+                "cloud-metadata (169.254.169.254)": "http://169.254.169.254/",
+                "private-range (10.0.0.1)": "http://10.0.0.1/",
+                "loopback-v4 (127.0.0.1:8000)": "http://127.0.0.1:8000/",
+                "loopback-v6 ([::1])": "http://[::1]/",
+            }
+            for label, url in targets.items():
+                with self.subTest(target=label):
+                    result = self._fetch_no_cors(driver, url)
+                    self.assertTrue(
+                        result.startswith("THREW"),
+                        f"{label} was NOT blocked: {result}")
+        finally:
+            driver.quit()
+
+    def test_redirect_to_unlisted_host_is_blocked(self) -> None:
+        # EXCLUDE "iana.org" (bare) only. iana.org 301-redirects to
+        # www.iana.org, which is NOT excluded -- the redirect TARGET must be
+        # re-checked against the deny-by-default, not just the initial host.
+        real_kwargs = self._capture_real_kwargs(
+            "https://example.com/", ["iana.org"])
+        from seleniumbase import Driver
+
+        driver = Driver(**real_kwargs)
+        try:
+            driver.get("https://example.com/")
+            driver.sleep(2)
+            result = self._fetch_no_cors(driver, "https://iana.org/")
+            self.assertTrue(result.startswith("THREW"), result)
         finally:
             driver.quit()
 

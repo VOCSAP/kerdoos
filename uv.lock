@@ -115,6 +115,11 @@ uc = [
     { name = "seleniumbase" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "seleniumbase" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "curl-cffi", marker = "extra == 'tls'", specifier = ">=0.7" },
@@ -124,6 +129,9 @@ requires-dist = [
     { name = "seleniumbase", marker = "extra == 'uc'", specifier = ">=4.24" },
 ]
 provides-extras = ["browser", "tls", "uc"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "seleniumbase", specifier = ">=4.24" }]
 
 [[package]]
 name = "beautifulsoup4"

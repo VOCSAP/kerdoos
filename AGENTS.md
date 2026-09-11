@@ -36,13 +36,18 @@ docs/adr/            architecture decision records (authoritative)
 - Target Python: `>=3.11`.
 - Do not introduce a new tool chain without an ADR. The stack above is decided
   (see `docs/adr/0002`).
-- Some tests skip outside the `autonomous` Docker image (no SeleniumBase/real
-  Chromium on a plain dev machine). Run them before touching `uc.py`:
+- Some tests skip outside the `autonomous` Docker image (no real Chromium on
+  a plain dev machine). Mandatory before pushing a change to `uc.py`,
+  `autolycos/safety.py`, the `Dockerfile`, or a `uv.lock` update touching
+  `seleniumbase`/`patchright`:
   ```bash
   docker build --target autonomous -t kerdoos:autonomous .
-  docker run --rm -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
+  docker run --rm -e KERDOOS_REQUIRE_IMAGE_TESTS=1 \
+    -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
     sh -c "cd /tmp && python3 -m pytest tests/test_uc.py -k UcPinExecution"
   ```
+  `KERDOOS_REQUIRE_IMAGE_TESTS=1` turns the skip into a hard failure if the
+  image lacks a real Chromium -- a silent skip must never read as a pass.
 
 ## Invariants (do not violate)
 
