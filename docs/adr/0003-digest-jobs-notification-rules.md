@@ -115,7 +115,7 @@ CREATE TABLE job_runs (
     window_start TEXT NOT NULL,   -- borne de la fenetre planifiee (clef d'idempotence, cf. D4)
     fired_at  TEXT NOT NULL,
     sent_at   TEXT,               -- NULL si echoue/skippe
-    status    TEXT NOT NULL,      -- 'queued'|'running' (transitoires), puis 'sent'|'error'|'skipped_no_email'|'skipped_no_sources'
+    status    TEXT NOT NULL,      -- 'queued'|'running' (transitoires), puis 'sent'|'error'|'skipped_no_email'
     error     TEXT,
     PRIMARY KEY (job_id, window_start)
 );
@@ -124,11 +124,11 @@ CREATE TABLE job_runs (
 Cycle reel d'une ligne `job_runs` : inseree en `queued`, passee en `running` avant
 l'envoi, puis terminale en `sent`, `error` (echec ou timeout d'envoi, ou ligne restee
 `queued`/`running` au-dela du delai maximal d'envoi et passee en `error` par le
-reaper) ou `skipped_no_email`. Un job sans source ecrit directement
-`skipped_no_sources`. Un refus d'envoi pour capacite (plafond de threads d'envoi
-orphelins atteint) n'ecrit **aucune** ligne : la fenetre reste rejouable au tick
-suivant. Toute ligne ecrite consomme sa fenetre (cle primaire). La colonne est un
-`TEXT` sans contrainte `CHECK`.
+reaper) ou `skipped_no_email`. Deux cas n'ecrivent **aucune** ligne et ne consomment
+donc **pas** la fenetre, retentee au tick suivant : un job qui n'a rien a envoyer
+(voir la note "Cascade" ci-dessous) et un refus d'envoi pour capacite (plafond de
+threads d'envoi orphelins atteint). Toute ligne ecrite consomme sa fenetre (cle
+primaire). La colonne est un `TEXT` sans contrainte `CHECK`.
 
 ### Notes structurelles
 - **Piege #11162 EVITE** : les contraintes `UNIQUE` sont **inline dans le `CREATE
@@ -150,10 +150,14 @@ suivant. Toute ligne ecrite consomme sa fenetre (cle primaire). La colonne est u
   job de B ET **0 scrape** declenche pour B sur l'URL de A.
 - **Cascade** : `ON DELETE CASCADE` sur les deux FK. Supprimer un job -> ses liaisons
   partent. Supprimer une source -> elle disparait de tous les jobs qui la referencaient.
-  Un job qui se retrouve a **zero source** est **skippe** par l'evaluateur : aucun
-  mail vide, une ligne `job_runs` au statut `skipped_no_sources`, fenetre consommee.
-  Il n'est **pas encore signale dans la WebUI** : l'affichage du dernier statut d'un
-  job n'existe pas (carte 3c557a9c).
+  Un job qui se retrouve a **zero source** n'envoie jamais de mail vide. La meme
+  garde couvre le chemin frere : un job dont les sources n'ont encore **aucun
+  historique** (jamais scrapees, scrape en echec, tier indisponible en permanence).
+  Dans les deux cas, rien n'est envoye, aucune ligne `job_runs` n'est ecrite, la
+  fenetre n'est pas consommee et le job est retente a chaque tick ; un WARNING est
+  journalise une seule fois par `(job_id, window_start)`. Ce cas n'est **pas signale
+  dans la WebUI** : l'affichage du dernier statut d'un job n'existe pas (carte
+  3c557a9c).
 - **Pas de FK cross-DB** : `job_runs` (state.db) ne peut pas FK vers `digest_jobs`
   (config.db). Le lien est logique ; le `DigestService` lit les deux stores et joint
   en memoire (coherent avec `AppService` qui lit deja config + etat).
