@@ -270,15 +270,20 @@ source** dans le Plan A + `continue` + log WARNING. Un job (ou une source) defai
 ne bloque ni le tick ni les autres jobs/owners.
 
 ### Singleton par job -- coalescing (securite -5 #4, minimum vital)
-Si le run precedent d'un job est **encore queued/running** (file `max_concurrent=1`),
-**SKIP le tick** pour ce job au lieu d'empiler un doublon (**coalescing**). Idem
-scrape : une source deja en file n'est pas re-enfilee. C'est DISTINCT du garde-fou de
-frequence par site refuse par l'operateur (D7) : le singleton ne limite pas la
-cadence, il empeche seulement un job/scrape de **s'empiler sur lui-meme** (protege la
-file `max_concurrent=1` d'un backlog auto-inflige). Complements recommandes par -5 :
-plafond global de jobs concurrents+queued par owner/instance, et **detection de
-backlog** (metrique profondeur de file + warning WebUI). Le singleton-par-job est
-**remonte a l'operateur pour confirmation** (Q-g).
+Si le run precedent d'un job est **encore queued/running** (ligne `job_runs` active,
+`StateStore.has_active_job_run`), **SKIP le tick** pour ce job au lieu d'empiler un
+doublon (**coalescing**). Il n'existe **pas de file commune** : cote scrape, le Plan A
+n'enfile rien, il saute une source deja assez fraiche (D3) et execute les autres en
+sequence ; cote `run_now`, la `RunQueue` fusionne une demande pour un owner deja en
+file ou en cours (ADR 0002 Decision 1). C'est DISTINCT du garde-fou de frequence par
+site refuse par l'operateur (D7) : le singleton ne limite pas la cadence, il empeche
+seulement un job de **s'empiler sur lui-meme**. Plafonds reels : cote Plan B, un
+semaphore d'envoi par instance (`max_concurrent_sends`, defaut 1) et un plafond de
+threads d'envoi orphelins (au-dela, l'envoi est refuse sans consommer la fenetre) ;
+cote memoire, la porte Chromium (`KERDOOS_BROWSER_MAX_CONCURRENT`, ADR 0002
+Decision 2). La **detection de backlog** recommandee par -5 (metrique de profondeur
+de file + warning WebUI) n'est **pas implementee** (carte 3c557a9c). Le
+singleton-par-job est **remonte a l'operateur pour confirmation** (Q-g).
 
 ### Options ecartees
 - **APScheduler / N tasks (un par job)** : N tasks asyncio = complexite de cycle de vie
@@ -437,9 +442,12 @@ gate code Phase 6.
   aucun `|safe` sur data user/scrapee + `href` filtre scheme-allowlist http/https via
   `autolycos.safety.check_scheme_and_domain` (detaille en D5). Vaut pour le mail ET un
   eventuel re-rendu WebUI "voir dans le navigateur".
-- **S4 [MEDIUM] DoS interne de la file `max_concurrent=1`** : **singleton par job
-  (coalescing)** minimum vital + plafond global concurrents+queued par owner/instance +
-  detection de backlog (detaille en D4). Distinct du garde-fou frequence (D7).
+- **S4 [MEDIUM] DoS interne (backlog auto-inflige)** : **singleton par job
+  (coalescing)** minimum vital + plafonds de concurrence + detection de backlog
+  (detaille en D4). Realisation : aucune file commune ; le singleton par job, le
+  semaphore d'envoi, le plafond d'orphelins d'envoi et la porte Chromium sont en
+  place, la detection de backlog ne l'est pas (D4). Distinct du garde-fou frequence
+  (D7).
 - **S5 [LOW/CONFIRME] SSTI ferme** par l'approche liste-blanche (D5) : templates
   dev-authored versionnes + options = enum ferme, jamais du texte libre injecte dans la
   source du template. Self-ban anti-bot = assume (D7).
@@ -457,7 +465,7 @@ un test de coalescing (S4).
 | D1 scheduler S-B (asyncio intra-process, workers=1 + garde-fou) | **CONSERVE** : le timer unique devient un **evaluateur multi-jobs** ; meme coeur. |
 | D1 `kerdoos digest` = batch quotidien | **GENERALISE** : `kerdoos digest` = un tick d'evaluation (D8). |
 | 3-etats, try/except isolation, digest partiel, SMTP config | **CONSERVE**, applique **par job** au lieu de par owner. |
-| D2 workers=1/max_concurrent=1, D6 volume /data, secrets | **INCHANGE**. |
+| D2 `workers=1` et une seule instance Chromium (`KERDOOS_BROWSER_MAX_CONCURRENT=1`), D6 volume /data, secrets | **INCHANGE**. |
 
 Mettre a jour l'en-tete de la section Phase 6 d'ADR 0002 avec une note
 "SUPERSEDED by ADR 0003" (a faire a l'ACCEPTED de 0003).
