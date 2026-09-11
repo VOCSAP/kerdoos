@@ -24,7 +24,7 @@
       <div class="field">
         <label class="field__label" for="fetcher">Fetcher</label>
         <select class="select" id="fetcher" name="fetcher" required>
-          {% for f in ("http", "tls", "browser", "uc") %}
+          {% for f in tier_ladder %}
           <option value="{{ f }}">{{ f }}</option>
           {% endfor %}
         </select>

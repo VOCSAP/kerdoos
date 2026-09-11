@@ -17,13 +17,28 @@ from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
 
+from autolycos.router import known_tiers
 from kerdoos.core.domain import Availability, ScrapeStatus
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 
-# Fetcher escalation ladder (invariant #6): the tier micro-indicator shows how
-# hard we had to push to read this price. Order is cost-ascending.
-_TIER_LADDER = ("http", "tls", "browser", "uc")
+# Cost-ascending rank (invariant #6) -- presentation only. Membership comes
+# from the router, so a tier the router gains cannot silently miss the admin
+# form nor the micro-indicator; a tier missing here only loses its rank.
+_TIER_COST_ORDER = ("http", "tls", "browser", "uc")
+
+
+def _ordered_tiers() -> tuple[str, ...]:
+    """Every tier the router knows, cost-ascending. known_tiers() is a
+    frozenset, so sorting is also what keeps the rendering deterministic
+    across processes; an unranked tier sorts last, by name."""
+    rank = {name: idx for idx, name in enumerate(_TIER_COST_ORDER)}
+    return tuple(sorted(
+        known_tiers(), key=lambda name: (rank.get(name, len(rank)), name)))
+
+
+# The tier micro-indicator shows how hard we had to push to read this price.
+_TIER_LADDER = _ordered_tiers()
 
 
 def format_brl(cents: int | None) -> str:
@@ -68,7 +83,8 @@ def availability_label(availability: Availability | str) -> str:
 
 
 def tier_level(method: str | None) -> int:
-    """Escalation depth 0..4 for the tier micro-indicator (0 = unknown)."""
+    """Escalation depth for the tier micro-indicator: 0 = unknown, otherwise
+    the 1-based rank in the ladder (whose length follows the router)."""
     if not method:
         return 0
     key = method.strip().lower()

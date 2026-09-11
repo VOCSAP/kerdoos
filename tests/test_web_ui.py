@@ -22,6 +22,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from autolycos.router import known_tiers
 from kerdoos.interfaces.web.app import create_app
 from kerdoos.registry.auth_store import Argon2Hasher
 from kerdoos.registry.sqlite_store import SqliteConfigStore
@@ -262,6 +263,36 @@ class AdminTest(_WebUITestBase):
                   "parser_kind": "css", "csrf_token": token})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("pichau", resp.text)
+
+    def test_admin_form_offers_every_router_tier(self):
+        self._add_owner("o1", "root", "s3cret", role="admin")
+        self._login("root", "s3cret")
+        page = self.client.get("/admin")
+        for tier in known_tiers():
+            with self.subTest(tier=tier):
+                self.assertIn(f'value="{tier}"', page.text)
+
+    def test_admin_add_site_accepts_the_uc_tier(self):
+        self._add_owner("o1", "root", "s3cret", role="admin")
+        self._login("root", "s3cret")
+        token = self._csrf()
+        resp = self.client.post(
+            "/admin/sites",
+            data={"name": "magalu", "fetcher": "uc", "domain": "magazineluiza.com.br",
+                  "parser_kind": "css", "csrf_token": token})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("magalu", resp.text)
+
+    def test_admin_add_site_rejects_an_unknown_tier(self):
+        self._add_owner("o1", "root", "s3cret", role="admin")
+        self._login("root", "s3cret")
+        token = self._csrf()
+        resp = self.client.post(
+            "/admin/sites",
+            data={"name": "magalu", "fetcher": "uc_selenium",
+                  "domain": "magazineluiza.com.br",
+                  "parser_kind": "css", "csrf_token": token})
+        self.assertEqual(resp.status_code, 400)
 
     def test_admin_add_site_without_csrf_is_403(self):
         self._add_owner("o1", "root", "s3cret", role="admin")

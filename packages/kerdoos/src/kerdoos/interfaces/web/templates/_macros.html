@@ -13,7 +13,7 @@
 {% macro tier(method) %}
 {%- set lvl = method | tier_level -%}
 <span class="tier" title="Palier fetcher (escalade http vers uc)">
-  {% for i in range(1, 5) %}<span class="tier__pip{% if i <= lvl %} tier__pip--on{% endif %}"></span>{% endfor %}
+  {% for i in range(1, tier_ladder|length + 1) %}<span class="tier__pip{% if i <= lvl %} tier__pip--on{% endif %}"></span>{% endfor %}
   <span class="tier__label">{{ method or '--' }}</span>
 </span>
 {%- endmacro %}

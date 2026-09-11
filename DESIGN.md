@@ -38,7 +38,8 @@ citizen -- distinct color and glyph, never collapsed into `ok` or
 (dashboard, history, digest preview).
 
 **Secondary motif:** the **fetcher escalation scale**
-(`http -> tls -> browser -> uc`) rendered as a 4-step micro-indicator --
+(`http -> tls -> browser -> uc`) rendered as a micro-indicator with one step
+per tier the router knows, so the scale follows the ladder --
 "how hard we had to work to see this price". Supporting detail, not a hero
 element.
 
