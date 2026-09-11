@@ -115,7 +115,19 @@ class ReaperTimeoutFloorTest(_SettingsTestBase):
         self.assertEqual(
             settings.digest_reaper_timeout_seconds,
             DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS)
-        self.assertTrue(any("positive integer" in msg for msg in cm.output), cm.output)
+        self.assertTrue(
+            any("KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS" in msg for msg in cm.output),
+            cm.output)
+
+    def test_non_numeric_floors_to_default_with_warning(self) -> None:
+        # gate ae0a343 C3: the bare int() this used to feed raised before
+        # ever reaching the positive-value floor below.
+        os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "abc"
+        with self.assertLogs("kerdoos.config", level="WARNING"):
+            settings = get_settings()
+        self.assertEqual(
+            settings.digest_reaper_timeout_seconds,
+            DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS)
 
     def test_negative_floors_to_default_with_warning(self) -> None:
         os.environ["KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS"] = "-5"
@@ -131,11 +143,33 @@ class ReaperTimeoutFloorTest(_SettingsTestBase):
         self.assertEqual(settings.digest_reaper_timeout_seconds, 1)
 
 
+class SmtpPortFloorTest(_SettingsTestBase):
+    """gate ae0a343 C3: a non-numeric KERDOOS_SMTP_PORT must warn and fall
+    back to the default, never raise ValueError."""
+
+    def test_non_numeric_floors_to_default_with_warning(self) -> None:
+        os.environ["KERDOOS_SMTP_PORT"] = "abc"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.smtp_port, DEFAULT_SMTP_PORT)
+        self.assertTrue(any("KERDOOS_SMTP_PORT" in msg for msg in cm.output), cm.output)
+
+
+class SmtpTimeoutFloorTest(_SettingsTestBase):
+    """gate ae0a343 C3: a non-numeric KERDOOS_SMTP_TIMEOUT_SECONDS must warn
+    and fall back to the default, never raise ValueError."""
+
+    def test_non_numeric_floors_to_default_with_warning(self) -> None:
+        os.environ["KERDOOS_SMTP_TIMEOUT_SECONDS"] = "abc"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.smtp_timeout_seconds, DEFAULT_SMTP_TIMEOUT_SECONDS)
+        self.assertTrue(
+            any("KERDOOS_SMTP_TIMEOUT_SECONDS" in msg for msg in cm.output), cm.output)
+
+
 class WorkersFloorTest(_SettingsTestBase):
-    """roadmap 6697af90: KERDOOS_WORKERS fed a bare int() at create_app()
-    import time -- a malformed value must warn and fall back, never crash
-    the process (the Dockerfile's shell guard only protects the image's own
-    CMD, not direct uvicorn/CLI/dev invocations)."""
+    """A malformed KERDOOS_WORKERS warns and falls back instead of crashing."""
 
     def test_empty_string_floors_to_default_with_warning(self) -> None:
         os.environ["KERDOOS_WORKERS"] = ""
@@ -166,6 +200,18 @@ class WorkersFloorTest(_SettingsTestBase):
         os.environ["KERDOOS_WORKERS"] = "4"
         settings = get_settings()
         self.assertEqual(settings.workers, 4)
+
+    def test_shapes_the_shell_guard_rejects_also_floor_in_python(self) -> None:
+        # gate ae0a343 C2: int() is looser than the Dockerfile's shell case
+        # guard (whitespace, a leading sign, PEP 515 underscores) -- Python
+        # must reject exactly what the shell rejects, or the two disagree on
+        # the same value and the container silently runs with no evaluator.
+        for raw in (" 4", "4 ", "+4", "4_0", "0", "-3"):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_WORKERS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING"):
+                    settings = get_settings()
+                self.assertEqual(settings.workers, DEFAULT_WORKERS)
 
 
 if __name__ == "__main__":

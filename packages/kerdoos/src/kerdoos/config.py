@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,7 @@ DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS = 300
 # strictly below DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS.
 DEFAULT_SMTP_TIMEOUT_SECONDS = 30
 
-# Single-process default (ADR 0003 Decision 4) -- also should_start_intra_
-# process_evaluator's own <= 1 threshold for "safe to start the evaluator".
+# Single-process default (ADR 0003 Decision 4).
 DEFAULT_WORKERS = 1
 
 
@@ -107,39 +107,48 @@ class Settings:
         return self.session_secret
 
 
-def _safe_reaper_timeout(raw: int) -> int:
-    """roadmap 58d88fe0 gate fix: digest_reaper_timeout_seconds feeds a raw
-    asyncio.wait_for deadline in core.evaluator._run_plan_b and a timedelta
-    bound in the reaper sweep -- a value <= 0 would make wait_for(timeout=0)
-    fail EVERY digest send instantly, a strictly worse failure mode than the
-    misconfiguration digest.factory._safe_smtp_timeout guards against. Floor
-    to the safe default with a warning rather than let it through."""
-    if raw > 0:
-        return raw
-    logger.warning(
-        "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS=%r must be a positive "
-        "integer: falling back to the default (%ss).",
-        raw, DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
-    )
-    return DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS
+def _env_number(name, default, cast, is_valid):
+    """Read an env var as a number, falling back to `default` (with a
+    warning naming the variable and value) on a cast failure or a failed
+    `is_valid` check -- unset is left silently at `default`, not warned."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a valid number: falling back to the default "
+            "(%s).", name, raw, default)
+        return default
+    if not is_valid(value):
+        logger.warning(
+            "%s=%r failed validation: falling back to the default (%s).",
+            name, raw, default)
+        return default
+    return value
+
+
+_WORKERS_GRAMMAR = re.compile(r"[0-9]+")
 
 
 def _safe_workers(raw: str) -> int:
-    """roadmap 6697af90: KERDOOS_WORKERS feeds a bare int() at create_app()
-    import time -- any non-integer value (empty string, text, a value with
-    embedded whitespace) raised an unhandled ValueError on every code path
-    that does not go through the Dockerfile's shell-level case guard (direct
-    uvicorn, the CLI, dev runs). Mirrors _safe_reaper_timeout: fall back to
-    the default with a warning naming the variable and the value received,
-    rather than let a malformed value crash the process."""
-    try:
-        return int(raw)
-    except ValueError:
+    """Accepts only the Dockerfile shell guard's own KERDOOS_WORKERS
+    grammar (plain ASCII digits, positive) -- gate ae0a343 C2."""
+    if not _WORKERS_GRAMMAR.fullmatch(raw):
         logger.warning(
-            "KERDOOS_WORKERS=%r is not a valid integer: falling back to "
-            "the default (%d).", raw, DEFAULT_WORKERS,
+            "KERDOOS_WORKERS=%r is not a plain non-negative integer: "
+            "falling back to the default (%d).", raw, DEFAULT_WORKERS,
         )
         return DEFAULT_WORKERS
+    value = int(raw)
+    if value <= 0:
+        logger.warning(
+            "KERDOOS_WORKERS=%r must be a positive integer: falling back "
+            "to the default (%d).", raw, DEFAULT_WORKERS,
+        )
+        return DEFAULT_WORKERS
+    return value
 
 
 def get_settings() -> Settings:
@@ -155,15 +164,20 @@ def get_settings() -> Settings:
             os.environ.get("KERDOOS_DIGEST_EVALUATOR_ENABLED", "false").lower()
             == "true"),
         smtp_host=os.environ.get("KERDOOS_SMTP_HOST") or None,
-        smtp_port=int(os.environ.get("KERDOOS_SMTP_PORT", str(DEFAULT_SMTP_PORT))),
+        smtp_port=_env_number(
+            "KERDOOS_SMTP_PORT", DEFAULT_SMTP_PORT, int, lambda v: v > 0),
         smtp_from=os.environ.get("KERDOOS_SMTP_FROM") or None,
         smtp_username=os.environ.get("KERDOOS_SMTP_USERNAME") or None,
         smtp_password=os.environ.get("KERDOOS_SMTP_PASSWORD") or None,
         smtp_use_tls=(
             os.environ.get("KERDOOS_SMTP_USE_TLS", "true").lower() != "false"),
-        smtp_timeout_seconds=float(os.environ.get(
-            "KERDOOS_SMTP_TIMEOUT_SECONDS", str(DEFAULT_SMTP_TIMEOUT_SECONDS))),
-        digest_reaper_timeout_seconds=_safe_reaper_timeout(int(os.environ.get(
+        # is_valid always True: positivity/ordering against reaper_timeout
+        # is digest.factory._safe_smtp_timeout's job, not this layer's --
+        # only guard the cast here, never re-validate its semantics.
+        smtp_timeout_seconds=_env_number(
+            "KERDOOS_SMTP_TIMEOUT_SECONDS", float(DEFAULT_SMTP_TIMEOUT_SECONDS),
+            float, lambda v: True),
+        digest_reaper_timeout_seconds=_env_number(
             "KERDOOS_DIGEST_REAPER_TIMEOUT_SECONDS",
-            str(DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS)))),
+            DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS, int, lambda v: v > 0),
     )
