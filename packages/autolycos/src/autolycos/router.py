@@ -62,7 +62,8 @@ def _make_uc(domain_policy: DomainPolicy,
              subresource_domains: Iterable[str],
              browser_gate: BrowserGate,
              launch_timeout_seconds: float | None = None,
-             orphan_sweep_delay_seconds: float | None = None) -> Fetcher:
+             orphan_sweep_delay_seconds: float | None = None,
+             fetch_timeout_seconds: float | None = None) -> Fetcher:
     # Deferred import: SeleniumBase is optional and only needed for the uc tier
     # (sites behind Akamai Bot Manager; Magalu). The per-site render-CDN
     # sub-resource allowlist feeds the DNS-level host-resolver rule.
@@ -73,6 +74,8 @@ def _make_uc(domain_policy: DomainPolicy,
         kwargs["launch_timeout_seconds"] = launch_timeout_seconds
     if orphan_sweep_delay_seconds is not None:
         kwargs["orphan_sweep_delay_seconds"] = orphan_sweep_delay_seconds
+    if fetch_timeout_seconds is not None:
+        kwargs["fetch_timeout_seconds"] = fetch_timeout_seconds
     return UcFetcher(domain_policy, subresource_domains, browser_gate, **kwargs)
 
 
@@ -145,6 +148,7 @@ class StaticRouter:
         uc_orphan_sweep_delay_seconds: float | None = None,
         browser_fetch_timeout_seconds: float | None = None,
         browser_max_abandoned_fetches: int | None = None,
+        uc_fetch_timeout_seconds: float | None = None,
     ) -> None:
         self._domain_policy = domain_policy
         # Defaults to the SAME module-level singleton as a directly-
@@ -157,9 +161,10 @@ class StaticRouter:
         # KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS (roadmap b3213f3c),
         # KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce),
         # KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS and
-        # KERDOOS_BROWSER_MAX_ABANDONED_FETCHES (roadmap d8b7b8fd) are
-        # injected by the kerdoos composition root -- autolycos itself never
-        # reads any of these env vars (invariant 2).
+        # KERDOOS_BROWSER_MAX_ABANDONED_FETCHES (roadmap d8b7b8fd),
+        # KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da) are injected by
+        # the kerdoos composition root -- autolycos itself never reads any
+        # of these env vars (invariant 2).
         self._extra_kwargs: dict[str, dict[str, float | int]] = {}
         if uc_launch_timeout_seconds is not None:
             self._extra_kwargs.setdefault("uc", {})[
@@ -176,6 +181,9 @@ class StaticRouter:
         if browser_max_abandoned_fetches is not None:
             self._extra_kwargs.setdefault("browser", {})[
                 "max_abandoned_fetches"] = browser_max_abandoned_fetches
+        if uc_fetch_timeout_seconds is not None:
+            self._extra_kwargs.setdefault("uc", {})[
+                "fetch_timeout_seconds"] = uc_fetch_timeout_seconds
         self._cache: dict[tuple[str, frozenset[str]], Fetcher] = {}
 
     def select(

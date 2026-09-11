@@ -93,6 +93,17 @@ UC_LAUNCH_TIMEOUT_SECONDS = 30.0
 # like UC_LAUNCH_TIMEOUT_SECONDS): kerdoos.config imports it as the single
 # source of truth for KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS's own default.
 ORPHAN_SWEEP_DELAY_SECONDS = 5.0
+# Roadmap f0c236da, MEASURED (autonomous image, real Driver, SIGSTOP on
+# Chrome after navigation): get_page_source(), current_url and quit() all
+# hang past 60s with no client-side timeout -- a per-command timeout on
+# Selenium's RemoteConnection (client_config.timeout, MEASURED against the
+# same SIGSTOP scenario) does NOT bound them either, so this is a total
+# deadline on the whole navigate-to-quit cycle, not a per-command one.
+# Default budget: UC_PAGE_LOAD_TIMEOUT_SECONDS (45) + RECONNECT_TIME (6) +
+# RENDER_WAIT (3) already sums to 54s under a normal navigation, and a
+# MEASURED real cycle (data: URL) put get_page_source/current_url/quit at
+# well under 1s combined -- comfortable margin above that floor.
+UC_FETCH_TIMEOUT_SECONDS = 90.0
 
 
 def _normalize_domains(domains: Iterable[str]) -> list[str]:
@@ -342,12 +353,14 @@ class UcFetcher:
                  gate: BrowserGate | None = None,
                  launch_timeout_seconds: float = UC_LAUNCH_TIMEOUT_SECONDS,
                  orphan_sweep_delay_seconds: float = ORPHAN_SWEEP_DELAY_SECONDS,
+                 fetch_timeout_seconds: float = UC_FETCH_TIMEOUT_SECONDS,
                  ) -> None:
         self._domain_policy = domain_policy
         self._subresource_domains = tuple(subresource_domains)
         self._gate = gate if gate is not None else default_browser_gate()
         self._launch_timeout_seconds = launch_timeout_seconds
         self._orphan_sweep_delay_seconds = orphan_sweep_delay_seconds
+        self._fetch_timeout_seconds = fetch_timeout_seconds
 
     def _launch_with_deadline(self, driver_cls, driver_kwargs):  # type: ignore[no-untyped-def]
         """Runs driver_cls(**driver_kwargs) (the Chrome launch itself) under
@@ -448,7 +461,112 @@ class UcFetcher:
         launch_thread.join()
         if "error" in holder:
             raise holder["error"]
-        return holder["driver"]
+        driver = holder["driver"]
+        # Roadmap f0c236da: lets _run_after_launch_with_deadline clean up
+        # THIS launch's own Chrome/renderers by marker, without threading a
+        # new parameter through every _launch_with_deadline call site (many
+        # tests call it directly with a bare driver_cls/driver_kwargs pair).
+        try:
+            driver._kerdoos_launch_marker = marker  # noqa: SLF001
+        except Exception:  # noqa: BLE001 -- best-effort, never fail the launch
+            pass
+        return driver
+
+    def _run_after_launch_with_deadline(  # type: ignore[no-untyped-def]
+        self, driver, safe_url: str,
+    ) -> FetchResult:
+        """Runs navigation through get_page_source/status/quit under
+        self._fetch_timeout_seconds. MEASURED (roadmap f0c236da): none of
+        SeleniumBase's post-navigation calls, nor a client-side Selenium
+        command timeout, are bounded when Chrome freezes -- so this is a
+        total deadline on an owner thread, mirroring
+        _launch_with_deadline. On timeout, driver.quit() is NEVER retried
+        (it would hang identically); cleanup kills only THIS launch's own
+        process tree, by marker (Chrome/renderers) and by
+        driver.service.process.pid (uc_driver's EXACT pid, not a
+        name/time heuristic), under the gate.
+        """
+        marker = getattr(driver, "_kerdoos_launch_marker", None)
+        holder: dict = {}
+        done = threading.Event()
+
+        def _run() -> None:
+            try:
+                # Bounds the navigation itself (card ca30b736): without
+                # this, a frozen Chrome holds the gate forever regardless
+                # of any acquisition-side deadline.
+                driver.set_page_load_timeout(UC_PAGE_LOAD_TIMEOUT_SECONDS)
+                # UC open + reconnect lets the Akamai JS challenge auto-resolve.
+                driver.uc_open_with_reconnect(
+                    safe_url, reconnect_time=RECONNECT_TIME)
+                driver.sleep(RENDER_WAIT)
+                html = driver.get_page_source()
+                if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
+                    raise FetchError(
+                        f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
+                status = _read_status(driver)
+                # Card 1bddf3fa: uc_open_with_reconnect does not raise when
+                # Chrome fails to reach the target -- it silently lands on
+                # Chrome's OWN internal error interstitial, which
+                # get_page_source() then returns as if it were the site's
+                # response. Folded into `challenged` (not a raised
+                # FetchError): retry.py's same-tier retry+backoff loop
+                # (invariant 5) is driven exclusively by that signal on a
+                # RETURNED FetchResult, a raised FetchError skips retry
+                # entirely and degrades straight to INDETERMINATE.
+                holder["result"] = FetchResult(
+                    html=html,
+                    status=status,
+                    method=self.method_name,
+                    # challenged is derived from the RENDERED DOM (Akamai
+                    # serves its challenge at 200), not the status
+                    # (invariant #3 + retry).
+                    challenged=(
+                        looks_challenged(status, html)
+                        or looks_like_chrome_error_page(
+                            _current_url(driver), html)
+                    ),
+                )
+            except BaseException as exc:  # noqa: BLE001 -- relayed to the caller
+                holder["error"] = exc
+            finally:
+                done.set()
+                try:
+                    driver.quit()
+                except Exception:  # noqa: BLE001 -- best-effort cleanup
+                    pass
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=self._fetch_timeout_seconds)
+        if not done.is_set():
+            self._kill_after_fetch_timeout(driver, marker)
+            raise FetchError(
+                f"uc post-navigation exceeded "
+                f"{self._fetch_timeout_seconds}s timeout")
+        if "error" in holder:
+            raise holder["error"]
+        return holder["result"]
+
+    def _kill_after_fetch_timeout(self, driver, marker) -> None:  # type: ignore[no-untyped-def]
+        """Best-effort cleanup for a fetch that exceeded its deadline:
+        driver.quit() is never retried here (it would hang identically on
+        the same frozen Chrome) -- kill by marker (Chrome/renderers) plus
+        uc_driver's own service process, read directly from the Popen
+        SeleniumBase already holds (no name/time heuristic needed)."""
+        if marker is not None:
+            _kill_launch_processes(marker)
+        try:
+            service_pid = driver.service.process.pid
+        except Exception:  # noqa: BLE001 -- best-effort, service may be gone
+            return
+        import psutil
+
+        try:
+            service_proc = psutil.Process(service_pid)
+        except psutil.Error:
+            return
+        _kill_identities(_capture_identities([service_proc]))
 
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using SeleniumBase, so a
@@ -478,41 +596,4 @@ class UcFetcher:
         # the SAME gate as the browser tier, since uc reuses its Chromium).
         with self._gate.acquire():
             driver = self._launch_with_deadline(driver_cls, driver_kwargs)
-            try:
-                # Bounds the navigation itself (card ca30b736): without
-                # this, a frozen Chrome holds the gate forever regardless of
-                # any acquisition-side deadline.
-                driver.set_page_load_timeout(UC_PAGE_LOAD_TIMEOUT_SECONDS)
-                # UC open + reconnect lets the Akamai JS challenge auto-resolve.
-                driver.uc_open_with_reconnect(
-                    safe_url, reconnect_time=RECONNECT_TIME)
-                driver.sleep(RENDER_WAIT)
-                html = driver.get_page_source()
-                if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
-                    raise FetchError(
-                        f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
-                status = _read_status(driver)
-                # Card 1bddf3fa: uc_open_with_reconnect does not raise when
-                # Chrome fails to reach the target -- it silently lands on
-                # Chrome's OWN internal error interstitial, which
-                # get_page_source() then returns as if it were the site's
-                # response. Folded into `challenged` (not a raised
-                # FetchError): retry.py's same-tier retry+backoff loop
-                # (invariant 5) is driven exclusively by that signal on a
-                # RETURNED FetchResult, a raised FetchError skips retry
-                # entirely and degrades straight to INDETERMINATE.
-                return FetchResult(
-                    html=html,
-                    status=status,
-                    method=self.method_name,
-                    # challenged is derived from the RENDERED DOM (Akamai
-                    # serves its challenge at 200), not the status
-                    # (invariant #3 + retry).
-                    challenged=(
-                        looks_challenged(status, html)
-                        or looks_like_chrome_error_page(
-                            _current_url(driver), html)
-                    ),
-                )
-            finally:
-                driver.quit()
+            return self._run_after_launch_with_deadline(driver, safe_url)

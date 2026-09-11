@@ -270,5 +270,34 @@ class CompositionRootUcOrphanSweepDelayTest(unittest.TestCase):
                 state_store.close()
 
 
+class CompositionRootUcFetchTimeoutTest(unittest.TestCase):
+    """Roadmap f0c236da: same F3-gap-closing discipline as
+    CompositionRootUcOrphanSweepDelayTest above, for
+    KERDOOS_UC_FETCH_TIMEOUT_SECONDS."""
+
+    def setUp(self) -> None:
+        self._saved = os.environ.pop("KERDOOS_UC_FETCH_TIMEOUT_SECONDS", None)
+
+    def tearDown(self) -> None:
+        if self._saved is None:
+            os.environ.pop("KERDOOS_UC_FETCH_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = self._saved
+
+    def test_env_var_reaches_the_uc_fetcher_built_by_the_composition_root(
+            self) -> None:
+        os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "23"
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            service, config_store, state_store = cli._build_app_service(
+                str(d / "config.db"), str(d / "state.db"))
+            try:
+                fetcher = service._router.select("uc")
+                self.assertEqual(fetcher._fetch_timeout_seconds, 23.0)
+            finally:
+                config_store.close()
+                state_store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

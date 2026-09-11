@@ -110,6 +110,13 @@ process tree could not be confirmed dead, past which new browser fetches
 are refused outright rather than launching another Chromium on top of an
 unbounded pile of stuck ones. Same floor-with-warning discipline and
 StaticRouter injection path; each refusal is also logged at ERROR.
+
+KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da): total deadline on the
+uc tier's navigate-through-quit cycle (autolycos.adapters.uc.UcFetcher's
+fetch_timeout_seconds), same floor-with-warning discipline and StaticRouter
+injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. MEASURED: none of
+get_page_source/current_url/quit, nor a client-side Selenium command
+timeout, are bounded on their own when Chrome freezes after navigation.
 """
 
 from __future__ import annotations
@@ -131,6 +138,7 @@ from autolycos.adapters.browser import (
 )
 from autolycos.adapters.uc import (
     ORPHAN_SWEEP_DELAY_SECONDS as _UC_TIER_ORPHAN_SWEEP_DELAY_SECONDS,
+    UC_FETCH_TIMEOUT_SECONDS as _UC_TIER_FETCH_TIMEOUT_SECONDS,
     UC_LAUNCH_TIMEOUT_SECONDS as _UC_TIER_LAUNCH_TIMEOUT_SECONDS,
 )
 
@@ -242,6 +250,10 @@ DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS = float(
 # itself (same rationale as DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS above).
 DEFAULT_BROWSER_MAX_ABANDONED_FETCHES = _BROWSER_TIER_MAX_ABANDONED_FETCHES
 
+# Roadmap f0c236da: single source of truth shared with the uc tier itself,
+# so an unset env var falls back to exactly what UcFetcher would use anyway.
+DEFAULT_UC_FETCH_TIMEOUT_SECONDS = float(_UC_TIER_FETCH_TIMEOUT_SECONDS)
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -274,6 +286,7 @@ class Settings:
     uc_orphan_sweep_delay_seconds: float
     browser_fetch_timeout_seconds: float
     browser_max_abandoned_fetches: int
+    uc_fetch_timeout_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -495,4 +508,7 @@ def get_settings() -> Settings:
                 "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
                 DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS, float, lambda v: v > 0),
             uc_launch_timeout_seconds, browser_acquire_timeout_seconds),
+        uc_fetch_timeout_seconds=_env_number(
+            "KERDOOS_UC_FETCH_TIMEOUT_SECONDS",
+            DEFAULT_UC_FETCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
     )

@@ -1162,6 +1162,242 @@ class UcOrphanSweepAttributionTest(unittest.TestCase):
                     proc.kill()
 
 
+class _HangingPostNavDriver:
+    """A fake driver whose get_page_source() never returns -- simulates a
+    Chrome frozen after navigation (roadmap f0c236da, MEASURED: neither
+    get_page_source/current_url/quit nor a client-side Selenium command
+    timeout are bounded on their own)."""
+
+    class _FakeServiceProcess:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+    class _FakeService:
+        def __init__(self, pid: int) -> None:
+            self.process = _HangingPostNavDriver._FakeServiceProcess(pid)
+
+    def __init__(self, marker: str | None, service_pid: int) -> None:
+        self._kerdoos_launch_marker = marker
+        self.service = self._FakeService(service_pid)
+        self.quit_called = 0
+
+    def set_page_load_timeout(self, seconds):  # noqa: ANN001
+        pass
+
+    def uc_open_with_reconnect(self, url, reconnect_time):  # noqa: ANN001
+        pass
+
+    def sleep(self, seconds):  # noqa: ANN001
+        pass
+
+    def get_page_source(self) -> str:
+        time.sleep(60)  # never returns
+        return "<html></html>"
+
+    def quit(self) -> None:
+        self.quit_called += 1
+
+
+class UcPostNavigationDeadlineTest(unittest.TestCase):
+    """Roadmap f0c236da: _run_after_launch_with_deadline bounds the whole
+    navigate-to-quit cycle, since neither the individual calls nor a
+    client-side Selenium command timeout are bounded on their own
+    (MEASURED via probe_postnav.py / probe_remedy_a.py in the image)."""
+
+    def test_timeout_raises_fetch_error_without_recalling_quit(self) -> None:
+        # A real, disposable process for the cleanup path to kill -- NEVER
+        # os.getpid() (the test runner itself): _kill_after_fetch_timeout
+        # really does act on the pid it is given.
+        dummy = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            fetcher = uc.UcFetcher(_NEUTRAL_POLICY, fetch_timeout_seconds=0.3)
+            driver = _HangingPostNavDriver(marker=None, service_pid=dummy.pid)
+            with self.assertRaises(FetchError):
+                fetcher._run_after_launch_with_deadline(
+                    driver, "https://example.com/")
+            # The worker thread is still stuck inside get_page_source() (its
+            # own `finally: driver.quit()` cannot run until that returns) --
+            # proves the timeout path itself never calls quit() a second time.
+            self.assertEqual(driver.quit_called, 0)
+        finally:
+            if dummy.poll() is None:
+                dummy.kill()
+
+    def test_timeout_kills_marker_matched_chrome_and_the_exact_service_pid(
+            self) -> None:
+        marker = "--kerdoos-launch-id=abc123"
+        chrome_proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", marker])
+        service_proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        unrelated = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            driver = _HangingPostNavDriver(
+                marker=marker, service_pid=service_proc.pid)
+            fetcher = uc.UcFetcher(_NEUTRAL_POLICY, fetch_timeout_seconds=0.2)
+            with self.assertRaises(FetchError):
+                fetcher._run_after_launch_with_deadline(
+                    driver, "https://example.com/")
+            self.assertTrue(
+                self._wait_until(lambda: chrome_proc.poll() is not None),
+                "marker-matched Chrome process survived")
+            self.assertTrue(
+                self._wait_until(lambda: service_proc.poll() is not None),
+                "driver.service.process.pid was not killed")
+            self.assertIsNone(
+                unrelated.poll(), "an unrelated process was killed")
+        finally:
+            for proc in (chrome_proc, service_proc, unrelated):
+                if proc.poll() is None:
+                    proc.kill()
+
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 5.0,
+                     interval: float = 0.05) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return predicate()
+
+
+class UcPostNavigationFreezeImageTest(unittest.TestCase):
+    """Card f0c236da acceptance test: a REAL Driver(uc=True), SIGSTOP on
+    Chrome after navigation (the probe_postnav.py scenario) -- fetch()'s
+    post-navigation phase must return a FetchError within the configured
+    deadline, with zero survivors of this launch once the browser gate is
+    released, and the NEXT fetch's own Chrome must survive this one's
+    cleanup. POSIX only (signal.SIGSTOP)."""
+
+    def setUp(self) -> None:
+        if os.name != "posix":
+            self.skipTest("needs SIGSTOP (POSIX)")
+        if _HAS_REAL_CHROMIUM:
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but no real patchright "
+                "Chromium was found -- run inside the autonomous image")
+        self.skipTest(
+            "needs a real patchright Chromium (autonomous image), not just "
+            "SeleniumBase")
+
+    def test_frozen_chrome_after_navigation_yields_a_bounded_fetch_error(
+            self) -> None:
+        import signal
+
+        import psutil
+
+        gate = BrowserGate(max_concurrent=1)
+        fetcher = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, fetch_timeout_seconds=3.0)
+        binary = _find_patchright_chromium()
+        driver_cls = _load_seleniumbase_driver()
+
+        gate_released_survivors: list = []
+
+        def _freeze_soon_after_navigation() -> None:
+            # A data: URL navigates near-instantly (MEASURED ~0.03s); a
+            # short, generous wait covers it before SIGSTOP.
+            time.sleep(1.0)
+            me = psutil.Process(os.getpid())
+            for p in me.children(recursive=True):
+                try:
+                    if p.name().lower() == "chrome":
+                        p.send_signal(signal.SIGSTOP)
+                except psutil.Error:
+                    pass
+
+        freezer = threading.Thread(
+            target=_freeze_soon_after_navigation, daemon=True)
+        with gate.acquire():
+            driver = fetcher._launch_with_deadline(
+                driver_cls, {"uc": True, "headless": True,
+                             "binary_location": binary})
+            freezer.start()
+            t0 = time.monotonic()
+            with self.assertRaises(FetchError):
+                fetcher._run_after_launch_with_deadline(
+                    driver, "data:text/html,<html><body>ok</body></html>")
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 3.0 + 15.0)
+            me = psutil.Process(os.getpid())
+            gate_released_survivors.extend(
+                p.pid for p in me.children(recursive=True)
+                if _is_live_uc_process(p))
+        self.assertEqual(
+            gate_released_survivors, [],
+            "process(es) of the frozen launch still alive at gate release")
+
+        # The NEXT fetch's own uc_driver/Chrome must survive.
+        next_fetcher = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, fetch_timeout_seconds=30.0)
+        with gate.acquire():
+            next_driver = next_fetcher._launch_with_deadline(
+                driver_cls, {"uc": True, "headless": True,
+                             "binary_location": binary})
+            try:
+                result = next_fetcher._run_after_launch_with_deadline(
+                    next_driver,
+                    "data:text/html,<html><body>next</body></html>")
+                self.assertIn("next", result.html)
+            except FetchError:
+                self.fail("the next fetch was itself killed/timed out")
+
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 20.0,
+                     interval: float = 0.2) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return predicate()
+
+
+def _load_seleniumbase_driver():
+    from seleniumbase import Driver
+
+    return Driver
+
+
+def _is_live_uc_process(proc) -> bool:  # type: ignore[no-untyped-def]
+    import psutil
+
+    try:
+        if not proc.is_running():
+            return False
+        return proc.name().lower() in ("chrome", "uc_driver", "chromedriver")
+    except psutil.Error:
+        return False
+
+
+class StaticRouterUcFetchTimeoutTest(unittest.TestCase):
+    """Roadmap f0c236da: KERDOOS_UC_FETCH_TIMEOUT_SECONDS is injected by the
+    kerdoos composition root through StaticRouter/_make_uc -- never read by
+    autolycos itself (invariant 2)."""
+
+    def test_injected_value_reaches_the_built_uc_fetcher(self) -> None:
+        router = StaticRouter(_POLICY, uc_fetch_timeout_seconds=42.0)
+        fetcher = router.select("uc")
+        self.assertIsInstance(fetcher, uc.UcFetcher)
+        self.assertEqual(fetcher._fetch_timeout_seconds, 42.0)
+
+    def test_no_value_injected_keeps_the_tier_s_own_default(self) -> None:
+        router = StaticRouter(_POLICY)
+        fetcher = router.select("uc")
+        self.assertEqual(
+            fetcher._fetch_timeout_seconds, uc.UC_FETCH_TIMEOUT_SECONDS)
+
+    def test_other_tiers_call_shape_is_unaffected(self) -> None:
+        router = StaticRouter(_POLICY, uc_fetch_timeout_seconds=3.0)
+        http_fetcher = router.select("http")
+        self.assertEqual(http_fetcher.method_name, "http")
+
+
 class GateWiringTest(unittest.TestCase):
     """Card ca30b736: fetch() must acquire the browser gate around the
     launch-to-quit cycle -- the SAME gate type as the browser tier, since uc

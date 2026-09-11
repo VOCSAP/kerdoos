@@ -31,9 +31,9 @@ from kerdoos.config import (
     DEFAULT_RUN_QUEUE_BACKLOG_WARN_THRESHOLD, DEFAULT_RUN_QUEUE_MAX_RESTARTS,
     DEFAULT_SMTP_PORT, DEFAULT_SMTP_RETRY_ATTEMPTS,
     DEFAULT_SMTP_RETRY_BACKOFF_SECONDS, DEFAULT_SMTP_TIMEOUT_SECONDS,
-    DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS, DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS,
-    DEFAULT_WORKERS, MAX_SMTP_RETRY_ATTEMPTS, MIN_SMTP_RETRY_BACKOFF_SECONDS,
-    get_settings,
+    DEFAULT_UC_FETCH_TIMEOUT_SECONDS, DEFAULT_UC_LAUNCH_TIMEOUT_SECONDS,
+    DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS, DEFAULT_WORKERS,
+    MAX_SMTP_RETRY_ATTEMPTS, MIN_SMTP_RETRY_BACKOFF_SECONDS, get_settings,
 )
 
 _SMTP_ENV_VARS = (
@@ -53,6 +53,7 @@ _SMTP_ENV_VARS = (
     "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
     "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS",
     "KERDOOS_BROWSER_MAX_ABANDONED_FETCHES",
+    "KERDOOS_UC_FETCH_TIMEOUT_SECONDS",
 )
 
 
@@ -852,6 +853,37 @@ class BrowserMaxAbandonedFetchesFloorTest(_SettingsTestBase):
                     DEFAULT_BROWSER_MAX_ABANDONED_FETCHES)
                 self.assertTrue(
                     any("KERDOOS_BROWSER_MAX_ABANDONED_FETCHES" in msg
+                        for msg in cm.output), cm.output)
+
+
+class UcFetchTimeoutFloorTest(_SettingsTestBase):
+    """Roadmap f0c236da: a malformed KERDOOS_UC_FETCH_TIMEOUT_SECONDS warns
+    and floors to the default instead of crashing at settings-read time, and
+    an unset one uses the uc tier's own default (uc.UC_FETCH_TIMEOUT_SECONDS)."""
+
+    def test_unset_uses_default(self) -> None:
+        settings = get_settings()
+        self.assertEqual(
+            settings.uc_fetch_timeout_seconds, DEFAULT_UC_FETCH_TIMEOUT_SECONDS)
+
+    def test_valid_value_passes_through_unchanged(self) -> None:
+        os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "45"
+        settings = get_settings()
+        self.assertEqual(settings.uc_fetch_timeout_seconds, 45.0)
+
+    def test_invalid_or_non_positive_values_float_to_default_with_warning(
+        self,
+    ) -> None:
+        for raw in ("abc", "0", "-1", ""):
+            with self.subTest(raw=raw):
+                os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = raw
+                with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+                    settings = get_settings()
+                self.assertEqual(
+                    settings.uc_fetch_timeout_seconds,
+                    DEFAULT_UC_FETCH_TIMEOUT_SECONDS)
+                self.assertTrue(
+                    any("KERDOOS_UC_FETCH_TIMEOUT_SECONDS" in msg
                         for msg in cm.output), cm.output)
 
 

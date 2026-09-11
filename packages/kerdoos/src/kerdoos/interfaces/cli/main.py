@@ -95,7 +95,8 @@ def _build_app_service(
         browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds,
         uc_orphan_sweep_delay_seconds=settings.uc_orphan_sweep_delay_seconds,
         browser_fetch_timeout_seconds=settings.browser_fetch_timeout_seconds,
-        browser_max_abandoned_fetches=settings.browser_max_abandoned_fetches)
+        browser_max_abandoned_fetches=settings.browser_max_abandoned_fetches,
+        uc_fetch_timeout_seconds=settings.uc_fetch_timeout_seconds)
     service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
     return service, config_store, state_store
@@ -133,7 +134,8 @@ def cmd_digest(args: argparse.Namespace) -> int:
         browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds,
         uc_orphan_sweep_delay_seconds=settings.uc_orphan_sweep_delay_seconds,
         browser_fetch_timeout_seconds=settings.browser_fetch_timeout_seconds,
-        browser_max_abandoned_fetches=settings.browser_max_abandoned_fetches)
+        browser_max_abandoned_fetches=settings.browser_max_abandoned_fetches,
+        uc_fetch_timeout_seconds=settings.uc_fetch_timeout_seconds)
     try:
         log_unavailable_fetcher_tiers(config_store)
         sender = build_sender(
