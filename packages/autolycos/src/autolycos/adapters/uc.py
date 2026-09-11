@@ -55,7 +55,7 @@ from collections.abc import Iterable
 from urllib.parse import quote
 
 from ..browser_gate import BrowserGate, default_browser_gate
-from ..challenge import looks_challenged
+from ..challenge import looks_challenged, looks_like_chrome_error_page
 from ..errors import FetchError
 from ..ports import FetchResult
 from ..safety import DomainPolicy, ValidatedTarget, validate_target
@@ -245,6 +245,14 @@ def _read_status(driver) -> int:  # type: ignore[no-untyped-def]
     return int(status) if status else _STATUS_FALLBACK
 
 
+def _current_url(driver) -> str | None:  # type: ignore[no-untyped-def]
+    """Best-effort; None if unavailable (mirrors _read_status)."""
+    try:
+        return driver.current_url
+    except Exception:  # noqa: BLE001 -- best-effort, never fail the fetch on this alone
+        return None
+
+
 class UcFetcher:
     """Fetcher port implementation backed by SeleniumBase undetected Chrome."""
 
@@ -366,6 +374,15 @@ class UcFetcher:
                     raise FetchError(
                         f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
                 status = _read_status(driver)
+                # Card 1bddf3fa: uc_open_with_reconnect does not raise when
+                # Chrome fails to reach the target -- it silently lands on
+                # Chrome's OWN internal error interstitial, which
+                # get_page_source() then returns as if it were the site's
+                # response. Folded into `challenged` (not a raised
+                # FetchError): retry.py's same-tier retry+backoff loop
+                # (invariant 5) is driven exclusively by that signal on a
+                # RETURNED FetchResult, a raised FetchError skips retry
+                # entirely and degrades straight to INDETERMINATE.
                 return FetchResult(
                     html=html,
                     status=status,
@@ -373,7 +390,11 @@ class UcFetcher:
                     # challenged is derived from the RENDERED DOM (Akamai
                     # serves its challenge at 200), not the status
                     # (invariant #3 + retry).
-                    challenged=looks_challenged(status, html),
+                    challenged=(
+                        looks_challenged(status, html)
+                        or looks_like_chrome_error_page(
+                            _current_url(driver), html)
+                    ),
                 )
             finally:
                 driver.quit()

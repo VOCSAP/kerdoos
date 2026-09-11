@@ -12,7 +12,11 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from autolycos.challenge import CHALLENGE_MARKERS, looks_challenged
+from autolycos.challenge import (
+    CHALLENGE_MARKERS,
+    looks_challenged,
+    looks_like_chrome_error_page,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _HEALTHY_FIXTURES = (
@@ -101,6 +105,40 @@ class RealInterstitialStillChallengedTest(unittest.TestCase):
     def test_block_status_and_short_body(self) -> None:
         self.assertTrue(looks_challenged(503, "x" * 5000))
         self.assertTrue(looks_challenged(200, "tiny"))
+
+
+class ChromeErrorPageDetectionTest(unittest.TestCase):
+    """Card 1bddf3fa: Chrome's own internal error interstitial (a failed
+    navigation, not anti-bot content served BY a site) must be detected by
+    CONTENT, never by size -- the real interstitial is large (~188KB)."""
+
+    def test_error_code_marker_in_dom_is_detected(self) -> None:
+        page = (
+            '<html><body><script>window.errorData = '
+            '{"errorCode":"ERR_CONNECTION_REFUSED"};</script>'
+            + "x" * 200000 + "</body></html>")
+        self.assertTrue(looks_like_chrome_error_page(None, page))
+
+    def test_chrome_error_scheme_url_is_detected_even_without_marker(
+        self,
+    ) -> None:
+        self.assertTrue(
+            looks_like_chrome_error_page("chrome-error://chromewebdata/",
+                                          "<html></html>"))
+
+    def test_healthy_fixture_is_not_flagged(self) -> None:
+        html = (_FIXTURES / "kabum_aw3225qf.html").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertFalse(looks_like_chrome_error_page(
+            "https://www.kabum.com.br/produto/1", html))
+
+    def test_large_healthy_page_is_not_flagged_by_size_alone(self) -> None:
+        # A genuinely large page (larger than the real error interstitial)
+        # must never be flagged on size -- content is the only signal.
+        page = "<html><body>real content " * 20000 + "</body></html>"
+        self.assertGreater(len(page), 200000)
+        self.assertFalse(looks_like_chrome_error_page(
+            "https://example.com/", page))
 
 
 if __name__ == "__main__":

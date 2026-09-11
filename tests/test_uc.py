@@ -172,9 +172,11 @@ class UcFetcherContractTest(unittest.TestCase):
 
 
 class _FakeDriver:
-    def __init__(self, page_source: str, **kwargs) -> None:  # noqa: ANN003
+    def __init__(self, page_source: str, *, current_url: str | None = None,
+                 **kwargs) -> None:  # noqa: ANN003
         self.kwargs = kwargs
         self._page = page_source
+        self.current_url = current_url
         self.opened: tuple | None = None
         self.slept: float | None = None
         self.quit_called = False
@@ -197,11 +199,12 @@ class _FakeDriver:
 
 
 class UcFetcherWiringTest(unittest.TestCase):
-    def _run(self, page_source: str, subresource_domains=("mlcdn.com.br",)):
+    def _run(self, page_source: str, subresource_domains=("mlcdn.com.br",),
+             current_url: str | None = None):
         holder: dict = {}
 
         def _factory(**kwargs):  # the fake Driver class
-            drv = _FakeDriver(page_source, **kwargs)
+            drv = _FakeDriver(page_source, current_url=current_url, **kwargs)
             holder["driver"] = drv
             return drv
 
@@ -292,6 +295,30 @@ class UcFetcherWiringTest(unittest.TestCase):
         result, driver = self._run(akamai)
         self.assertTrue(result.challenged)        # scf-akamai / sec-if-cpt hit
         self.assertTrue(driver.quit_called)
+
+    def test_chrome_error_page_marks_challenged_not_a_plain_200(self) -> None:
+        # Card 1bddf3fa: uc_open_with_reconnect does not raise on a failed
+        # navigation -- it silently lands on Chrome's own interstitial,
+        # large enough (~188KB) and generic enough to slip past
+        # looks_challenged on its own. No browser needed: the fake driver
+        # returns the same shape a real Chrome connection failure produces.
+        error_page = (
+            '<html><body><script>window.errorData = '
+            '{"errorCode":"ERR_CONNECTION_REFUSED"};</script>'
+            + "x" * 200000 + "</body></html>")
+        result, driver = self._run(
+            error_page, current_url="chrome-error://chromewebdata/")
+        self.assertTrue(result.challenged)
+        self.assertTrue(driver.quit_called)
+
+    def test_chrome_error_page_detected_from_dom_marker_alone(self) -> None:
+        # current_url is best-effort (CDP/driver state can be unavailable,
+        # mirrors _read_status) -- the DOM errorCode marker alone must
+        # still be enough.
+        error_page = (
+            '{"errorCode":"ERR_NAME_NOT_RESOLVED"}' + "x" * 200000)
+        result, _ = self._run(error_page, current_url=None)
+        self.assertTrue(result.challenged)
 
     def test_driver_quit_even_on_error(self) -> None:
         # If page source is oversize, FetchError propagates but quit still runs.
@@ -537,6 +564,51 @@ class UcPinExecutionTest(unittest.TestCase):
             self.assertTrue(result.startswith("THREW"), result)
         finally:
             driver.quit()
+
+
+class UcErrorPageDetectionTest(unittest.TestCase):
+    """Card 1bddf3fa acceptance test: real Chrome, neutral pinned target
+    ONLY (192.0.2.1, TEST-NET-1, never routable -- same discipline as
+    UcPinExecutionTest above). uc_open_with_reconnect (unlike plain
+    Selenium .get(), used by UcPinExecutionTest) does NOT raise on a
+    connection failure -- it lands on Chrome's own interstitial and
+    returns normally, which is exactly the bug this card closes."""
+
+    def setUp(self) -> None:
+        if _HAS_REAL_CHROMIUM:
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but no real patchright "
+                "Chromium was found -- run inside the autonomous image")
+        self.skipTest(
+            "needs a real patchright Chromium (autonomous image), not just "
+            "SeleniumBase")
+
+    def test_real_chrome_error_page_is_detected_by_content(self) -> None:
+        target = ValidatedTarget(url="https://example.com/", scheme="https",
+                                 host="example.com", port=443, ip="192.0.2.1")
+        rule = uc._host_resolver_rules(target, [])
+        from autolycos.adapters.uc import _find_patchright_chromium
+        from seleniumbase import Driver
+
+        binary = _find_patchright_chromium()
+        driver = Driver(uc=True, headless=True, binary_location=binary,
+                        chromium_arg=[f"--host-resolver-rules={rule}"])
+        try:
+            # The SAME navigation call UcFetcher.fetch() makes -- unlike
+            # plain .get() (UcPinExecutionTest above), this does not raise.
+            driver.uc_open_with_reconnect(
+                "https://example.com/", reconnect_time=uc.RECONNECT_TIME)
+            driver.sleep(uc.RENDER_WAIT)
+            html = driver.get_page_source()
+            current_url = driver.current_url
+        finally:
+            driver.quit()
+        self.assertTrue(
+            uc.looks_like_chrome_error_page(current_url, html),
+            f"expected a Chrome error page, current_url={current_url!r}, "
+            f"html[:200]={html[:200]!r}")
 
 
 class UcLaunchDeadlineTest(unittest.TestCase):
