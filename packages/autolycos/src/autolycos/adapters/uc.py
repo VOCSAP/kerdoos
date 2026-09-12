@@ -306,6 +306,12 @@ def _kill_identities(identities: list[tuple[int, float]]) -> None:
     tearing the process down -- psutil.wait_procs waits (bounded by
     _KILL_WAIT_SECONDS) for confirmed death, so a caller releasing the
     browser gate right after this call never does so on a false negative.
+
+    That guarantee is bounded, not absolute: a process still alive after
+    SIGKILL plus _KILL_WAIT_SECONDS (an uninterruptible kernel wait) only
+    produces a warning, and the caller releases the gate anyway. Blocking
+    on it would let one stuck process wedge every later fetch, which is
+    worse than the single-Chromium coherence risk it leaves open.
     """
     import psutil
 
@@ -336,6 +342,16 @@ def _kill_identities(identities: list[tuple[int, float]]) -> None:
         logger.warning(
             "uc tier: %d process(es) survived SIGKILL + %.1fs wait: %s",
             len(alive), _KILL_WAIT_SECONDS, [p.pid for p in alive])
+
+
+def _names_a_driver(proc) -> bool:  # type: ignore[no-untyped-def]
+    """Whether this process still IS a chromedriver/uc_driver binary."""
+    import psutil
+
+    try:
+        return proc.name().lower() in _LAUNCH_PARENT_NAMES
+    except psutil.Error:
+        return False
 
 
 def _kill_launch_processes(
@@ -505,6 +521,12 @@ class UcFetcher:
             driver._kerdoos_launch_siblings = _capture_identities(  # noqa: SLF001
                 _launch_process_tree(
                     marker, pids_before if single_flight else None))
+            # MEASURED (image, https target): SeleniumBase's reconnect()
+            # terminates the uc_driver service and starts a NEW one mid
+            # navigation, so the set above goes stale and the late sweep
+            # needs the same pid baseline the launch path uses.
+            driver._kerdoos_pids_before = (  # noqa: SLF001
+                pids_before if single_flight else None)
         except Exception:  # noqa: BLE001 -- best-effort, never fail the launch
             pass
         return driver
@@ -574,22 +596,45 @@ class UcFetcher:
                     pass
 
         worker = threading.Thread(target=_run, daemon=True)
-        worker.start()
-        worker.join(timeout=self._fetch_timeout_seconds)
+        try:
+            worker.start()
+            worker.join(timeout=self._fetch_timeout_seconds)
+        except BaseException:
+            # Chrome is already launched by the time we get here, so any
+            # failure before the owner thread is joined would release the
+            # gate on a live browser with nothing to quit it. The realistic
+            # case is RuntimeError("can't start new thread"), i.e. exactly
+            # the resource exhaustion this deadline exists to survive.
+            self._kill_after_fetch_timeout(driver, marker)
+            raise
         # Armed on the worker's LIVENESS, not on `done`: the freeze can land
         # on driver.quit() itself, which the worker only reaches after
         # setting `done` -- MEASURED (roadmap f0c236da), a done-keyed
         # condition returns the FetchResult and releases the shared browser
         # gate while this launch's Chrome is still running.
         if worker.is_alive():
+            # Both reads are taken AT the deadline, before the cleanup:
+            # that cleanup takes seconds (confirmed-death waits, late
+            # sweep), during which the worker can finish and flip `done`.
+            # Deciding on the post-cleanup value would call a blown
+            # deadline a mere abandoned teardown, and surface whatever
+            # error the dying worker recorded instead of a FetchError.
+            teardown_only = done.is_set()
             self._kill_after_fetch_timeout(driver, marker)
-            if not done.is_set():
+            if not teardown_only:
                 raise FetchError(
                     f"uc post-navigation exceeded "
                     f"{self._fetch_timeout_seconds}s timeout")
             # The page was already read and only the teardown is abandoned
             # (its processes have just been killed), so the fetch's own
             # outcome below stands rather than degrading to INDETERMINATE.
+            # Logged because the RATE of this is the "host under pressure"
+            # signal: a fetch that succeeds while its own cleanup had to be
+            # killed is otherwise indistinguishable from a healthy one.
+            logger.warning(
+                "uc tier: teardown abandoned and killed after %.1fs; the page "
+                "was already read, so the fetch result stands",
+                self._fetch_timeout_seconds)
         if "error" in holder:
             raise holder["error"]
         return holder["result"]
@@ -599,12 +644,25 @@ class UcFetcher:
         driver.quit() is never retried here (it would hang identically on
         the same frozen Chrome) -- kill by marker (Chrome/renderers) plus
         uc_driver's own service process, read directly from the Popen
-        SeleniumBase already holds (no name/time heuristic needed), plus
-        the sibling set frozen at launch time -- the live uc_driver is in
-        that set and in neither of the other two."""
+        SeleniumBase already holds, plus the sibling set frozen at launch.
+
+        The three are complementary, not redundant -- MEASURED (image,
+        https target): reconnect() terminates the launch-time uc_driver
+        (which the frozen set then only reaps) and starts a NEW one mid
+        navigation, which only the Popen pid knows; before that re-spawn,
+        only the frozen set knows the live one.
+        """
         if marker is not None:
             _kill_launch_processes(marker)
         _kill_identities(list(getattr(driver, "_kerdoos_launch_siblings", ())))
+        self._kill_service_process(driver)
+        self._late_sweep(driver, marker)
+
+    def _kill_service_process(self, driver) -> None:  # type: ignore[no-untyped-def]
+        """Kills driver.service.process.pid, but only once it still IS a
+        driver process: a reaped Popen whose pid the kernel has recycled
+        would otherwise take an unrelated process down with it (the rest
+        of this module checks create_time or name for the same reason)."""
         try:
             service_pid = driver.service.process.pid
         except Exception:  # noqa: BLE001 -- best-effort, service may be gone
@@ -613,11 +671,35 @@ class UcFetcher:
 
         try:
             service_proc = psutil.Process(service_pid)
+            if not _names_a_driver(service_proc):
+                return
         except Exception:  # noqa: BLE001 -- psutil.Error, but also ValueError
             # on a non-positive pid: a cleanup path that raises would mask
             # the FetchError the caller is about to see.
             return
         _kill_identities(_capture_identities([service_proc]))
+
+    def _late_sweep(self, driver, marker) -> None:  # type: ignore[no-untyped-def]
+        """Second pass for a process born AFTER the kill above, mirroring
+        the launch path's own sweep -- but waiting out RECONNECT_TIME
+        rather than the launch delay.
+
+        MEASURED (image, https target, deadline fired inside the reconnect
+        window): the abandoned worker wakes from reconnect()'s sleep after
+        the cleanup, calls service.start() and a fresh uc_driver was still
+        alive 5s past gate release. Only runs single-flight and with this
+        launch's own pid baseline, so the by-name rescan can never reach
+        another launch's uc_driver -- and never runs for a driver that did
+        not come from _launch_with_deadline (the unit-test fakes), which
+        would pay the wait for nothing.
+        """
+        pids_before = getattr(driver, "_kerdoos_pids_before", None)
+        if pids_before is None or marker is None:
+            return
+        if self._gate.max_concurrent != 1:
+            return
+        time.sleep(max(self._orphan_sweep_delay_seconds, RECONNECT_TIME + 1.0))
+        _kill_launch_processes(marker, pids_before)
 
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using SeleniumBase, so a

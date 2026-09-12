@@ -1212,6 +1212,18 @@ class _HangingQuitDriver(_HangingPostNavDriver):
         time.sleep(60)  # never returns
 
 
+def _service_pid_names_this_interpreter():
+    """Lets a stand-in process play uc_driver. _kill_service_process only
+    signals a pid that still NAMES a driver binary, so a test whose fake
+    service is a plain python process must neutralise that check rather
+    than assert a kill against a check it silently fails. Patches the
+    predicate, NOT _LAUNCH_PARENT_NAMES: _launch_process_tree reads the
+    same set to decide that a marked process's PARENT belongs to the
+    launch, and widening it to "python" would enrol the test runner
+    itself, then kill it with all its children."""
+    return mock.patch.object(uc, "_names_a_driver", return_value=True)
+
+
 class UcPostNavigationDeadlineTest(unittest.TestCase):
     """Roadmap f0c236da: _run_after_launch_with_deadline bounds the whole
     navigate-to-quit cycle, since neither the individual calls nor a
@@ -1251,7 +1263,8 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
             driver = _HangingPostNavDriver(
                 marker=marker, service_pid=service_proc.pid)
             fetcher = uc.UcFetcher(_NEUTRAL_POLICY, fetch_timeout_seconds=0.2)
-            with self.assertRaises(FetchError):
+            with _service_pid_names_this_interpreter(), \
+                    self.assertRaises(FetchError):
                 fetcher._run_after_launch_with_deadline(
                     driver, "https://example.com/")
             self.assertTrue(
@@ -1267,6 +1280,52 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
                 if proc.poll() is None:
                     proc.kill()
 
+    def test_a_service_pid_that_no_longer_names_a_driver_is_spared(
+            self) -> None:
+        # A Popen already reaped by seleniumbase leaves a pid the kernel is
+        # free to hand to anyone; without an identity check the cleanup
+        # SIGKILLs that stranger.
+        stranger = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            driver = _HangingPostNavDriver(
+                marker=None, service_pid=stranger.pid)
+            fetcher = uc.UcFetcher(_NEUTRAL_POLICY, fetch_timeout_seconds=0.2)
+            with self.assertRaises(FetchError):
+                fetcher._run_after_launch_with_deadline(
+                    driver, "https://example.com/")
+            time.sleep(0.5)
+            self.assertIsNone(
+                stranger.poll(),
+                "a process that is not a driver was killed on its pid alone")
+        finally:
+            if stranger.poll() is None:
+                stranger.kill()
+
+    def test_a_failure_to_start_the_owner_thread_still_cleans_up(self) -> None:
+        # RuntimeError("can't start new thread") is the realistic case, and
+        # it strikes precisely when the host is out of resources -- the
+        # state this deadline exists to survive. Chrome is already running
+        # by then, so returning without a kill would release the gate on it.
+        marker = "--kerdoos-launch-id=nothread1"
+        chrome_proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", marker])
+        try:
+            driver = _HangingPostNavDriver(marker=marker, service_pid=-1)
+            fetcher = uc.UcFetcher(_NEUTRAL_POLICY, fetch_timeout_seconds=5.0)
+            with mock.patch.object(
+                    uc.threading.Thread, "start",
+                    side_effect=RuntimeError("can't start new thread")):
+                with self.assertRaises(RuntimeError):
+                    fetcher._run_after_launch_with_deadline(
+                        driver, "https://example.com/")
+            self.assertTrue(
+                self._wait_until(lambda: chrome_proc.poll() is not None),
+                "Chrome survived a failure to start the owner thread")
+        finally:
+            if chrome_proc.poll() is None:
+                chrome_proc.kill()
+
     def test_a_freeze_during_teardown_still_kills_this_launch(self) -> None:
         # The worker sets `done` BEFORE calling quit(), so a deadline armed
         # on `done` rather than on the worker's liveness lets a frozen
@@ -1281,8 +1340,9 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
             driver = _HangingQuitDriver(
                 marker=marker, service_pid=service_proc.pid)
             fetcher = uc.UcFetcher(_NEUTRAL_POLICY, fetch_timeout_seconds=0.3)
-            result = fetcher._run_after_launch_with_deadline(
-                driver, "https://example.com/")
+            with _service_pid_names_this_interpreter():
+                result = fetcher._run_after_launch_with_deadline(
+                    driver, "https://example.com/")
             # The page WAS read before the freeze: the fetch's own outcome
             # stands, only the teardown is abandoned (and killed).
             self.assertIn("ok", result.html)
@@ -1310,11 +1370,18 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
 
 class UcPostNavigationFreezeImageTest(unittest.TestCase):
     """Card f0c236da acceptance test: a REAL Driver(uc=True), SIGSTOP on
-    Chrome after navigation (the probe_postnav.py scenario) -- fetch()'s
-    post-navigation phase must return a FetchError within the configured
-    deadline, with zero survivors of this launch once the browser gate is
-    released, and the NEXT fetch's own Chrome must survive this one's
-    cleanup. POSIX only (signal.SIGSTOP)."""
+    Chrome after navigation -- fetch()'s post-navigation phase must return
+    a FetchError within the configured deadline, with zero survivors of
+    this launch once the browser gate is released, and the NEXT fetch's own
+    Chrome must survive this one's cleanup. POSIX only (signal.SIGSTOP).
+
+    Scope, since the two cases have DIFFERENT process topologies:
+    test_frozen_chrome... uses a data: URL, which seleniumbase's
+    uc_open_with_reconnect short-circuits (it only reconnects for http/https
+    targets), so the live uc_driver there is still the launch-time one.
+    test_frozen_chrome_after_the_reconnect... drives the http path, where
+    reconnect() has replaced that uc_driver with a younger process.
+    """
 
     def setUp(self) -> None:
         if os.name != "posix":
@@ -1393,6 +1460,134 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
             except FetchError:
                 self.fail("the next fetch was itself killed/timed out")
 
+    def test_frozen_chrome_after_the_reconnect_respawn_leaves_no_survivor(
+            self) -> None:
+        import signal
+
+        import psutil
+
+        from autolycos.adapters.uc import _find_patchright_chromium
+
+        server, url = _local_http_server()
+        self.addCleanup(server.shutdown)
+        gate = BrowserGate(max_concurrent=1)
+        fetcher = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, fetch_timeout_seconds=12.0,
+            orphan_sweep_delay_seconds=1.0)
+        binary = _find_patchright_chromium()
+        driver_cls = _load_seleniumbase_driver()
+
+        respawned: list[int] = []
+        survivors: list[int] = []
+
+        with gate.acquire():
+            driver = fetcher._launch_with_deadline(
+                driver_cls, {"uc": True, "headless": True,
+                             "binary_location": binary})
+            known = {pid for pid, _ in getattr(
+                driver, "_kerdoos_launch_siblings", ())}
+
+            def _freeze_once_the_driver_has_been_respawned() -> None:
+                # Waiting for the YOUNGER uc_driver rather than sleeping a
+                # fixed delay is what makes this test about the topology
+                # instead of about a timing coincidence.
+                deadline = time.monotonic() + 30.0
+                me = psutil.Process(os.getpid())
+                while time.monotonic() < deadline and not respawned:
+                    for proc in me.children(recursive=True):
+                        try:
+                            if (proc.name().lower() in _UC_DRIVER_NAMES
+                                    and proc.pid not in known
+                                    and proc.status() != psutil.STATUS_ZOMBIE):
+                                respawned.append(proc.pid)
+                        except psutil.Error:
+                            continue
+                    time.sleep(0.1)
+                for proc in me.children(recursive=True):
+                    try:
+                        if proc.name().lower() == "chrome":
+                            proc.send_signal(signal.SIGSTOP)
+                    except psutil.Error:
+                        pass
+
+            threading.Thread(
+                target=_freeze_once_the_driver_has_been_respawned,
+                daemon=True).start()
+            # Either the deadline fires (FetchError) or the severed session
+            # surfaces as a Selenium error first; which one depends on where
+            # in the cycle the freeze lands, and neither may return a page.
+            with self.assertRaises(Exception):
+                fetcher._run_after_launch_with_deadline(driver, url)
+            me = psutil.Process(os.getpid())
+            survivors.extend(p.pid for p in me.children(recursive=True)
+                             if _is_live_uc_process(p))
+        self.assertTrue(
+            respawned,
+            "no younger uc_driver appeared: reconnect() did not run, so this "
+            "test did not exercise the post-respawn topology it is about")
+        self.assertEqual(
+            survivors, [],
+            "process(es) of the frozen launch still alive at gate release")
+
+    def test_a_deadline_inside_the_reconnect_window_leaves_no_late_spawn(
+            self) -> None:
+        import signal
+
+        import psutil
+
+        from autolycos.adapters.uc import _find_patchright_chromium
+
+        server, url = _local_http_server()
+        self.addCleanup(server.shutdown)
+        gate = BrowserGate(max_concurrent=1)
+        # Deadline well inside RECONNECT_TIME: the abandoned worker is
+        # asleep in reconnect() when the cleanup runs, and wakes up LATER
+        # to call service.start(). MEASURED: without the late sweep that
+        # uc_driver was still alive 8s past gate release -- born after the
+        # kill, so no kill that runs before the sleep can reach it.
+        fetcher = uc.UcFetcher(
+            _NEUTRAL_POLICY, gate=gate, fetch_timeout_seconds=2.0)
+        binary = _find_patchright_chromium()
+        driver_cls = _load_seleniumbase_driver()
+
+        survivors: list[int] = []
+        late_survivors: list[int] = []
+
+        def _freeze_during_the_reconnect_window() -> None:
+            time.sleep(1.0)
+            me = psutil.Process(os.getpid())
+            for proc in me.children(recursive=True):
+                try:
+                    if proc.name().lower() == "chrome":
+                        proc.send_signal(signal.SIGSTOP)
+                except psutil.Error:
+                    pass
+
+        with gate.acquire():
+            driver = fetcher._launch_with_deadline(
+                driver_cls, {"uc": True, "headless": True,
+                             "binary_location": binary})
+            threading.Thread(
+                target=_freeze_during_the_reconnect_window, daemon=True).start()
+            with self.assertRaises(FetchError):
+                fetcher._run_after_launch_with_deadline(driver, url)
+            me = psutil.Process(os.getpid())
+            survivors.extend(p.pid for p in me.children(recursive=True)
+                             if _is_live_uc_process(p))
+        self.assertEqual(
+            survivors, [],
+            "process(es) of the frozen launch still alive at gate release")
+        # The worker's wake-up is bounded by RECONNECT_TIME; sampling past
+        # it proves the sweep outlived the spawn rather than merely
+        # preceding it.
+        time.sleep(uc.RECONNECT_TIME + 2.0)
+        late_survivors.extend(
+            p.pid for p in psutil.Process(os.getpid()).children(recursive=True)
+            if _is_live_uc_process(p))
+        self.assertEqual(
+            late_survivors, [],
+            "the abandoned worker spawned a uc_driver after gate release")
+
     @staticmethod
     def _wait_until(predicate, timeout: float = 20.0,
                      interval: float = 0.2) -> bool:
@@ -1402,6 +1597,33 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
                 return True
             time.sleep(interval)
         return predicate()
+
+
+_UC_DRIVER_NAMES = ("uc_driver", "chromedriver")
+
+
+def _local_http_server():
+    """A loopback http:// target. seleniumbase's uc_open_with_reconnect
+    only runs its reconnect (terminate + restart the uc_driver service)
+    for http/https URLs, so a data: URL cannot reach the topology the
+    post-respawn test is about."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 -- http.server's own name
+            body = b"<html><body>ok</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:  # noqa: ANN002
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}/"
 
 
 def _load_seleniumbase_driver():
