@@ -494,6 +494,13 @@ def _host_aware_resolver(target_host: str, target_ip: str):
     return _resolver
 
 
+def _allow_any_domain(host: str) -> bool:
+    """Permissive domain predicate, for the tests that measure the IP and
+    port layers. It is spelled out rather than defaulted so that each of
+    those tests states that it deliberately waives the domain check."""
+    return True
+
+
 class EgressProxyTest(unittest.TestCase):
     """Phase 2a item 2 (ADR 0001 S9): loopback IP-pinning CONNECT proxy."""
 
@@ -512,7 +519,7 @@ class EgressProxyTest(unittest.TestCase):
 
     def test_binds_loopback_only(self) -> None:
         from autolycos.egress_proxy import PinningProxy
-        with PinningProxy() as proxy:
+        with PinningProxy(domain_allowed=_allow_any_domain) as proxy:
             self.assertEqual(proxy.bound_host, "127.0.0.1")
             self.assertTrue(proxy.url.startswith("http://127.0.0.1:"))
 
@@ -531,7 +538,7 @@ class EgressProxyTest(unittest.TestCase):
             return socket.create_connection((upstream.host, upstream.port),
                                             timeout=5)
 
-        proxy = PinningProxy(dialer=_dialer)
+        proxy = PinningProxy(dialer=_dialer, domain_allowed=_allow_any_domain)
         proxy.start()
         self.addCleanup(proxy.stop)
 
@@ -558,7 +565,9 @@ class EgressProxyTest(unittest.TestCase):
         from autolycos.egress_proxy import PinningProxy
 
         dialed: list[tuple[str, int]] = []
-        proxy = PinningProxy(dialer=lambda ip, p: dialed.append((ip, p)))  # type: ignore[arg-type,return-value]
+        proxy = PinningProxy(
+            dialer=lambda ip, p: dialed.append((ip, p)),  # type: ignore[arg-type,return-value]
+            domain_allowed=_allow_any_domain)
         proxy.start()
         self.addCleanup(proxy.stop)
 
@@ -575,7 +584,9 @@ class EgressProxyTest(unittest.TestCase):
         from autolycos.egress_proxy import PinningProxy
 
         dialed: list[tuple[str, int]] = []
-        proxy = PinningProxy(dialer=lambda ip, p: dialed.append((ip, p)))  # type: ignore[arg-type,return-value]
+        proxy = PinningProxy(
+            dialer=lambda ip, p: dialed.append((ip, p)),  # type: ignore[arg-type,return-value]
+            domain_allowed=_allow_any_domain)
         proxy.start()
         self.addCleanup(proxy.stop)
 
@@ -594,7 +605,7 @@ class EgressProxyTest(unittest.TestCase):
     def test_non_connect_method_rejected(self) -> None:
         from autolycos.egress_proxy import PinningProxy
 
-        proxy = PinningProxy()
+        proxy = PinningProxy(domain_allowed=_allow_any_domain)
         proxy.start()
         self.addCleanup(proxy.stop)
 
@@ -687,38 +698,22 @@ class EgressProxyDomainAllowlistTest(unittest.TestCase):
         self.assertIn(b"200", resp)
         self.assertEqual(dialed, [("104.18.0.1", 443)])
 
-    def test_no_predicate_injected_preserves_ip_and_port_only_behavior(self) -> None:
-        # Backward compat: a caller that does not pass domain_allowed (the
-        # default) keeps the pre-C1 behavior -- any domain that resolves
-        # safely is accepted, only IP/port are checked.
+    def test_cannot_build_a_proxy_without_a_domain_guard(self) -> None:
+        # Fail-closed: a domain guard cannot be omitted, so it cannot be
+        # forgotten. Reinstating a default would let the first construction
+        # below succeed, which is exactly what this asserts against.
         from autolycos.egress_proxy import PinningProxy
 
-        upstream = _EchoUpstream()
-        upstream.start()
-        self.addCleanup(upstream.stop)
-        dialed: list[tuple[str, int]] = []
+        with self.assertRaises(TypeError):
+            PinningProxy()
+        with self.assertRaises(TypeError):
+            PinningProxy(dialer=lambda ip, p: None)  # type: ignore[arg-type,return-value]
 
-        def _dialer(ip: str, port: int) -> socket.socket:
-            dialed.append((ip, port))
-            return socket.create_connection((upstream.host, upstream.port),
-                                            timeout=5)
-
-        proxy = PinningProxy(dialer=_dialer)
-        proxy.start()
-        self.addCleanup(proxy.stop)
-
-        with mock.patch.object(safety.socket, "getaddrinfo",
-                               side_effect=_host_aware_resolver(
-                                   "kabum.com.br", "104.18.0.1")):
-            client = socket.create_connection(
-                (proxy.bound_host, proxy.bound_port), timeout=5)
-            client.settimeout(5)
-            client.sendall(b"CONNECT kabum.com.br:443 HTTP/1.1\r\n\r\n")
-            resp = client.recv(1024)
-            client.close()
-
-        self.assertIn(b"200", resp)
-        self.assertEqual(dialed, [("104.18.0.1", 443)])
+        # The guard is the ONLY thing missing above: supplying it alone is
+        # enough to build, so the TypeError cannot come from another
+        # parameter and the assertions above keep their meaning.
+        with PinningProxy(domain_allowed=_allow_any_domain) as proxy:
+            self.assertIsNotNone(proxy.bound_port)
 
     def test_allowlisted_domain_rebinding_to_private_ip_still_refused(self) -> None:
         # ADR 0004 revision R1: the domain check must not SHORT-CIRCUIT the

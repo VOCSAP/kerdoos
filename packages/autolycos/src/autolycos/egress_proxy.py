@@ -24,7 +24,7 @@ TLS fingerprint is preserved).
 Hardening contract (gate, ADR 0001 S9; domain check added ADR 0004 D4/C1):
   * binds loopback-only (127.0.0.1) on an ephemeral port;
   * rejects any non-loopback client (defence in depth on top of the bind);
-  * an optional per-instance domain_allowed predicate refuses a CONNECT
+  * a required per-instance domain_allowed predicate refuses a CONNECT
     authority outside the fetch's allowlist BEFORE any resolution;
   * restricts CONNECT target ports to 80/443 (no CONNECT to arbitrary ports);
   * resolve-once + pin closes the DNS-rebind TOCTOU at the network layer;
@@ -70,10 +70,7 @@ _DANGEROUS_BROWSER_ARGS = (
 # Upstream dialer: (ip, port) -> connected socket. Injectable for tests.
 Dialer = Callable[[str, int], socket.socket]
 
-# Domain-allowlist predicate: normalized host -> allowed. None (the
-# constructor default) means no domain check at this layer -- callers that
-# do not pass one keep the pre-C1 behavior (IP/port checks only), which
-# existing non-browser callers of PinningProxy may still rely on.
+# Domain-allowlist predicate: normalized host -> allowed.
 DomainAllowed = Callable[[str], bool]
 
 
@@ -93,17 +90,20 @@ def _is_loopback(host: str) -> bool:
 class PinningProxy:
     """Loopback HTTP CONNECT forward-proxy that dials only pinned, safe IPs.
 
-    `domain_allowed`, when given, is consulted on the CONNECT authority
-    BEFORE any resolution (ADR 0004 D4/C1) -- a non-allowlisted host is
-    refused with zero DNS lookups and zero upstream connection attempts.
+    `domain_allowed` is consulted on the CONNECT authority BEFORE any
+    resolution (ADR 0004 D4/C1) -- a non-allowlisted host is refused with
+    zero DNS lookups and zero upstream connection attempts. It is REQUIRED
+    and has no default: a caller with no allowlist to enforce must write the
+    permissive predicate itself, so that starting a proxy with no domain
+    guard is always a visible decision rather than an inherited one.
     One instance is created per fetch (the caller's allowlist is fixed for
     that fetch's lifetime), so this is a constructor argument, not a
     per-request parameter.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 0, *,
-                 dialer: Dialer | None = None,
-                 domain_allowed: DomainAllowed | None = None) -> None:
+                 domain_allowed: DomainAllowed,
+                 dialer: Dialer | None = None) -> None:
         self._host = host
         self._port = port
         self._dialer = dialer or self._default_dial
@@ -187,7 +187,7 @@ class PinningProxy:
                 self._reply(client, _BAD)
                 return
             domain = host.lower().rstrip(".")
-            if self._domain_allowed is not None and not self._domain_allowed(domain):
+            if not self._domain_allowed(domain):
                 # Refused on the DOMAIN alone: no resolution, no dial, no IP
                 # check even attempted (ADR 0004 D4/C1) -- this authorization
                 # decision must not depend on what the name happens to
