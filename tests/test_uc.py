@@ -1486,6 +1486,17 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
                              "binary_location": binary})
             known = {pid for pid, _ in getattr(
                 driver, "_kerdoos_launch_siblings", ())}
+            # The SPARING direction of _names_a_driver is unit-tested; this
+            # is its other direction, on a real driver process. Without it,
+            # an upstream rename of the uc_driver binary would silently
+            # turn the service-pid kill into a no-op and nothing would go
+            # red -- the survivor assertions below are covered by the late
+            # sweep on their own.
+            self.assertTrue(
+                uc._names_a_driver(
+                    psutil.Process(driver.service.process.pid)),
+                "the real service process is not recognised as a driver: "
+                "_kill_service_process would spare it")
 
             def _freeze_once_the_driver_has_been_respawned() -> None:
                 # Waiting for the YOUNGER uc_driver rather than sleeping a

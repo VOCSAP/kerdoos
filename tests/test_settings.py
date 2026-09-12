@@ -57,18 +57,26 @@ _SMTP_ENV_VARS = (
 )
 
 
+# The ordering-warning latches are process-wide (warn-once, roadmap
+# d8b7b8fd), so each test needs a fresh state to observe its own warning
+# regardless of what an earlier test already triggered. Listed by name, so
+# that a latch added later is reset by adding one line here rather than by
+# remembering to touch setUp AND tearDown.
+_WARN_ONCE_LATCHES = (
+    "_browser_fetch_timeout_below_launch_warned",
+    "_browser_fetch_timeout_above_acquire_warned",
+    "_uc_fetch_timeout_below_navigation_warned",
+    "_uc_fetch_timeout_above_acquire_warned",
+)
+
+
 class _SettingsTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self._saved = {var: os.environ.pop(var, None) for var in _SMTP_ENV_VARS}
-        # The ordering-warning latches are process-wide (warn-once, roadmap
-        # d8b7b8fd), so each test needs a fresh state to observe its own
-        # warning regardless of what an earlier test already triggered.
-        self._saved_below_launch_warned = (
-            kerdoos_config._browser_fetch_timeout_below_launch_warned)
-        self._saved_above_acquire_warned = (
-            kerdoos_config._browser_fetch_timeout_above_acquire_warned)
-        kerdoos_config._browser_fetch_timeout_below_launch_warned = False
-        kerdoos_config._browser_fetch_timeout_above_acquire_warned = False
+        self._saved_latches = {
+            name: getattr(kerdoos_config, name) for name in _WARN_ONCE_LATCHES}
+        for name in _WARN_ONCE_LATCHES:
+            setattr(kerdoos_config, name, False)
 
     def tearDown(self) -> None:
         for var, value in self._saved.items():
@@ -76,10 +84,8 @@ class _SettingsTestBase(unittest.TestCase):
                 os.environ.pop(var, None)
             else:
                 os.environ[var] = value
-        kerdoos_config._browser_fetch_timeout_below_launch_warned = (
-            self._saved_below_launch_warned)
-        kerdoos_config._browser_fetch_timeout_above_acquire_warned = (
-            self._saved_above_acquire_warned)
+        for name, value in self._saved_latches.items():
+            setattr(kerdoos_config, name, value)
 
 
 class SmtpUnsetDefaultsTest(_SettingsTestBase):
@@ -813,6 +819,73 @@ class BrowserFetchTimeoutOrderingWarningTest(_SettingsTestBase):
     ) -> None:
         os.environ["KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS"] = "40"
         os.environ["KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS"] = "50"
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+            get_settings()
+            get_settings()
+        self.assertEqual(spy.call_count, 1)
+
+
+class UcFetchTimeoutOrderingWarningTest(_SettingsTestBase):
+    """Roadmap f0c236da: the uc tier's fetch deadline gets the same ordering
+    checks as the browser tier's, because it holds the SAME gate. The
+    acquire-side budget counts the post-navigation cleanup too, not just
+    the deadline: that cleanup runs under the gate."""
+
+    def test_fetch_timeout_below_the_navigation_budget_warns(self) -> None:
+        os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "20"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.uc_fetch_timeout_seconds, 20.0)
+        self.assertTrue(
+            any("not above the uc tier's own page-load" in msg
+                for msg in cm.output), cm.output)
+
+    def test_fetch_timeout_plus_cleanup_reaching_acquire_timeout_warns(
+        self,
+    ) -> None:
+        # 100 alone is below the 120 acquire timeout; it is the cleanup the
+        # deadline triggers that pushes the held time past it.
+        os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "100"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.uc_fetch_timeout_seconds, 100.0)
+        self.assertTrue(
+            any("post-navigation cleanup it triggers" in msg
+                for msg in cm.output), cm.output)
+
+    def test_the_clamped_sweep_delay_is_the_one_charged_to_the_budget(
+        self,
+    ) -> None:
+        # Asked for 100s of sweep, clamped to 45s. Held with the clamped
+        # value: 56 + 3*5 + 45 = 116 < 120, no warning. Held with the RAW
+        # value it would be 171, i.e. a warning about seconds the process
+        # never actually spends under the gate.
+        os.environ["KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS"] = "100"
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "30"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "56"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.uc_orphan_sweep_delay_seconds, 45.0)
+        self.assertFalse(
+            any("post-navigation cleanup it triggers" in msg
+                for msg in cm.output), cm.output)
+
+    def test_well_ordered_values_do_not_warn(self) -> None:
+        os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "90"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "180"
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+        spy.assert_not_called()
+
+    def test_same_out_of_order_value_warns_once_across_multiple_calls(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "20"
         logger = logging.getLogger("kerdoos.config")
         with mock.patch.object(logger, "warning") as spy:
             get_settings()

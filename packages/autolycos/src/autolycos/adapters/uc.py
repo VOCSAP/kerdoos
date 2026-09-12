@@ -113,7 +113,14 @@ UC_FETCH_TIMEOUT_SECONDS = 90.0
 # returned, a window in which a caller releasing the gate right after
 # could hand the slot to a new launch while this one's Chromium is still
 # alive. _kill_identities waits (bounded) for confirmed death instead.
-_KILL_WAIT_SECONDS = 5.0
+# Public like the timeouts above: kerdoos.config needs it to state how long
+# a frozen uc fetch can hold the browser gate past its own deadline.
+KILL_WAIT_SECONDS = 5.0
+# Kill passes in _kill_after_fetch_timeout that can each pay the wait above
+# (marker, frozen sibling set, service pid); the late sweep's final pass
+# adds one more, counted separately since its own ceiling already is the
+# orphan sweep delay.
+POST_NAV_KILL_PASSES = 3
 
 
 def _normalize_domains(domains: Iterable[str]) -> list[str]:
@@ -304,11 +311,11 @@ def _kill_identities(identities: list[tuple[int, float]]) -> None:
     Roadmap d8b7b8fd, MEASURED (browser tier, same mechanism): kill() only
     SENDS SIGKILL and returns immediately, before the kernel finishes
     tearing the process down -- psutil.wait_procs waits (bounded by
-    _KILL_WAIT_SECONDS) for confirmed death, so a caller releasing the
+    KILL_WAIT_SECONDS) for confirmed death, so a caller releasing the
     browser gate right after this call never does so on a false negative.
 
     That guarantee is bounded, not absolute: a process still alive after
-    SIGKILL plus _KILL_WAIT_SECONDS (an uninterruptible kernel wait) only
+    SIGKILL plus KILL_WAIT_SECONDS (an uninterruptible kernel wait) only
     produces a warning, and the caller releases the gate anyway. Blocking
     on it would let one stuck process wedge every later fetch, which is
     worse than the single-Chromium coherence risk it leaves open.
@@ -337,11 +344,11 @@ def _kill_identities(identities: list[tuple[int, float]]) -> None:
             pass
     if not killed:
         return
-    _gone, alive = psutil.wait_procs(killed, timeout=_KILL_WAIT_SECONDS)
+    _gone, alive = psutil.wait_procs(killed, timeout=KILL_WAIT_SECONDS)
     if alive:
         logger.warning(
             "uc tier: %d process(es) survived SIGKILL + %.1fs wait: %s",
-            len(alive), _KILL_WAIT_SECONDS, [p.pid for p in alive])
+            len(alive), KILL_WAIT_SECONDS, [p.pid for p in alive])
 
 
 def _names_a_driver(proc) -> bool:  # type: ignore[no-untyped-def]
@@ -508,25 +515,28 @@ class UcFetcher:
         # THIS launch's own Chrome/renderers by marker, without threading a
         # new parameter through every _launch_with_deadline call site (many
         # tests call it directly with a bare driver_cls/driver_kwargs pair).
+        # Plain assignments FIRST, the psutil-backed capture last: they
+        # cannot fail, and a psutil error on the capture would otherwise
+        # take the late sweep's own baseline down with it, disarming two
+        # cleanup mechanisms on one exception.
         try:
             driver._kerdoos_launch_marker = marker  # noqa: SLF001
+            # MEASURED (image, https target): SeleniumBase's reconnect()
+            # terminates the uc_driver service and starts a NEW one mid
+            # navigation, so the frozen set below goes stale and the late
+            # sweep needs the same pid baseline the launch path uses.
+            driver._kerdoos_pids_before = (  # noqa: SLF001
+                pids_before if single_flight else None)
             # MEASURED (autonomous image, real Driver + SIGSTOP): uc_driver
             # is a SIBLING of Chrome in undetected mode -- it carries no
-            # marker, and driver.service.process.pid points at the OTHER,
-            # already-zombie uc_driver SeleniumBase spawned, so neither
-            # reaches the live one. Freezing its identity here, while this
-            # launch still owns the gate, is the same attribution the
-            # deadline branch above relies on (roadmap 6521bbce): never a
-            # by-name re-scan once the gate may belong to someone else.
+            # marker and is not in Chrome's tree. Freezing its identity
+            # here, while this launch still owns the gate, is the same
+            # attribution the deadline branch above relies on (roadmap
+            # 6521bbce): never a by-name re-scan once the gate may belong
+            # to someone else.
             driver._kerdoos_launch_siblings = _capture_identities(  # noqa: SLF001
                 _launch_process_tree(
                     marker, pids_before if single_flight else None))
-            # MEASURED (image, https target): SeleniumBase's reconnect()
-            # terminates the uc_driver service and starts a NEW one mid
-            # navigation, so the set above goes stale and the late sweep
-            # needs the same pid baseline the launch path uses.
-            driver._kerdoos_pids_before = (  # noqa: SLF001
-                pids_before if single_flight else None)
         except Exception:  # noqa: BLE001 -- best-effort, never fail the launch
             pass
         return driver
@@ -620,7 +630,7 @@ class UcFetcher:
             # deadline a mere abandoned teardown, and surface whatever
             # error the dying worker recorded instead of a FetchError.
             teardown_only = done.is_set()
-            self._kill_after_fetch_timeout(driver, marker)
+            self._kill_after_fetch_timeout(driver, marker, worker)
             if not teardown_only:
                 raise FetchError(
                     f"uc post-navigation exceeded "
@@ -639,24 +649,31 @@ class UcFetcher:
             raise holder["error"]
         return holder["result"]
 
-    def _kill_after_fetch_timeout(self, driver, marker) -> None:  # type: ignore[no-untyped-def]
+    def _kill_after_fetch_timeout(  # type: ignore[no-untyped-def]
+        self, driver, marker, worker=None,
+    ) -> None:
         """Best-effort cleanup for a fetch that exceeded its deadline:
         driver.quit() is never retried here (it would hang identically on
         the same frozen Chrome) -- kill by marker (Chrome/renderers) plus
         uc_driver's own service process, read directly from the Popen
         SeleniumBase already holds, plus the sibling set frozen at launch.
 
-        The three are complementary, not redundant -- MEASURED (image,
-        https target): reconnect() terminates the launch-time uc_driver
-        (which the frozen set then only reaps) and starts a NEW one mid
-        navigation, which only the Popen pid knows; before that re-spawn,
-        only the frozen set knows the live one.
+        MEASURED (image, https target): the first three OVERLAP by phase,
+        and removing any single one of them leaves the acceptance tests
+        green -- do not read that as one of them being dead weight. Before
+        reconnect() the live uc_driver is known to both the frozen set and
+        the Popen pid, and the frozen set is what REAPS the zombie the
+        re-spawn leaves behind; after it, only the Popen pid names the new
+        driver. The non-redundancy that is structural rather than
+        statistical belongs to the late sweep alone: it is the only pass
+        that runs after the others, so it is the only one that can reach a
+        process that did not exist when they ran.
         """
         if marker is not None:
             _kill_launch_processes(marker)
         _kill_identities(list(getattr(driver, "_kerdoos_launch_siblings", ())))
         self._kill_service_process(driver)
-        self._late_sweep(driver, marker)
+        self._late_sweep(driver, marker, worker)
 
     def _kill_service_process(self, driver) -> None:  # type: ignore[no-untyped-def]
         """Kills driver.service.process.pid, but only once it still IS a
@@ -679,26 +696,42 @@ class UcFetcher:
             return
         _kill_identities(_capture_identities([service_proc]))
 
-    def _late_sweep(self, driver, marker) -> None:  # type: ignore[no-untyped-def]
+    def _late_sweep(self, driver, marker, worker=None) -> None:  # type: ignore[no-untyped-def]
         """Second pass for a process born AFTER the kill above, mirroring
-        the launch path's own sweep -- but waiting out RECONNECT_TIME
-        rather than the launch delay.
+        the launch path's own sweep and sharing its delay setting.
 
         MEASURED (image, https target, deadline fired inside the reconnect
         window): the abandoned worker wakes from reconnect()'s sleep after
         the cleanup, calls service.start() and a fresh uc_driver was still
-        alive 5s past gate release. Only runs single-flight and with this
-        launch's own pid baseline, so the by-name rescan can never reach
-        another launch's uc_driver -- and never runs for a driver that did
-        not come from _launch_with_deadline (the unit-test fakes), which
-        would pay the wait for nothing.
+        alive 5s past gate release.
+
+        Waits on the WORKER'S DEATH rather than on a fixed delay: once
+        _run has returned, nothing more can be spawned, so the frequent
+        case (only the teardown was left) releases the gate in
+        milliseconds instead of paying the whole delay. The delay is only
+        the CEILING, and it is deliberately the injected, composition-root
+        clamped one: a floor of our own (RECONNECT_TIME) would silently
+        overrule a clamp that exists to keep this sleep from outlasting
+        the gate's acquire timeout. The trade is explicit -- with a delay
+        shorter than reconnect()'s own window, a worker that wakes after
+        the ceiling still escapes; that is a configuration decision, and
+        the composition root warns about it.
+
+        Only runs single-flight and with this launch's own pid baseline,
+        so the by-name rescan can never reach another launch's uc_driver,
+        and never runs for a driver that did not come from
+        _launch_with_deadline (the unit-test fakes), which would pay the
+        wait for nothing.
         """
         pids_before = getattr(driver, "_kerdoos_pids_before", None)
         if pids_before is None or marker is None:
             return
         if self._gate.max_concurrent != 1:
             return
-        time.sleep(max(self._orphan_sweep_delay_seconds, RECONNECT_TIME + 1.0))
+        if worker is not None:
+            worker.join(timeout=self._orphan_sweep_delay_seconds)
+        else:
+            time.sleep(self._orphan_sweep_delay_seconds)
         _kill_launch_processes(marker, pids_before)
 
     def fetch(self, url: str) -> FetchResult:

@@ -137,9 +137,14 @@ from autolycos.adapters.browser import (
     NAV_TIMEOUT_MS as _BROWSER_TIER_NAV_TIMEOUT_MS,
 )
 from autolycos.adapters.uc import (
+    KILL_WAIT_SECONDS as _UC_TIER_KILL_WAIT_SECONDS,
     ORPHAN_SWEEP_DELAY_SECONDS as _UC_TIER_ORPHAN_SWEEP_DELAY_SECONDS,
+    POST_NAV_KILL_PASSES as _UC_TIER_POST_NAV_KILL_PASSES,
+    RECONNECT_TIME as _UC_TIER_RECONNECT_TIME,
+    RENDER_WAIT as _UC_TIER_RENDER_WAIT,
     UC_FETCH_TIMEOUT_SECONDS as _UC_TIER_FETCH_TIMEOUT_SECONDS,
     UC_LAUNCH_TIMEOUT_SECONDS as _UC_TIER_LAUNCH_TIMEOUT_SECONDS,
+    UC_PAGE_LOAD_TIMEOUT_SECONDS as _UC_TIER_PAGE_LOAD_TIMEOUT_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -417,8 +422,56 @@ def _warn_if_browser_fetch_timeout_out_of_order(
         _browser_fetch_timeout_above_acquire_warned = True
 
 
+def _warn_if_uc_fetch_timeout_out_of_order(
+    uc_fetch_timeout_seconds: float,
+    uc_orphan_sweep_delay_seconds: float,
+    uc_acquire_timeout_seconds: float,
+) -> None:
+    """Roadmap f0c236da: the uc tier's own fetch deadline has the same two
+    ordering constraints as the browser tier's (see
+    _warn_if_browser_fetch_timeout_out_of_order), with one difference --
+    what holds the gate past the deadline is not just the deadline itself
+    but the post-navigation cleanup's own late sweep, whose ceiling is the
+    (already clamped) orphan sweep delay. WARNS, never refuses: both
+    violations degrade OTHER waiting callers rather than this fetch, so a
+    misconfigured deployment must still boot."""
+    global _uc_fetch_timeout_below_navigation_warned
+    global _uc_fetch_timeout_above_acquire_warned
+    min_expected = (_UC_TIER_PAGE_LOAD_TIMEOUT_SECONDS
+                    + _UC_TIER_RECONNECT_TIME + _UC_TIER_RENDER_WAIT)
+    if (uc_fetch_timeout_seconds <= min_expected
+            and not _uc_fetch_timeout_below_navigation_warned):
+        logger.warning(
+            "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=%s is not above the uc tier's "
+            "own page-load (%.1fs) + reconnect (%.1fs) + render (%.1fs) "
+            "budget (%.1fs) -- a fetch could be abandoned before the "
+            "navigation timeout it wraps ever gets a chance to fire.",
+            uc_fetch_timeout_seconds, _UC_TIER_PAGE_LOAD_TIMEOUT_SECONDS,
+            _UC_TIER_RECONNECT_TIME, _UC_TIER_RENDER_WAIT, min_expected)
+        _uc_fetch_timeout_below_navigation_warned = True
+    cleanup_seconds = (
+        _UC_TIER_POST_NAV_KILL_PASSES * _UC_TIER_KILL_WAIT_SECONDS
+        + uc_orphan_sweep_delay_seconds)
+    held = uc_fetch_timeout_seconds + cleanup_seconds
+    if (held >= uc_acquire_timeout_seconds
+            and not _uc_fetch_timeout_above_acquire_warned):
+        logger.warning(
+            "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=%s plus the post-navigation "
+            "cleanup it triggers (%.1fs: %d confirmed-death waits of %.1fs "
+            "plus the late sweep's %ss ceiling) would hold the browser gate "
+            "for %.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS="
+            "%s -- another caller waiting for that gate could time out its "
+            "own wait before this one ever frees it.",
+            uc_fetch_timeout_seconds, cleanup_seconds,
+            _UC_TIER_POST_NAV_KILL_PASSES, _UC_TIER_KILL_WAIT_SECONDS,
+            uc_orphan_sweep_delay_seconds, held, uc_acquire_timeout_seconds)
+        _uc_fetch_timeout_above_acquire_warned = True
+
+
 _browser_fetch_timeout_below_launch_warned = False
 _browser_fetch_timeout_above_acquire_warned = False
+_uc_fetch_timeout_below_navigation_warned = False
+_uc_fetch_timeout_above_acquire_warned = False
 
 
 def get_settings() -> Settings:
@@ -440,6 +493,21 @@ def get_settings() -> Settings:
         DEFAULT_BROWSER_MAX_ABANDONED_FETCHES, int, lambda v: v > 0)
     _warn_if_browser_fetch_timeout_out_of_order(
         browser_fetch_timeout_seconds, browser_launch_timeout_seconds,
+        browser_acquire_timeout_seconds)
+    # The CLAMPED delay is what the uc tier actually sleeps on both its
+    # sweeps, so it is the value the ordering check below must reason
+    # about -- warning on the raw env value would describe a budget the
+    # process never spends.
+    uc_orphan_sweep_delay_seconds = _safe_uc_orphan_sweep_delay(
+        _env_number(
+            "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
+            DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS, float, lambda v: v > 0),
+        uc_launch_timeout_seconds, browser_acquire_timeout_seconds)
+    uc_fetch_timeout_seconds = _env_number(
+        "KERDOOS_UC_FETCH_TIMEOUT_SECONDS",
+        DEFAULT_UC_FETCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    _warn_if_uc_fetch_timeout_out_of_order(
+        uc_fetch_timeout_seconds, uc_orphan_sweep_delay_seconds,
         browser_acquire_timeout_seconds)
     return Settings(
         session_secret=os.environ.get("KERDOOS_SESSION_SECRET"),
@@ -503,12 +571,6 @@ def get_settings() -> Settings:
         login_rate_limit_row_cap=_env_number(
             "KERDOOS_LOGIN_RATE_LIMIT_ROW_CAP",
             DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP, int, lambda v: v > 0),
-        uc_orphan_sweep_delay_seconds=_safe_uc_orphan_sweep_delay(
-            _env_number(
-                "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS",
-                DEFAULT_UC_ORPHAN_SWEEP_DELAY_SECONDS, float, lambda v: v > 0),
-            uc_launch_timeout_seconds, browser_acquire_timeout_seconds),
-        uc_fetch_timeout_seconds=_env_number(
-            "KERDOOS_UC_FETCH_TIMEOUT_SECONDS",
-            DEFAULT_UC_FETCH_TIMEOUT_SECONDS, float, lambda v: v > 0),
+        uc_orphan_sweep_delay_seconds=uc_orphan_sweep_delay_seconds,
+        uc_fetch_timeout_seconds=uc_fetch_timeout_seconds,
     )
