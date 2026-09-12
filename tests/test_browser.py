@@ -110,6 +110,27 @@ class BrowserFetcherContractTest(unittest.TestCase):
         self.assertFalse(fetcher._host_allowed("evil.com"))
         self.assertFalse(fetcher._host_allowed(""))
 
+    def test_host_allowed_rejects_strings_that_are_not_host_names(self) -> None:
+        # Every string below ENDS IN ".mercadolivre.com.br", so a bare suffix
+        # test accepts them all. The allowlist must not depend on an upstream
+        # canonicalizer to be the thing that rejects them.
+        fetcher = browser.BrowserFetcher(_POLICY)
+        for host in ("evil.com#.mercadolivre.com.br",
+                     "evil.com/.mercadolivre.com.br",
+                     "evil.com\\.mercadolivre.com.br",
+                     "evil.com?.mercadolivre.com.br",
+                     "evil.com@.mercadolivre.com.br",
+                     "evil.com\x00.mercadolivre.com.br",
+                     "evil.com\t.mercadolivre.com.br",
+                     "evil.com .mercadolivre.com.br",
+                     "evil.com..mercadolivre.com.br"):
+            with self.subTest(host=host):
+                self.assertFalse(fetcher._host_allowed(host))
+        # The plain name and its root-dot spelling stay allowed: the form
+        # check must not cost a legitimate render.
+        self.assertTrue(fetcher._host_allowed("mercadolivre.com.br"))
+        self.assertTrue(fetcher._host_allowed("mercadolivre.com.br."))
+
 
 # ----- navigation wiring, driven with a FAKE Playwright (no real browser) -----
 
@@ -138,18 +159,32 @@ class _FakePage:
         return self._content
 
 
+class _FakeWebSocketRoute:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeContext:
     def __init__(self, page: _FakePage, **kwargs) -> None:  # noqa: ANN003
         self._page = page
         self.kwargs = kwargs
         self.route_pattern: str | None = None
         self.route_handler = None
+        self.ws_route_pattern: str | None = None
+        self.ws_route_handler = None
 
     def route(self, pattern, handler):  # noqa: ANN001
         self.route_pattern = pattern
         self.route_handler = handler
         self._page.route_pattern = pattern
         self._page.route_handler = handler
+
+    def route_web_socket(self, pattern, handler):  # noqa: ANN001
+        self.ws_route_pattern = pattern
+        self.ws_route_handler = handler
 
     def new_page(self) -> _FakePage:
         return self._page
@@ -250,8 +285,6 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         self.assertTrue(
             chromium.launch_kwargs["args"][0].startswith(
                 browser._LAUNCH_ID_ARG_PREFIX))
-        # No host-resolver pin re-introduced by the patchright swap.
-        self.assertNotIn("proxy_bypass", chromium.launch_kwargs)
         for a in chromium.launch_kwargs["args"]:
             self.assertNotIn("--host-resolver-rules", a)
         # Phase 2b: JS stealth was applied to the rendered page.
@@ -263,6 +296,36 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         self.assertEqual(result.status, 200)
         self.assertFalse(result.challenged)
         self.assertIn("xxxxx", result.html)
+
+    def test_proxy_config_subtracts_the_implicit_loopback_bypass(self) -> None:
+        # Without this, Chromium sends localhost / 127.0.0.1/8 / [::1] /
+        # 169.254/16 / [FE80::]/10 DIRECTLY, emitting no CONNECT, so neither
+        # the domain guard nor ip_is_safe nor the pin is ever consulted for
+        # the address class they exist to refuse.
+        page = _FakePage("<html>" + "x" * 5000, 200)
+        _, chromium, _ = self._run(page)
+        self.assertEqual(chromium.launch_kwargs["proxy"]["bypass"],
+                         "<-loopback>")
+        # It must travel in the proxy dict, because the equivalent launch
+        # flag does NOT survive: carrying it in args would silently reopen
+        # the hole. This asserts the scrub really would eat it.
+        self.assertEqual(
+            browser.strip_dangerous_browser_args(
+                ["--proxy-bypass-list=<-loopback>"]), [])
+        for a in chromium.launch_kwargs["args"]:
+            self.assertNotIn("--proxy-bypass-list", a)
+
+    def test_every_websocket_is_closed_before_its_handshake(self) -> None:
+        # route() does not see WebSockets, so a WS to an internal port would
+        # be seen by neither the proxy nor the route guard -- an internal-port
+        # liveness oracle for a scraped page.
+        page = _FakePage("<html>" + "x" * 5000, 200)
+        _, chromium, _ = self._run(page)
+        context = chromium._browser.context
+        self.assertEqual(context.ws_route_pattern, "**/*")
+        ws_route = _FakeWebSocketRoute()
+        context.ws_route_handler(ws_route)
+        self.assertTrue(ws_route.closed)
 
     def test_context_created_with_service_workers_blocked(self) -> None:
         # ADR 0004 D4/C3: a service worker must not be able to make ANY
@@ -518,6 +581,9 @@ class _HangingBrowser:
     def route(self, pattern, handler) -> None:  # noqa: ANN001
         pass
 
+    def route_web_socket(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
+
     def new_page(self):  # noqa: ANN201
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", self._marker])
@@ -539,6 +605,9 @@ class _NeverReturningBrowser:
         return self
 
     def route(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
+
+    def route_web_socket(self, pattern, handler) -> None:  # noqa: ANN001
         pass
 
     def new_page(self):  # noqa: ANN201
@@ -567,6 +636,9 @@ class _HangingThenUnblockedBrowser:
         return self
 
     def route(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
+
+    def route_web_socket(self, pattern, handler) -> None:  # noqa: ANN001
         pass
 
     def new_page(self):  # noqa: ANN201

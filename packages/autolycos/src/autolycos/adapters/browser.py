@@ -17,24 +17,31 @@ Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
     any navigation, so a non-allowlisted / rebinding / private target is refused
     even when the optional dependency is absent (the guard raises first).
   * PRIMARY control (ADR 0004 D4/C1): Chromium is launched behind a loopback
-    egress-proxy (PinningProxy) via proxy_config and NEVER resolves any
-    target itself -- it CONNECTs through the proxy for everything (pages,
-    sub-resources, service workers, WebSockets, popups). The proxy checks
-    the CONNECT authority's DOMAIN against this fetch's allowlist (navigation
-    DomainPolicy + declared sub-resource CDNs) BEFORE any resolution, refusing
-    a non-allowlisted host with zero DNS lookups. Once the domain passes, the
+    egress-proxy (PinningProxy) via proxy_config and does not resolve targets
+    itself -- it CONNECTs through the proxy. The proxy checks the CONNECT
+    authority's DOMAIN against this fetch's allowlist (navigation DomainPolicy
+    + declared sub-resource CDNs) BEFORE any resolution, refusing a
+    non-allowlisted host with zero DNS lookups. Once the domain passes, the
     proxy resolves once, rejects any non-global IP (ip_is_safe) and dials the
     PINNED IP -- closing the DNS-rebind TOCTOU at the network layer. This
     replaces the fragile --host-resolver-rules launch flag. TLS stays
     end-to-end (the proxy tunnels ciphertext; SNI/cert/Host verification stay
     bound to the hostname). Egress-weakening launch flags are scrubbed
     (strip_dangerous_browser_args).
+    `bypass="<-loopback>"` is what makes "everything" true: Chromium's
+    implicit bypass rules otherwise send localhost, 127.0.0.1/8, [::1],
+    169.254/16 and [FE80::]/10 DIRECTLY, emitting no CONNECT for the very
+    address class this posture exists to refuse. It must travel in the proxy
+    dict, never in `args` -- --proxy-bypass-list is on the scrub list, so an
+    args-borne copy would be stripped and the hole would reopen silently.
   * DEFENSE IN DEPTH, not the primary control: context.route("**/*") (bound to
     the browser CONTEXT, not just the page, so it also covers popups/new pages
     opened via window.open) aborts any request whose host the proxy would
-    also refuse. Service workers cannot make any request at all
-    (service_workers="block" on the context) -- the domain check above
-    already covers this traffic too, this just removes the channel entirely.
+    also refuse. route() does not see WebSockets at all, which is a separate
+    API: context.route_web_socket("**/*") closes every WS before its
+    handshake, so a scraped page cannot use one to probe internal ports.
+    Service workers cannot make any request at all (service_workers="block"
+    on the context).
   * the rendered HTML is size-capped (anti-OOM, CWE-400).
 
 Playwright is imported lazily INSIDE fetch(), so this module -- and the whole
@@ -47,6 +54,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import uuid
 from collections.abc import Iterable
@@ -84,6 +92,11 @@ BROWSER_FETCH_TIMEOUT_SECONDS = 90.0
 # tree (browser + its patchright Node driver parent + descendants) instead
 # of a concurrent, unrelated fetch's.
 _LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
+
+# Subtracts Chromium's implicit bypass rules so loopback and link-local
+# targets go through the egress-proxy like everything else. Travels in the
+# proxy dict, NEVER in args: --proxy-bypass-list is on the scrub list.
+_PROXY_BYPASS = "<-loopback>"
 # Best-effort hard ceiling on watchdog threads abandoned by a timed-out
 # fetch and not yet naturally exited (roadmap d8b7b8fd, modelled on
 # 3c0b1c80's orphan-accumulation concern): each one is daemon and harmless
@@ -106,6 +119,22 @@ _abandoned_fetch_thread_count = 0
 
 def _normalize_domains(domains: Iterable[str]) -> frozenset[str]:
     return frozenset(d.lower().rstrip(".") for d in domains if d)
+
+
+_HOSTNAME_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
+
+
+def _is_hostname_shaped(host: str) -> bool:
+    """Whether a normalized host is syntactically a DNS name.
+
+    Checked BEFORE the suffix test, otherwise the allowlist is only as strong
+    as whatever canonicalized the string upstream: `evil.com/.kabum.com.br`,
+    `evil.com#.kabum.com.br` and their NUL/TAB/space variants all END IN
+    `.kabum.com.br` and would suffix-match a `kabum.com.br` allowlist.
+    """
+    if not host or len(host) > 253:
+        return False
+    return all(_HOSTNAME_LABEL_RE.match(label) for label in host.split("."))
 
 
 def _load_playwright():  # type: ignore[no-untyped-def]
@@ -250,12 +279,13 @@ class BrowserFetcher:
     """Fetcher port implementation backed by Playwright (headless Chromium).
 
     `subresource_domains` is a per-site allowlist of RENDER-critical CDN hosts
-    (e.g. MercadoLivre's http2.mlstatic.com bundle) that the page.route guard may
-    load IN ADDITION to the navigation allowlist. It is deliberately SEPARATE
-    from the injected DomainPolicy: we never NAVIGATE to these hosts
-    (validate_target still governs the primary target + IP pin, gated by the
-    caller's DomainPolicy only); they are permitted only as sub-resources so a
-    full client-side render can hydrate.
+    (e.g. MercadoLivre's http2.mlstatic.com bundle) loadable IN ADDITION to the
+    navigation allowlist, so a full client-side render can hydrate. It is
+    deliberately SEPARATE from the injected DomainPolicy, which alone gates the
+    PRIMARY target: validate_target runs against the DomainPolicy only, so a
+    fetch cannot be aimed at a CDN host. Past that entry point the union of the
+    two governs both the proxy's domain check and the route guard, so a
+    JS-driven navigation or a redirect towards a CDN host is permitted.
     """
 
     method_name = "browser"
@@ -280,15 +310,16 @@ class BrowserFetcher:
                    for d in self._subresource_domains)
 
     def _host_allowed(self, host: str) -> bool:
-        """A request/CONNECT target host is allowed iff it is a navigation
-        domain OR a declared render-critical sub-resource CDN. Single
-        predicate shared by the egress-proxy's domain check (ADR 0004 D4/C1,
-        the PRIMARY control) and the context-level route guard (defense in
-        depth), so the two can never drift apart. Fail-closed: an empty or
-        unparseable host is never allowed."""
+        """A request/CONNECT target host is allowed iff it is SHAPED like a
+        DNS name and is a navigation domain OR a declared render-critical
+        sub-resource CDN. Single predicate shared by the egress-proxy's domain
+        check (ADR 0004 D4/C1, the PRIMARY control) and the context-level route
+        guard (defense in depth), so the two can never drift apart.
+        Fail-closed: an empty or unparseable host is never allowed."""
         host = host.lower().rstrip(".")
-        return bool(host) and (self._domain_policy.domain_allowed(host)
-                                or self._subresource_allowed(host))
+        return _is_hostname_shaped(host) and (
+            self._domain_policy.domain_allowed(host)
+            or self._subresource_allowed(host))
 
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using Playwright, so a
@@ -320,7 +351,10 @@ class BrowserFetcher:
         # Unique per fetch: lets a timed-out fetch's cleanup target ONLY its
         # own process tree (roadmap d8b7b8fd, same technique as uc.py).
         marker = f"{_LAUNCH_ID_ARG_PREFIX}{uuid.uuid4().hex}"
-        launch_args = [*strip_dangerous_browser_args([]), marker]
+        # Scrubs the WHOLE list handed to launch, not a prefix of it: there is
+        # no caller-supplied args channel today, and the guard only keeps its
+        # meaning if adding one cannot route flags around it.
+        launch_args = strip_dangerous_browser_args([marker])
 
         holder: dict = {}
         claim_lock = threading.Lock()
@@ -354,7 +388,8 @@ class BrowserFetcher:
                     try:
                         browser = pw.chromium.launch(
                             headless=True,
-                            proxy={"server": proxy.url},
+                            proxy={"server": proxy.url,
+                                   "bypass": _PROXY_BYPASS},
                             args=launch_args,
                             timeout=self._launch_timeout_seconds * 1000,
                         )
@@ -387,6 +422,12 @@ class BrowserFetcher:
                         # covers popups/new pages opened via window.open
                         # (ADR 0004 D4/C3).
                         context.route("**/*", _guard)
+                        # route() never sees WebSockets; they have their own
+                        # API. Closing them unconditionally denies a scraped
+                        # page the internal-port liveness oracle a WS
+                        # handshake would otherwise give it.
+                        context.route_web_socket(
+                            "**/*", lambda ws: ws.close())
                         page = context.new_page()
                         # JS-level stealth on top of patchright's launch
                         # patches, applied BEFORE any navigation.

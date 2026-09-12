@@ -715,6 +715,58 @@ class EgressProxyDomainAllowlistTest(unittest.TestCase):
         with PinningProxy(domain_allowed=_allow_any_domain) as proxy:
             self.assertIsNotNone(proxy.bound_port)
 
+    def test_malformed_authority_is_refused_not_a_dead_handler_thread(self) -> None:
+        # "a..com" carries an empty label, which IDNA encoding rejects with a
+        # UnicodeError. UnicodeError is a ValueError, so it is caught by
+        # neither the SSRF/Fetch tuple nor the OSError one: uncaught, the
+        # handler thread dies with a traceback and the client gets NO reply
+        # from the component that is the primary egress control.
+        from autolycos.egress_proxy import PinningProxy
+
+        dialed: list[tuple[str, int]] = []
+        proxy = PinningProxy(
+            dialer=lambda ip, p: dialed.append((ip, p)),  # type: ignore[arg-type,return-value]
+            domain_allowed=_allow_any_domain)
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        client = socket.create_connection(
+            (proxy.bound_host, proxy.bound_port), timeout=5)
+        client.settimeout(5)
+        client.sendall(b"CONNECT a..com:443 HTTP/1.1\r\n\r\n")
+        resp = client.recv(1024)
+        client.close()
+
+        self.assertIn(b"403", resp)
+        self.assertEqual(dialed, [])
+
+    def test_truncated_request_is_not_treated_as_a_complete_one(self) -> None:
+        # A CONNECT with no CRLFCRLF is an INCOMPLETE request; partitioning it
+        # would hand the handler a truncated request line as if the client had
+        # finished speaking, and the target would be dialed on that basis.
+        from autolycos.egress_proxy import PinningProxy
+
+        dialed: list[tuple[str, int]] = []
+        proxy = PinningProxy(
+            dialer=lambda ip, p: dialed.append((ip, p)),  # type: ignore[arg-type,return-value]
+            domain_allowed=_allow_any_domain)
+        proxy.start()
+        self.addCleanup(proxy.stop)
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               side_effect=_host_aware_resolver(
+                                   "kabum.com.br", "104.18.0.1")):
+            client = socket.create_connection(
+                (proxy.bound_host, proxy.bound_port), timeout=5)
+            client.settimeout(5)
+            client.sendall(b"CONNECT kabum.com.br:443 HTTP/1.1\r\n")
+            client.shutdown(socket.SHUT_WR)
+            resp = client.recv(1024)
+            client.close()
+
+        self.assertEqual(resp, b"")      # closed, never answered
+        self.assertEqual(dialed, [])
+
     def test_allowlisted_domain_rebinding_to_private_ip_still_refused(self) -> None:
         # ADR 0004 revision R1: the domain check must not SHORT-CIRCUIT the
         # IP-layer guard. An attacker who controls DNS for an allowlisted

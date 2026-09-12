@@ -10,16 +10,21 @@ load-bearing and which caused real Magalu breakage (Kleos #11001, #10996).
 This proxy is the real control. Chromium is pointed at it (launch proxy
 config), so it never resolves the target itself: it asks us to CONNECT
 host:port. We check the CONNECT authority's DOMAIN against the fetch's own
-allowlist FIRST, before any resolution (ADR 0004 Decision 4 condition C1) --
-this proxy is the ONLY point ALL of the browser's egress traffic passes
-through (navigation, sub-resources, service workers, WebSockets, popups),
-unlike a page-level route guard, which only sees requests Playwright's
-page-routing API is told about. Once the domain passes, we run the IP-layer
-egress rule (safety.resolve_and_pin: resolve once, reject any non-global IP
-via ip_is_safe, pin one IP), dial the PINNED IP ourselves, and splice raw
-bytes. TLS stays end-to-end (we tunnel ciphertext; Chromium verifies the
-cert/SNI against the real host -- no MITM, so a stealth-mode browser's own
-TLS fingerprint is preserved).
+allowlist FIRST, before any resolution (ADR 0004 Decision 4 condition C1).
+Once the domain passes, we run the IP-layer egress rule
+(safety.resolve_and_pin: resolve once, reject any non-global IP via
+ip_is_safe, pin one IP), dial the PINNED IP ourselves, and splice raw bytes.
+TLS stays end-to-end (we tunnel ciphertext; Chromium verifies the cert/SNI
+against the real host -- no MITM, so a stealth-mode browser's own TLS
+fingerprint is preserved).
+
+What reaches us depends on the CLIENT's proxy configuration, and Chromium's
+default is NOT to send everything: its implicit bypass rules send localhost,
+*.localhost, [::1], 127.0.0.1/8, 169.254/16 and [FE80::]/10 DIRECTLY, with
+no CONNECT at all (net/docs/proxy.md, generalized to manually configured
+proxies in M72). That is precisely the address class this proxy exists to
+refuse, so a caller MUST subtract those rules (`bypass` = `<-loopback>` in
+Playwright's proxy dict) or none of the checks below are consulted for them.
 
 Hardening contract (gate, ADR 0001 S9; domain check added ADR 0004 D4/C1):
   * binds loopback-only (127.0.0.1) on an ephemeral port;
@@ -28,8 +33,10 @@ Hardening contract (gate, ADR 0001 S9; domain check added ADR 0004 D4/C1):
     authority outside the fetch's allowlist BEFORE any resolution;
   * restricts CONNECT target ports to 80/443 (no CONNECT to arbitrary ports);
   * resolve-once + pin closes the DNS-rebind TOCTOU at the network layer;
-  * strip_dangerous_browser_args scrubs proxy/resolver/TLS-weakening launch
-    flags (a caller must not be able to re-route or downgrade egress).
+  * strip_dangerous_browser_args scrubs proxy/resolver/TLS-weakening flags
+    from the list handed to launch, so that no argument list can re-route or
+    downgrade egress. It governs the whole list rather than a caller-supplied
+    tail, since there is no caller-supplied tail today.
 
 Synchronous by design (stdlib sockets + threads): the browser/uc fetchers are
 synchronous (Playwright sync API, SeleniumBase), so each fetch spins up its
@@ -201,8 +208,15 @@ class PinningProxy:
                 self._reply(client, _BLOCKED)
                 return
             try:
-                pin = resolve_and_pin(host, port)
-            except (SSRFError, FetchError):
+                # The NORMALIZED name, the same string the allowlist just
+                # authorized: authorizing one spelling and resolving another
+                # is how a check gets bypassed by a spelling.
+                pin = resolve_and_pin(domain, port)
+            except (SSRFError, FetchError, ValueError):
+                # ValueError covers UnicodeError, which IDNA encoding raises
+                # on a malformed authority ("a.com..:443" -> "label empty or
+                # too long"). Uncaught it would kill this handler thread with
+                # no 403, inside the primary egress control.
                 self._reply(client, _BLOCKED)
                 return
             try:
@@ -246,7 +260,9 @@ class PinningProxy:
                 return b"", b""
             chunk = sock.recv(_CHUNK)
             if not chunk:
-                break
+                # Peer closed mid-headers: partition below would hand back a
+                # TRUNCATED request line as if it were a complete one.
+                return b"", b""
             buf += chunk
         head, _, leftover = buf.partition(b"\r\n\r\n")
         return head, leftover
