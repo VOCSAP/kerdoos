@@ -1198,6 +1198,20 @@ class _HangingPostNavDriver:
         self.quit_called += 1
 
 
+class _HangingQuitDriver(_HangingPostNavDriver):
+    """A fake driver that reads the page fine but whose quit() never
+    returns -- the freeze lands on the TEARDOWN, i.e. after the worker has
+    produced its result (roadmap f0c236da, MEASURED: quit() hangs past 60s
+    on a SIGSTOPped Chrome just like get_page_source does)."""
+
+    def get_page_source(self) -> str:
+        return "<html><body>ok</body></html>"
+
+    def quit(self) -> None:
+        self.quit_called += 1
+        time.sleep(60)  # never returns
+
+
 class UcPostNavigationDeadlineTest(unittest.TestCase):
     """Roadmap f0c236da: _run_after_launch_with_deadline bounds the whole
     navigate-to-quit cycle, since neither the individual calls nor a
@@ -1253,6 +1267,36 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
                 if proc.poll() is None:
                     proc.kill()
 
+    def test_a_freeze_during_teardown_still_kills_this_launch(self) -> None:
+        # The worker sets `done` BEFORE calling quit(), so a deadline armed
+        # on `done` rather than on the worker's liveness lets a frozen
+        # teardown out of the bound: the gate would be released on a
+        # still-running Chrome.
+        marker = "--kerdoos-launch-id=quit9f2"
+        chrome_proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", marker])
+        service_proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            driver = _HangingQuitDriver(
+                marker=marker, service_pid=service_proc.pid)
+            fetcher = uc.UcFetcher(_NEUTRAL_POLICY, fetch_timeout_seconds=0.3)
+            result = fetcher._run_after_launch_with_deadline(
+                driver, "https://example.com/")
+            # The page WAS read before the freeze: the fetch's own outcome
+            # stands, only the teardown is abandoned (and killed).
+            self.assertIn("ok", result.html)
+            self.assertTrue(
+                self._wait_until(lambda: chrome_proc.poll() is not None),
+                "marker-matched Chrome survived a teardown-time freeze")
+            self.assertTrue(
+                self._wait_until(lambda: service_proc.poll() is not None),
+                "uc_driver's service pid survived a teardown-time freeze")
+        finally:
+            for proc in (chrome_proc, service_proc):
+                if proc.poll() is None:
+                    proc.kill()
+
     @staticmethod
     def _wait_until(predicate, timeout: float = 5.0,
                      interval: float = 0.05) -> bool:
@@ -1290,6 +1334,8 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
         import signal
 
         import psutil
+
+        from autolycos.adapters.uc import _find_patchright_chromium
 
         gate = BrowserGate(max_concurrent=1)
         fetcher = uc.UcFetcher(

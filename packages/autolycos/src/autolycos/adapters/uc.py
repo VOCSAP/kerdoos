@@ -494,6 +494,17 @@ class UcFetcher:
         # tests call it directly with a bare driver_cls/driver_kwargs pair).
         try:
             driver._kerdoos_launch_marker = marker  # noqa: SLF001
+            # MEASURED (autonomous image, real Driver + SIGSTOP): uc_driver
+            # is a SIBLING of Chrome in undetected mode -- it carries no
+            # marker, and driver.service.process.pid points at the OTHER,
+            # already-zombie uc_driver SeleniumBase spawned, so neither
+            # reaches the live one. Freezing its identity here, while this
+            # launch still owns the gate, is the same attribution the
+            # deadline branch above relies on (roadmap 6521bbce): never a
+            # by-name re-scan once the gate may belong to someone else.
+            driver._kerdoos_launch_siblings = _capture_identities(  # noqa: SLF001
+                _launch_process_tree(
+                    marker, pids_before if single_flight else None))
         except Exception:  # noqa: BLE001 -- best-effort, never fail the launch
             pass
         return driver
@@ -565,11 +576,20 @@ class UcFetcher:
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
         worker.join(timeout=self._fetch_timeout_seconds)
-        if not done.is_set():
+        # Armed on the worker's LIVENESS, not on `done`: the freeze can land
+        # on driver.quit() itself, which the worker only reaches after
+        # setting `done` -- MEASURED (roadmap f0c236da), a done-keyed
+        # condition returns the FetchResult and releases the shared browser
+        # gate while this launch's Chrome is still running.
+        if worker.is_alive():
             self._kill_after_fetch_timeout(driver, marker)
-            raise FetchError(
-                f"uc post-navigation exceeded "
-                f"{self._fetch_timeout_seconds}s timeout")
+            if not done.is_set():
+                raise FetchError(
+                    f"uc post-navigation exceeded "
+                    f"{self._fetch_timeout_seconds}s timeout")
+            # The page was already read and only the teardown is abandoned
+            # (its processes have just been killed), so the fetch's own
+            # outcome below stands rather than degrading to INDETERMINATE.
         if "error" in holder:
             raise holder["error"]
         return holder["result"]
@@ -579,9 +599,12 @@ class UcFetcher:
         driver.quit() is never retried here (it would hang identically on
         the same frozen Chrome) -- kill by marker (Chrome/renderers) plus
         uc_driver's own service process, read directly from the Popen
-        SeleniumBase already holds (no name/time heuristic needed)."""
+        SeleniumBase already holds (no name/time heuristic needed), plus
+        the sibling set frozen at launch time -- the live uc_driver is in
+        that set and in neither of the other two."""
         if marker is not None:
             _kill_launch_processes(marker)
+        _kill_identities(list(getattr(driver, "_kerdoos_launch_siblings", ())))
         try:
             service_pid = driver.service.process.pid
         except Exception:  # noqa: BLE001 -- best-effort, service may be gone
@@ -590,7 +613,9 @@ class UcFetcher:
 
         try:
             service_proc = psutil.Process(service_pid)
-        except psutil.Error:
+        except Exception:  # noqa: BLE001 -- psutil.Error, but also ValueError
+            # on a non-positive pid: a cleanup path that raises would mask
+            # the FetchError the caller is about to see.
             return
         _kill_identities(_capture_identities([service_proc]))
 
