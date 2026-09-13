@@ -69,13 +69,18 @@ class _Response:
 
 class _Page:
     """`contents` is served one read at a time, its last item repeating; an
-    exception item is raised instead of returned."""
+    exception item is raised instead of returned. Reads through evaluate()
+    honour the cap the way the in-page script does: nothing over it leaves
+    the page."""
 
-    def __init__(self, contents: list, status: int | None) -> None:
+    def __init__(self, contents: list, status: int | None,
+                 url: str = _URL) -> None:
         self._contents = list(contents)
         self._status = status
+        self.url = url
         self.goto_args: tuple | None = None
         self.waits: list[float] = []
+        self.content_reads = 0
 
     def goto(self, url, wait_until, timeout):  # noqa: ANN001, ANN201
         self.goto_args = (url, wait_until, timeout)
@@ -85,11 +90,19 @@ class _Page:
         self.waits.append(ms)
         time.sleep(ms / 1000)
 
-    def content(self) -> str:
+    def _next(self):  # noqa: ANN202
         item = self._contents.pop(0) if len(self._contents) > 1 else self._contents[0]
         if isinstance(item, BaseException):
             raise item
         return item
+
+    def content(self) -> str:
+        self.content_reads += 1
+        return self._next()
+
+    def evaluate(self, expression: str, arg):  # noqa: ANN001, ANN201
+        item = self._next()
+        return None if len(item) > arg else item
 
 
 class _Context:
@@ -115,13 +128,15 @@ class _Context:
 
 class _Browser:
     def __init__(self, contents: list | None = None,
-                 status: int | None = 200) -> None:
+                 status: int | None = 200, url: str = _URL) -> None:
         self._contents = contents if contents is not None else [_PAGE]
         self._status = status
+        self._url = url
         self.contexts: list[_Context] = []
 
     def new_context(self, **kwargs) -> _Context:  # noqa: ANN003
-        context = _Context(_Page(self._contents, self._status), kwargs)
+        context = _Context(
+            _Page(self._contents, self._status, self._url), kwargs)
         self.contexts.append(context)
         return context
 
@@ -234,6 +249,13 @@ class FrozenPrefsTest(unittest.TestCase):
         "datareporting.healthreport.uploadEnabled": False,
         "geo.enabled": False,
         "services.settings.server": "",
+        "network.webtransport.enabled": False,
+        "devtools.debugger.remote-enabled": False,
+        "browser.safebrowsing.passwords.enabled": False,
+        "app.update.enabled": False,
+        "app.update.service.enabled": False,
+        "media.gmp-manager.updateEnabled": False,
+        "dom.push.serverURL": "",
         "security.OCSP.enabled": 0,
         "security.ssl.enable_ocsp_stapling": True,
     }
@@ -629,8 +651,64 @@ class InterstitialSettleTest(_WiringBase):
                                 nav_timeout_seconds=0.6)
         elapsed = time.monotonic() - t0
         self.assertTrue(result.challenged)
-        self.assertGreaterEqual(elapsed, 0.6)
+        self.assertTrue(browser.contexts[0].page.waits)
+        self.assertGreaterEqual(elapsed, 0.6 - cfx._SETTLE_POLL_MS / 1000)
         self.assertLess(elapsed, 0.6 + 3.0)
+
+
+class PageReadBoundsTest(_WiringBase):
+    def test_oversized_dom_is_refused_without_leaving_the_page(self) -> None:
+        huge = "x" * (cfx.MAX_HTML_BYTES + 1)
+        browser = _Browser([huge])
+        with self.assertRaises(FetchError):
+            self._fetch(_FakeCamoufox(lambda kwargs: browser))
+        self.assertEqual(browser.contexts[0].page.content_reads, 0,
+                         "the whole DOM was copied out before the cap")
+
+    def test_short_utf16_but_oversized_utf8_is_still_refused(self) -> None:
+        multibyte = "é" * (cfx.MAX_HTML_BYTES // 2 + 1)
+        self.assertLessEqual(len(multibyte), cfx.MAX_HTML_BYTES)
+        with self.assertRaises(FetchError):
+            self._fetch(_FakeCamoufox(lambda kwargs: _Browser([multibyte])))
+
+    def test_no_poll_starts_when_the_remaining_budget_is_below_one_interval(
+            self) -> None:
+        browser = _Browser([_INTERSTITIAL])
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser),
+                                nav_timeout_seconds=0.1)
+        self.assertTrue(result.challenged)
+        self.assertEqual(browser.contexts[0].page.waits, [])
+
+
+class FinalDocumentTest(_WiringBase):
+    def test_firefox_error_page_is_a_fetch_error(self) -> None:
+        browser = _Browser(url="about:neterror?e=proxyConnectFailure&u=x")
+        with self.assertRaises(FetchError):
+            self._fetch(_FakeCamoufox(lambda kwargs: browser))
+
+    def test_document_of_another_allowed_host_is_a_fetch_error(self) -> None:
+        browser = _Browser(url="https://m.magazineluiza.com.br/elsewhere")
+        with self.assertRaises(FetchError):
+            self._fetch(_FakeCamoufox(lambda kwargs: browser))
+
+    def test_same_host_spelled_differently_is_accepted(self) -> None:
+        browser = _Browser(url="https://WWW.MagazineLuiza.com.br./p/other")
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
+        self.assertEqual(result.method, "camoufox")
+
+    def test_playwright_navigation_error_is_a_fetch_error(self) -> None:
+        class _ProxyForbidden(Exception):
+            pass
+
+        def _enter(kwargs):  # noqa: ANN001, ANN202
+            raise _ProxyForbidden("Page.goto: NS_ERROR_PROXY_FORBIDDEN")
+
+        with mock.patch.object(
+            cfx, "_is_playwright_error", create=True,
+            side_effect=lambda exc: isinstance(exc, _ProxyForbidden),
+        ):
+            with self.assertRaises(FetchError):
+                self._fetch(_FakeCamoufox(_enter))
 
 
 class _FrozenBrowser:

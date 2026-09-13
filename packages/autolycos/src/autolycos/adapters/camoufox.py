@@ -130,6 +130,15 @@ FROZEN_FIREFOX_PREFS: Mapping[str, bool | int | str] = MappingProxyType({
     "geo.enabled": False,
     "geo.provider.network.url": "",
     "services.settings.server": "",
+    # Held today only by camoufox.cfg defaults, which another build may change
+    # (that cfg even enables the remote debugger).
+    "network.webtransport.enabled": False,
+    "devtools.debugger.remote-enabled": False,
+    "browser.safebrowsing.passwords.enabled": False,
+    "app.update.enabled": False,
+    "app.update.service.enabled": False,
+    "media.gmp-manager.updateEnabled": False,
+    "dom.push.serverURL": "",
     # The allowlisted proxy refuses every CA responder anyway, so online
     # revocation is dropped explicitly; stapling sends no request of its own.
     "security.OCSP.enabled": 0,
@@ -286,6 +295,14 @@ def _is_playwright_timeout(exc: BaseException) -> bool:
     return isinstance(exc, PlaywrightTimeoutError)
 
 
+def _is_playwright_error(exc: BaseException) -> bool:
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+    except Exception:  # noqa: BLE001 -- a broken install must not mask `exc`
+        return False
+    return isinstance(exc, PlaywrightError)
+
+
 def _cmdline_carries(proc, token: str) -> bool:  # type: ignore[no-untyped-def]
     try:
         return any(token in arg for arg in proc.cmdline())
@@ -416,21 +433,53 @@ class CamoufoxFetcher:
             or any(host == d or host.endswith("." + d)
                    for d in self._subresource_domains))
 
-    @staticmethod
-    def _settled_content(page, status: int, deadline: float) -> str:  # type: ignore[no-untyped-def]
+    # Serialised and measured inside the page: a DOM over the cap never
+    # crosses the Playwright pipe into this process.
+    _CAPPED_HTML_JS = (
+        "cap => { const h = document.documentElement.outerHTML;"
+        " return h.length > cap ? null : h; }")
+
+    @classmethod
+    def _read_capped(cls, page) -> str:  # type: ignore[no-untyped-def]
+        html = page.evaluate(cls._CAPPED_HTML_JS, MAX_HTML_BYTES)
+        if html is None:
+            raise FetchError(
+                f"rendered page exceeds {MAX_HTML_BYTES} characters cap")
+        return html
+
+    @classmethod
+    def _settled_content(cls, page, status: int, deadline: float) -> str:  # type: ignore[no-untyped-def]
         """Akamai answers the first navigation with a 200 JS interstitial
         that replaces itself with the real page after the load event has
-        already fired. Polls until it is gone or the navigation budget is
-        spent; any non-200 answer is returned as is."""
-        html = page.content()
+        already fired. Polls until it is gone, and starts no poll once less
+        than one interval of budget is left; any non-200 answer is returned
+        as is. A read in progress cannot be interrupted from here: a page
+        whose main thread stays busy holds it, and only the fetch's total
+        deadline bounds that."""
+        html = cls._read_capped(page)
+        interval = _SETTLE_POLL_MS / 1000
         while (status == 200 and looks_challenged(status, html)
-               and time.monotonic() < deadline):
+               and deadline - time.monotonic() >= interval):
             page.wait_for_timeout(_SETTLE_POLL_MS)
             try:
-                html = page.content()
+                html = cls._read_capped(page)
+            except FetchError:
+                raise
             except Exception:  # noqa: BLE001 -- the page is mid-navigation
                 continue
         return html
+
+    @staticmethod
+    def _check_final_document(final_url: str, requested_url: str) -> None:
+        """A Firefox error page, or a script navigation to another allowed
+        host, would otherwise be returned as the requested site's answer."""
+        final = urlsplit(final_url or "")
+        final_host = (final.hostname or "").rstrip(".")
+        requested_host = (urlsplit(requested_url).hostname or "").rstrip(".")
+        if final.scheme not in ("http", "https") or final_host != requested_host:
+            raise FetchError(
+                f"final document is {final.scheme}://{final_host}, not the "
+                f"requested host {requested_host}")
 
     def _render(self, browser, url: str) -> FetchResult:  # type: ignore[no-untyped-def]
         context = browser.new_context(service_workers="block")
@@ -442,6 +491,9 @@ class CamoufoxFetcher:
                 else:
                     route.abort()
 
+            # Inert at run time with this Camoufox/Playwright pairing: the
+            # handler was measured never to be invoked. It is not a rampart;
+            # the proxy's CONNECT check is the only egress control.
             context.route("**/*", _guard)
             context.route_web_socket("**/*", lambda ws: ws.close())
             page = context.new_page()
@@ -453,6 +505,7 @@ class CamoufoxFetcher:
                 raise FetchError("no response from navigation")
             status = response.status
             html = self._settled_content(page, status, nav_deadline)
+            self._check_final_document(page.url, url)
             if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
                 raise FetchError(
                     f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
@@ -474,6 +527,8 @@ class CamoufoxFetcher:
             if _is_playwright_timeout(exc):
                 stage = "navigation" if launched else "launch"
                 raise FetchError(f"camoufox {stage} timed out: {exc}") from exc
+            if _is_playwright_error(exc):
+                raise FetchError(f"camoufox browser error: {exc}") from exc
             raise
 
     def _kill_after_deadline(self, marker: str,
