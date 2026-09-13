@@ -131,13 +131,14 @@ USER 10001
 # --- autonomous: + browser + uc_selenium tiers --------------------------
 FROM base AS autonomous
 
-RUN uv sync --frozen --no-dev --no-install-project --extra web --extra tls --extra browser --extra uc
+RUN uv sync --frozen --no-dev --no-install-project --extra web --extra tls --extra browser --extra uc --extra camoufox
 
-# Both of these are pure tool/environment setup with zero dependency on our
+# All of these are pure tool/environment setup with zero dependency on our
 # source code -- placed BEFORE the src COPY (unlike the plain deps sync
 # above, Docker layer caching is strictly sequential, so a step placed AFTER
 # a source copy re-runs on every source edit regardless of what it actually
-# depends on) so a code change never re-downloads Chromium or the driver.
+# depends on) so a code change never re-downloads Chromium, the driver or
+# Camoufox.
 #
 # Chromium runtime deps for the browser tier. The browser tier is launched by
 # patchright (undetected fork), so install patchright's Chromium (NOT vanilla
@@ -176,9 +177,58 @@ RUN sbase get uc_driver ${UC_DRIVER_VERSION} \
 RUN cp -p /app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/uc_driver \
           /app/.venv/lib/python3.12/site-packages/seleniumbase/drivers/chromedriver
 
+# ADR 0004 Decision 2: Camoufox ships in this image BY DEFAULT (no dedicated
+# target, no compose profile, no activation variable -- availability is
+# detected). It is a patched Firefox, so it needs Firefox's own runtime
+# libraries: libdbus-glib and libasound are NOT pulled in by the Chromium
+# deps installed above. This list is the one MEASURED to launch Camoufox on
+# this exact base during the spike. `unzip` rather than Python's zipfile:
+# only unzip restores the executable bit from the archive's unix attributes.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates curl unzip \
+       libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libxi6 \
+       libasound2 libdbus-glib-1-2 libpango-1.0-0 libcairo2 libatk1.0-0 \
+       libatk-bridge2.0-0 libgbm1 libnss3 libxext6 libxfixes3 libxtst6 \
+       libx11-6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ADR 0004 Decision 2 (condition C4): the EXACT asset URL of a pinned tag,
+# verified by sha256 at build. `camoufox fetch` is never used: it resolves
+# the first compatible asset through the GitHub API and skips verification
+# when the digest is missing, which is dynamic resolution, not pinning.
+# CAMOUFOX_SHA256 is the digest GitHub publishes for that asset id; the
+# release is NOT immutable, so an asset can be replaced under a fixed tag
+# and this hash, not the tag, is what makes the build deterministic.
+# Underlying Firefox is 152.0.4 -- re-pin on every upstream Firefox security
+# release Camoufox picks up. Capture context is in the commit that
+# introduced these values, as for UC_DRIVER_SHA256 above.
+ARG CAMOUFOX_VERSION=152.0.4-beta.30
+ARG CAMOUFOX_SHA256=5720d45b894ce1770543de024c6f10d514b38be560fa2dc3226b3d8586caf672
+ARG CAMOUFOX_ASSET_URL=https://github.com/daijro/camoufox/releases/download/v152.0.4-beta.30/camoufox-152.0.4-beta.30-lin.x86_64.zip
+# version.json is NOT in the archive: the package's own installer writes it
+# after extracting, and the adapter reads it to check what is installed. It
+# is derived here from CAMOUFOX_VERSION alone, so the version stays pinned
+# in ONE place rather than gaining a third copy that could drift.
+RUN set -eu; \
+    curl -fsSL -o /tmp/camoufox.zip "${CAMOUFOX_ASSET_URL}"; \
+    echo "${CAMOUFOX_SHA256}  /tmp/camoufox.zip" | sha256sum -c -; \
+    mkdir -p /opt/camoufox; \
+    unzip -q /tmp/camoufox.zip -d /opt/camoufox; \
+    rm -f /tmp/camoufox.zip; \
+    chmod +x /opt/camoufox/camoufox-bin; \
+    printf '{"version":"%s","build":"%s"}' \
+      "${CAMOUFOX_VERSION%%-*}" "${CAMOUFOX_VERSION#*-}" \
+      > /opt/camoufox/version.json
+
+# MPL-2.0 obligation travels with the IMAGE, not the repository: publishing
+# this image redistributes Camoufox, so the licence text and the upstream
+# source link at the pinned tag must be inside the artifact itself.
+COPY NOTICE /app/NOTICE
+
 COPY packages/autolycos/src packages/autolycos/src
 COPY packages/kerdoos/src packages/kerdoos/src
-RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc
+RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc --extra camoufox
 
 # ADR 0002 Decision 5: patchright's Chromium and seleniumbase's uc_driver are
 # fetched independently above and can drift apart silently into the CWE-494
@@ -216,3 +266,37 @@ RUN set -eu; \
     echo "${UC_DRIVER_SHA256}  $UC_DRIVER_BIN" | sha256sum -c -; \
     echo "${UC_DRIVER_SHA256}  $CHROMEDRIVER_BIN" | sha256sum -c -; \
     echo "OK: chromium major $CHROME_MAJOR matches uc_driver major $UC_MAJOR and chromedriver major $CHROMEDRIVER_MAJOR, both sha256-verified on final bytes"
+
+# ADR 0004 Decision 2, two assertions for two otherwise silent failures.
+# (1) The version is pinned TWICE, here and as the adapter's
+# CAMOUFOX_BROWSER_VERSION, with nothing tying them together: they drift and
+# the image ships a browser the adapter refuses. Same for the install path.
+# (2) camoufox_ready() runs against the REAL install. Its build floor
+# executes camoufox/__version__.py by path and reads CONSTRAINTS.MIN_VERSION,
+# a PRIVATE package layout that NO test exercises (camoufox is absent from
+# the test venv and the tests build a fake layout), so a package bump would
+# break the floor silently until the first production fetch.
+# LAST instruction of the stage, like the uc assertion: it must run under
+# the stage's final effective user, so it stays HOME-sensitive to a USER
+# change.
+ARG CAMOUFOX_VERSION
+RUN set -eu; \
+    PIN=$(python3 -c \
+      "from autolycos.adapters.camoufox import CAMOUFOX_BROWSER_VERSION as v; print(v)"); \
+    if [ "$PIN" != "${CAMOUFOX_VERSION}" ]; then \
+      echo "BUILD FAIL: adapter CAMOUFOX_BROWSER_VERSION $PIN != Dockerfile CAMOUFOX_VERSION ${CAMOUFOX_VERSION} -- re-pin both, plus CAMOUFOX_SHA256 and CAMOUFOX_ASSET_URL (ADR 0004 Decision 2)." >&2; \
+      exit 1; \
+    fi; \
+    EXE=$(python3 -c \
+      "from autolycos.adapters.camoufox import CAMOUFOX_EXECUTABLE_PATH as p; print(p)"); \
+    if [ ! -x "$EXE" ]; then \
+      echo "BUILD FAIL: no executable at the adapter's CAMOUFOX_EXECUTABLE_PATH $EXE -- the archive layout changed." >&2; \
+      exit 1; \
+    fi; \
+    READY=$(python3 -c \
+      "from autolycos.adapters.camoufox import camoufox_ready; print(camoufox_ready())"); \
+    if [ "$READY" != "True" ]; then \
+      echo "BUILD FAIL: camoufox_ready() is False on the real installation -- the browser build floor read from the camoufox package's private layout no longer holds (ADR 0004 Decision 2)." >&2; \
+      exit 1; \
+    fi; \
+    echo "OK: camoufox $PIN at $EXE, camoufox_ready() True against the real install"

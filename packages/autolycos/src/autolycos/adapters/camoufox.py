@@ -22,6 +22,7 @@ import os
 import threading
 import time
 import uuid
+import warnings
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from urllib.parse import urlsplit
@@ -56,6 +57,17 @@ MAX_ABANDONED_FETCH_THREADS = 5
 # this code: CamoufoxFetcher and camoufox_ready take both as parameters.
 CAMOUFOX_EXECUTABLE_PATH = "/opt/camoufox/camoufox-bin"
 CAMOUFOX_BROWSER_VERSION = "152.0.4-beta.30"
+
+# One LeakWarning per launch otherwise, which i_know_what_im_doing does not
+# silence. geoip is off ON PURPOSE: turning it on downloads a database at
+# launch, the runtime fetch this tier exists to avoid, and the proxy is ours,
+# pinned to an address already verified, not an anonymising one. Set once at
+# import rather than around each launch: warnings filters are process-global,
+# so a per-launch catch_warnings would race between concurrent fetches.
+# Matched by message on RuntimeWarning instead of importing the class, which
+# lives in the package's PRIVATE _warnings module.
+warnings.filterwarnings(
+    "ignore", message="When using a proxy", category=RuntimeWarning)
 
 _LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
 # By name, and checked against the package's own enum before every launch:

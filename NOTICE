@@ -1,0 +1,45 @@
+Kerdoos -- third-party notices
+==============================
+
+This file lists third-party software redistributed inside a built Kerdoos
+image, together with the obligations that come with it. Publishing the
+SOURCE repository does not redistribute any of it: the repository carries a
+Dockerfile that downloads these artifacts at build time. Publishing a BUILT
+IMAGE does redistribute them, and this NOTICE is what keeps that obligation
+met by the artifact itself.
+
+Kerdoos itself is licensed under the terms in LICENSE. Nothing below changes
+the licence of Kerdoos' own files.
+
+
+Camoufox
+--------
+
+Bundled in the `autonomous` image target at /opt/camoufox.
+
+    Upstream:  https://github.com/daijro/camoufox
+    Version:   152.0.4-beta.30
+    Sources:   https://github.com/daijro/camoufox/tree/v152.0.4-beta.30
+    Asset:     camoufox-152.0.4-beta.30-lin.x86_64.zip
+    Licence:   Mozilla Public License, Version 2.0 (MPL-2.0)
+
+Camoufox is a patched build of Mozilla Firefox. Both Camoufox and the Firefox
+code it derives from are distributed under the Mozilla Public License,
+Version 2.0. A copy of that licence is available at:
+
+    https://mozilla.org/MPL/2.0/
+
+The MPL-2.0 is a per-FILE copyleft: the obligation attaches to the files
+covered by it, not to the project that redistributes them. Kerdoos makes no
+modification to Camoufox; it downloads a released binary and runs it. Should
+Kerdoos ever modify those files, the modified files would remain under
+MPL-2.0 and their source would have to be made available.
+
+Recipients of a built Kerdoos image may obtain the complete corresponding
+source code of the bundled Camoufox from the upstream repository at the tag
+named above, which is the exact tag whose released asset the image verifies
+by sha256 at build time.
+
+Firefox is a trademark of the Mozilla Foundation. Its use here is
+descriptive: it names the upstream project Camoufox derives from, and does
+not imply endorsement by, or affiliation with, the Mozilla Foundation.
