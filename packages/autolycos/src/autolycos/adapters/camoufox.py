@@ -186,7 +186,11 @@ def _package_browser_floor() -> str:
     """Lowest browser build the installed package accepts with the installed
     playwright. Runs camoufox/__version__.py on its own: importing the
     package pulls playwright in, too heavy for a check the scrape loop runs
-    once per source."""
+    once per source.
+
+    That file path and CONSTRAINTS.MIN_VERSION /
+    PLAYWRIGHT_BROWSER_FLOORS are the package's private layout, held stable
+    only by the exact camoufox pin: any version bump must re-check them."""
     spec = importlib.util.find_spec("camoufox")
     if spec is None or not spec.submodule_search_locations:
         raise LookupError("camoufox package not found")

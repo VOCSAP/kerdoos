@@ -18,7 +18,7 @@ KERDOOS_SRC = ROOT / "packages" / "kerdoos" / "src" / "kerdoos"
 
 TOOLS = {"requests", "curl_cffi", "playwright", "patchright",
          "playwright_stealth", "seleniumbase", "selenium", "bs4", "httpx",
-         "yaml", "argon2", "mcp"}
+         "yaml", "argon2", "mcp", "camoufox", "psutil"}
 
 # Concrete adapter / wiring module suffixes that core must never import.
 CONCRETE_SUFFIXES = ("adapters", "router", "factory",
