@@ -3,7 +3,8 @@
 Akamai blocks the Linux Chromium tiers inside a container; Camoufox passes.
 SSRF: validate_target first, then every connection goes through a per-fetch
 PinningProxy that checks the CONNECT authority against the allowlist before
-any resolution, with a context-level route guard as defense in depth.
+any resolution. The context-level route guard is best effort and not counted:
+it was measured inert on this Camoufox/Playwright pairing.
 Nothing is downloaded at run time: the binary path, the Firefox version and
 the excluded default addons are always passed explicitly, because the package
 otherwise fetches a browser or an addon it finds missing.
@@ -492,8 +493,9 @@ class CamoufoxFetcher:
                     route.abort()
 
             # Inert at run time with this Camoufox/Playwright pairing: the
-            # handler was measured never to be invoked. It is not a rampart;
-            # the proxy's CONNECT check is the only egress control.
+            # route handler was measured never to be invoked, and the
+            # WebSocket one is presumed alike. Neither is a rampart: egress
+            # rests on the proxy and on the prefs that leave no direct path.
             context.route("**/*", _guard)
             context.route_web_socket("**/*", lambda ws: ws.close())
             page = context.new_page()
