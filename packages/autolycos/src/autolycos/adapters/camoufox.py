@@ -3,8 +3,8 @@
 Akamai blocks the Linux Chromium tiers inside a container; Camoufox passes.
 SSRF: validate_target first, then every connection goes through a per-fetch
 PinningProxy that checks the CONNECT authority against the allowlist before
-any resolution. The context-level route guard is best effort and not counted:
-it was measured inert on this Camoufox/Playwright pairing.
+any resolution. There is no in-browser request interception: it was measured
+inert and harmful on this Camoufox/Playwright pairing.
 Nothing is downloaded at run time: the binary path, the Firefox version and
 the excluded default addons are always passed explicitly, because the package
 otherwise fetches a browser or an addon it finds missing.
@@ -409,8 +409,8 @@ def _kill_launch(marker: str, pids_before: frozenset[int] | None) -> bool:
 class CamoufoxFetcher:
     """Fetcher port implementation backed by Camoufox (headless Firefox).
 
-    `subresource_domains` extends the proxy's and the route guard's allowlist
-    past the navigation target, exactly like BrowserFetcher: validate_target
+    `subresource_domains` extends the proxy's allowlist past the navigation
+    target, exactly like BrowserFetcher: validate_target
     still gates the primary URL on the DomainPolicy alone.
     """
 
@@ -440,8 +440,8 @@ class CamoufoxFetcher:
         self._late_sweep_seconds = late_sweep_seconds
 
     def _host_allowed(self, host: str) -> bool:
-        """Shared by the proxy's CONNECT check and the context route guard,
-        so the two cannot drift. Fail-closed on an empty or malformed host."""
+        """The proxy's CONNECT domain check for this fetch. Fail-closed on an
+        empty or malformed host."""
         host = host.lower().rstrip(".")
         return _is_hostname_shaped(host) and (
             self._domain_policy.domain_allowed(host)
@@ -499,20 +499,10 @@ class CamoufoxFetcher:
     def _render(self, browser, url: str) -> FetchResult:  # type: ignore[no-untyped-def]
         context = browser.new_context(service_workers="block")
         try:
-            def _guard(route) -> None:  # type: ignore[no-untyped-def]
-                host = urlsplit(route.request.url).hostname or ""
-                if self._host_allowed(host):
-                    route.continue_()
-                else:
-                    route.abort()
-
-            # Inert at run time with this Camoufox/Playwright pairing: the
-            # route handler was measured never to be invoked, and the
-            # WebSocket one is presumed alike. Neither is a rampart: egress
-            # rests on the proxy and on the prefs that leave no direct path.
-            # Kept until ADR 0004 T4-11 measures it.
-            context.route("**/*", _guard)
-            context.route_web_socket("**/*", lambda ws: ws.close())
+            # No context.route / route_web_socket guard: measured inert on this
+            # Camoufox/Playwright pairing (handler never invoked) and harmful (a
+            # page opening many channels timed out with it, returned without
+            # it). Egress rests on the proxy's CONNECT check and the frozen prefs.
             page = context.new_page()
             nav_deadline = time.monotonic() + self._nav_timeout_seconds
             response = page.goto(

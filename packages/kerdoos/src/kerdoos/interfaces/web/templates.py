@@ -8,7 +8,7 @@ HTML-escaped unless a template explicitly opts out with |safe (which this UI
 never does on tenant-supplied data).
 
 Presentation-only filters live here (cents -> BRL, three-state status class,
-fetcher escalation tier), so routes stay thin and templates stay declarative.
+fetcher cost tier), so routes stay thin and templates stay declarative.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def availability_label(availability: Availability | str) -> str:
 
 
 def tier_level(method: str | None) -> int:
-    """Escalation depth for the tier micro-indicator: 0 = unknown, otherwise
+    """Cost rank for the tier micro-indicator: 0 = unknown, otherwise
     the 1-based rank in the ladder (whose length follows the router)."""
     if not method:
         return 0

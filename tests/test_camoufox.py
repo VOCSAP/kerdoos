@@ -164,18 +164,6 @@ class _FakeCamoufox:
         return _Manager()
 
 
-class _FakeRoute:
-    def __init__(self, url: str) -> None:
-        self.request = mock.Mock(url=url)
-        self.action: str | None = None
-
-    def continue_(self) -> None:
-        self.action = "continue"
-
-    def abort(self) -> None:
-        self.action = "abort"
-
-
 def _marker(kwargs: dict) -> str:
     return next(a for a in kwargs["args"]
                 if a.startswith(cfx._LAUNCH_ID_ARG_PREFIX))
@@ -610,7 +598,7 @@ class LaunchWiringTest(_WiringBase):
         ready.assert_not_called()
         loader.assert_not_called()
 
-    def test_proxy_uses_the_same_predicate_as_the_route_guard(self) -> None:
+    def test_proxy_is_built_with_the_fetcher_host_predicate(self) -> None:
         fake = _FakeCamoufox(lambda kwargs: _Browser())
         with mock.patch.object(cfx, "PinningProxy",
                                wraps=cfx.PinningProxy) as proxy_cls:
@@ -647,11 +635,7 @@ class LaunchWiringTest(_WiringBase):
         self.assertIs(ctx.exception, original)
 
 
-class ContextGuardInstallTest(_WiringBase):
-    """Checks that the context guard is INSTALLED and what its handlers
-    decide when called directly. It proves no blocking at run time: on a
-    real Camoufox the route handler was measured never to be invoked."""
-
+class ContextStructureTest(_WiringBase):
     def test_one_blocked_service_worker_context_per_fetch_closed_after(self) -> None:
         browser = _Browser()
         fake = _FakeCamoufox(lambda kwargs: browser)
@@ -662,31 +646,13 @@ class ContextGuardInstallTest(_WiringBase):
             self.assertEqual(context.kwargs, {"service_workers": "block"})
             self.assertTrue(context.closed)
 
-    def test_route_handler_decides_by_the_allowlist_when_called(self) -> None:
-        browser = _Browser()
-        self._fetch(_FakeCamoufox(lambda kwargs: browser),
-                    subresource_domains=["mlcdn.com.br"])
-        pattern, guard = browser.contexts[0].route_args
-        self.assertEqual(pattern, "**/*")
-        cases = {
-            "https://www.magazineluiza.com.br/app.js": "continue",
-            "https://a-static.mlcdn.com.br/img.jpg": "continue",
-            "https://evil.example/beacon": "abort",
-            "https://localhost/x": "abort",
-        }
-        for url, expected in cases.items():
-            route = _FakeRoute(url)
-            guard(route)
-            self.assertEqual(route.action, expected, url)
-
-    def test_websocket_handler_closes_the_socket_it_is_given(self) -> None:
+    def test_no_request_interception_is_installed(self) -> None:
+        # Measured inert and harmful on a real Camoufox: reinstalling it would
+        # time out the pages that open many channels.
         browser = _Browser()
         self._fetch(_FakeCamoufox(lambda kwargs: browser))
-        pattern, handler = browser.contexts[0].ws_route_args
-        self.assertEqual(pattern, "**/*")
-        ws = mock.Mock()
-        handler(ws)
-        ws.close.assert_called_once_with()
+        self.assertIsNone(browser.contexts[0].route_args)
+        self.assertIsNone(browser.contexts[0].ws_route_args)
 
 
 class ResultTest(_WiringBase):

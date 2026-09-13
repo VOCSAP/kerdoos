@@ -49,9 +49,9 @@ send deadline (beyond a single smtplib operation) is enforced separately in
 core.evaluator._run_plan_b via asyncio.wait_for(..., timeout=digest_reaper_timeout_seconds).
 
 KERDOOS_BROWSER_MAX_CONCURRENT / KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS
-(card ca30b736, ADR 0002 Decision 1/2): the max number of Chromium processes
-(browser tier patchright + uc tier seleniumbase, ONE shared gate) alive at
-once, and the max seconds a caller waits for that gate before the source
+(card ca30b736, ADR 0002 Decision 1/2): the max number of browsers (browser
+tier patchright, uc tier seleniumbase, camoufox tier Firefox, ONE shared gate)
+alive at once, and the max seconds a caller waits for that gate before the source
 fails as a retryable FetchError instead of blocking forever. Both floor to
 their default (with a warning, never a crash at import) on a non-positive or
 non-numeric value, same discipline as _safe_workers. Read here and INJECTED
@@ -213,8 +213,8 @@ MIN_SMTP_RETRY_BACKOFF_SECONDS = 1.0
 # Single-process default (ADR 0003 Decision 4).
 DEFAULT_WORKERS = 1
 
-# ADR 0002 Decision 1/2: at most this many Chromium processes (browser tier
-# patchright + uc tier seleniumbase, sharing ONE gate) alive at once.
+# ADR 0002 Decision 1/2: at most this many browsers (browser tier patchright,
+# uc tier seleniumbase, camoufox tier Firefox, sharing ONE gate) alive at once.
 DEFAULT_BROWSER_MAX_CONCURRENT = 1
 
 # Card ca30b736: max wait for the browser gate before a source is

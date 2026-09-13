@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from dataclasses import dataclass
 import sys
 import uuid
 from pathlib import Path
@@ -31,7 +32,7 @@ from autolycos.router import StaticRouter
 
 from kerdoos.core.app.services import AppService, Principal
 from kerdoos.core.evaluator import evaluate_tick
-from kerdoos.config import get_settings
+from kerdoos.config import Settings, get_settings
 from kerdoos.digest.factory import build_sender
 from kerdoos.digest.render import render_digest
 from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
@@ -68,42 +69,64 @@ def _default_config_db() -> str:
     return os.environ.get("KERDOOS_CONFIG_DB", "config.db")
 
 
-def _build_browser_gate(state_db: str) -> BrowserGate:
-    # ADR 0002 Decision 1/2 (card ca30b736): ONE gate shared by the browser
-    # AND uc tiers, inter-process via the state-db directory (the shared
+def _build_browser_gate(state_db: str, settings: Settings) -> BrowserGate:
+    # ADR 0002 Decision 1/2 (card ca30b736): ONE gate shared by every browser
+    # tier, inter-process via the state-db directory (the shared
     # /data volume in production) -- injected here, autolycos never reads
     # KERDOOS_BROWSER_MAX_CONCURRENT/ACQUIRE_TIMEOUT_SECONDS itself
     # (invariant 2). state_db is the CLI's own --db arg (may diverge from
     # KERDOOS_STATE_DB), not settings.
-    settings = get_settings()
     return BrowserGate(
         max_concurrent=settings.browser_max_concurrent,
         lock_dir=Path(state_db).parent,
         acquire_timeout_seconds=settings.browser_acquire_timeout_seconds)
 
 
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """What one CLI command wires, all from the single Settings it received."""
+
+    service: AppService
+    config_store: SqliteConfigStore
+    state_store: SqliteStateStore
+    router: StaticRouter
+    domain_policy: CatalogueDomainPolicy
+    browser_gate: BrowserGate
+    settings: Settings
+
+    def close(self) -> None:
+        try:
+            self.config_store.close()
+        finally:
+            self.state_store.close()
+
+
 def _build_app_service(
-    config_db: str, db: str, browser_gate: BrowserGate | None = None,
-) -> tuple[AppService, SqliteConfigStore, SqliteStateStore, StaticRouter]:
+    config_db: str, db: str, *, settings: Settings,
+    browser_gate: BrowserGate | None = None,
+) -> _Composition:
     config_store = SqliteConfigStore(config_db)
     state_store = SqliteStateStore(db)
     domain_policy = CatalogueDomainPolicy(config_store)
-    gate = browser_gate if browser_gate is not None else _build_browser_gate(db)
-    router = build_static_router(domain_policy, gate, get_settings())
+    gate = (browser_gate if browser_gate is not None
+            else _build_browser_gate(db, settings))
+    router = build_static_router(domain_policy, gate, settings)
     service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
-    return service, config_store, state_store, router
+    return _Composition(
+        service=service, config_store=config_store, state_store=state_store,
+        router=router, domain_policy=domain_policy, browser_gate=gate,
+        settings=settings)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    service, config_store, state_store, router = _build_app_service(
-        args.config_db, args.db)
+    composition = _build_app_service(
+        args.config_db, args.db, settings=get_settings())
     try:
-        log_unavailable_fetcher_tiers(config_store, router)
-        result = service.run_now(args.owner)
+        log_unavailable_fetcher_tiers(composition.config_store, composition.router)
+        result = composition.service.run_now(args.owner)
     finally:
-        config_store.close()
-        state_store.close()
+        composition.close()
     print(render_digest(result.records, result.generated_at, result.tier2_labels))
     return 0
 
@@ -114,27 +137,23 @@ def cmd_digest(args: argparse.Namespace) -> int:
     intra-process evaluator (kerdoos.core.evaluator) -- the CLI is the
     external-cron trigger for KERDOOS_WORKERS > 1 deployments, never a
     second implementation of the tick logic."""
-    # ONE gate, shared by the (unused) service's router AND the tick's
-    # router below -- two separate BrowserGate instances would each bound
-    # their own callers independently, defeating the single-door guarantee.
-    browser_gate = _build_browser_gate(args.db)
-    _service, config_store, state_store, router = _build_app_service(
-        args.config_db, args.db, browser_gate=browser_gate)
-    domain_policy = CatalogueDomainPolicy(config_store)
-    settings = get_settings()
+    composition = _build_app_service(
+        args.config_db, args.db, settings=get_settings())
     try:
-        log_unavailable_fetcher_tiers(config_store, router)
+        log_unavailable_fetcher_tiers(composition.config_store, composition.router)
         sender = build_sender(
-            settings, config_store, domain_policy, config_db_path=args.config_db)
+            composition.settings, composition.config_store,
+            composition.domain_policy, config_db_path=args.config_db)
         summary = asyncio.run(evaluate_tick(
-            config_store=config_store, state_store=state_store,
-            router=router, parser_factory=build_parser,
+            config_store=composition.config_store,
+            state_store=composition.state_store,
+            router=composition.router, parser_factory=build_parser,
             sender=sender,
-            reaper_timeout_seconds=settings.digest_reaper_timeout_seconds,
+            reaper_timeout_seconds=(
+                composition.settings.digest_reaper_timeout_seconds),
         ))
     finally:
-        config_store.close()
-        state_store.close()
+        composition.close()
     print(
         f"scraped_sources={summary.scraped_sources} "
         f"notified_jobs={summary.notified_jobs} "
@@ -151,8 +170,8 @@ def cmd_config_import(args: argparse.Namespace) -> int:
     # than committing sites/products one at a time and leaving a partially
     # imported catalogue on a later rejection.
     config_dir = Path(args.config_dir)
-    service, config_store, state_store, router = _build_app_service(
-        args.config_db, args.db)
+    composition = _build_app_service(
+        args.config_db, args.db, settings=get_settings())
     try:
         sites = parse_sites_yaml(config_dir / "sites.yaml")
         products: list[tuple[str, list[tuple[str, str]]]] = []
@@ -166,7 +185,8 @@ def cmd_config_import(args: argparse.Namespace) -> int:
         # admin Principal here, never by a tenant-supplied role.
         principal = Principal(owner_id=args.owner or "cli-import", role="admin")
         try:
-            summary = service.import_config(principal, args.owner, sites, products)
+            summary = composition.service.import_config(
+                principal, args.owner, sites, products)
         except ConfigImportError as exc:
             print(
                 "config import: rejected, 0 writes "
@@ -180,8 +200,7 @@ def cmd_config_import(args: argparse.Namespace) -> int:
         print(f"config import: {exc}", file=sys.stderr)
         return 1
     finally:
-        config_store.close()
-        state_store.close()
+        composition.close()
     return 0
 
 

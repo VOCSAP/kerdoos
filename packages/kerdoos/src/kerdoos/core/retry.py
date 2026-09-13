@@ -7,8 +7,9 @@ the tool-agnostic FetchResult, never on a tool-specific exception, so the SAME
 loop is reused by every tier (http/tls/browser/uc/camoufox).
 
 Two concerns are deliberately kept OUT of this loop:
-  * Inter-tier ESCALATION (http < tls < browser < uc < camoufox, invariant #6) is the
-    post-MVP dynamic router's job, not retry. This is retry-SAME-tier only.
+  * The tier itself (http < tls < browser < uc < camoufox, invariant #6) is
+    declared per site and never changes during a fetch: there is no
+    inter-tier escalation. This is retry-SAME-tier only.
   * A browser adapter WAITING for render (networkidle / a selector to appear)
     is request COMPLETION handled inside the adapter, not a retry.
 

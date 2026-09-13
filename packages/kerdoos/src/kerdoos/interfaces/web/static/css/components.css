@@ -149,7 +149,7 @@
 .signal--pending .signal__glyph { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-/* ===== Escalation tier micro-indicator (http -> tls -> browser -> uc) === */
+/* ===== Fetcher cost tier micro-indicator (one pip per router tier) ===== */
 .tier { display: inline-flex; gap: 2px; align-items: center; }
 .tier__pip { width: 4px; height: 10px; border-radius: 1px; background: var(--border-strong); }
 .tier__pip--on { background: var(--text-tertiary); }

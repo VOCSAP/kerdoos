@@ -1,7 +1,7 @@
-"""Cross-tier, cross-process Chromium concurrency gate (card ca30b736).
+"""Cross-tier, cross-process browser concurrency gate (card ca30b736).
 
-Bounds how many Chromium processes run at once -- `browser` and `uc` share
-ONE gate. In-process via threading.BoundedSemaphore; cross-process, when
+Bounds how many browsers run at once -- `browser` and `uc` (Chromium) and
+`camoufox` (Firefox) share ONE gate. In-process via threading.BoundedSemaphore; cross-process, when
 lock_dir is given, via N `browser-slot-<i>.lock` files (fcntl.flock,
 POSIX-only, Windows falls back in-process-only). Never reads the
 environment (invariant 2): all parameters are injected by the caller.

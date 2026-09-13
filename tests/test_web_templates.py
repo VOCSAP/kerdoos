@@ -27,11 +27,12 @@ class TierLevelTest(unittest.TestCase):
         self.assertLess(tier_level("uc"), tier_level("camoufox"))
 
     def test_ladder_order_matches_the_cost_order_of_adr_0004(self) -> None:
-        self.assertEqual(tier_level("http"), 1)
-        self.assertEqual(tier_level("tls"), 2)
-        self.assertEqual(tier_level("browser"), 3)
-        self.assertEqual(tier_level("uc"), 4)
-        self.assertEqual(tier_level("camoufox"), 5)
+        by_level = sorted(known_tiers(), key=tier_level)
+        self.assertEqual(
+            by_level, ["http", "tls", "browser", "uc", "camoufox"])
+        self.assertEqual(
+            [tier_level(name) for name in by_level],
+            list(range(1, len(known_tiers()) + 1)))
 
     def test_unknown_method_is_zero(self) -> None:
         self.assertEqual(tier_level("uc_selenium"), 0)
@@ -80,6 +81,7 @@ class TierMacroRenderTest(unittest.TestCase):
             templates.env.cache.clear()
 
     def test_ladder_override_works_with_caching_disabled(self) -> None:
+        """Guards this file's own override helper, not production code."""
         stretched = tuple(sorted(known_tiers())) + ("spare-rung",)
         with mock.patch.object(templates.env, "cache", None):
             html = self._render_with_ladder("http", stretched)

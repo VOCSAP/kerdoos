@@ -240,7 +240,7 @@ SSD 2TB          | Magalu     | unavail|   --    |  --   | http | 06:00
 - Leads with the **briefing line** (count of items to act on), not 4 KPI
   cards.
 - Data columns in Plex Mono, tabular. `INDET` is salient (misty indigo). The
-  `Tier` column shows the escalation reason (a supporting, understated
+  `Tier` column shows the tier the site's page needed (a supporting, understated
   detail).
 
 **Admin screen.** Same visual world (no separate color scheme),

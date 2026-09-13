@@ -260,14 +260,14 @@ class CompositionRootUcOrphanSweepDelayTest(unittest.TestCase):
         os.environ["KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS"] = "17"
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            service, config_store, state_store, _router = cli._build_app_service(
-                str(d / "config.db"), str(d / "state.db"))
+            composition = cli._build_app_service(
+                str(d / "config.db"), str(d / "state.db"),
+                settings=cli.get_settings())
             try:
-                fetcher = service._router.select("uc")
+                fetcher = composition.router.select("uc")
                 self.assertEqual(fetcher._orphan_sweep_delay_seconds, 17.0)
             finally:
-                config_store.close()
-                state_store.close()
+                composition.close()
 
 
 class CompositionRootUcFetchTimeoutTest(unittest.TestCase):
@@ -289,14 +289,14 @@ class CompositionRootUcFetchTimeoutTest(unittest.TestCase):
         os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "23"
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            service, config_store, state_store, _router = cli._build_app_service(
-                str(d / "config.db"), str(d / "state.db"))
+            composition = cli._build_app_service(
+                str(d / "config.db"), str(d / "state.db"),
+                settings=cli.get_settings())
             try:
-                fetcher = service._router.select("uc")
+                fetcher = composition.router.select("uc")
                 self.assertEqual(fetcher._fetch_timeout_seconds, 23.0)
             finally:
-                config_store.close()
-                state_store.close()
+                composition.close()
 
 
 if __name__ == "__main__":
