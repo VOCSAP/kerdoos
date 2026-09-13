@@ -25,7 +25,7 @@ _TEMPLATE_DIR = Path(__file__).parent / "templates"
 # Cost-ascending rank (invariant #6) -- presentation only. Membership comes
 # from the router, so a tier the router gains cannot silently miss the admin
 # form nor the micro-indicator; a tier missing here only loses its rank.
-_TIER_COST_ORDER = ("http", "tls", "browser", "uc")
+_TIER_COST_ORDER = ("http", "tls", "browser", "uc", "camoufox")
 
 
 def _ordered_tiers() -> tuple[str, ...]:

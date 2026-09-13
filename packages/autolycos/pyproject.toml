@@ -26,6 +26,10 @@ tls = ["curl_cffi>=0.7"]
 # is abandoned at UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071) -- required,
 # not optional cleanup, since it runs on every uc fetch's launch path.
 uc = ["seleniumbase>=4.24", "psutil>=5.9"]
+# Exact pin: the adapter's readiness check mirrors this release's browser
+# build floor and default-addon list, and a new release may change either.
+# psutil kills the Firefox process tree of a fetch abandoned at its deadline.
+camoufox = ["camoufox==0.5.6", "psutil>=5.9"]
 
 [dependency-groups]
 # seleniumbase's own chromium_arg parsing is exercisable without a real

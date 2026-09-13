@@ -5,16 +5,16 @@ and the router returns the matching adapter instance. No protector detection at
 the MVP -- that is the post-MVP dynamic router (detect.py), added without
 touching this contract.
 
-All four tiers (`http`, `tls`, `browser`, `uc`) are wired. The `tls`, `browser`
-and `uc` factories import their optional dependency (curl_cffi, Playwright,
-SeleniumBase) lazily, so it is only pulled in when a site actually selects that
-tier.
+All five tiers (`http`, `tls`, `browser`, `uc`, `camoufox`) are wired. Every
+tier but `http` imports its optional dependency (curl_cffi, Playwright,
+SeleniumBase, Camoufox) lazily, so it is only pulled in when a site actually
+selects that tier.
 """
 
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from .adapters.http import HttpFetcher
 from .browser_gate import BrowserGate, default_browser_gate
@@ -79,11 +79,23 @@ def _make_uc(domain_policy: DomainPolicy,
     return UcFetcher(domain_policy, subresource_domains, browser_gate, **kwargs)
 
 
+def _make_camoufox(domain_policy: DomainPolicy,
+                   subresource_domains: Iterable[str],
+                   browser_gate: BrowserGate,
+                   **kwargs: float | int | str) -> Fetcher:
+    # Deferred import: the adapter module itself is stdlib-only, but keeping
+    # the import here mirrors the other tiers and keeps router import cheap.
+    from .adapters.camoufox import CamoufoxFetcher
+
+    return CamoufoxFetcher(
+        domain_policy, subresource_domains, browser_gate, **kwargs)
+
+
 # Lazy factories so importing the router does not construct every tool. Each
 # accepts the injected DomainPolicy, the per-site sub-resource domains (the
-# browser and uc tiers use the latter), and the shared BrowserGate (only
-# browser/uc take it -- http/tls never launch a browser, and ignore it, so
-# _FACTORIES stays one homogeneous callable shape).
+# browser, uc and camoufox tiers use the latter), and the shared BrowserGate
+# (only the browser tiers take it -- http/tls never launch a browser, and
+# ignore it, so _FACTORIES stays one homogeneous callable shape).
 _FACTORIES: dict[
     str, Callable[[DomainPolicy, Iterable[str], BrowserGate], Fetcher]
 ] = {
@@ -91,6 +103,7 @@ _FACTORIES: dict[
     "tls": _make_tls,
     "browser": _make_browser,
     "uc": _make_uc,
+    "camoufox": _make_camoufox,
 }
 
 # Optional dependency each tier's factory imports lazily (mirrors _FACTORIES
@@ -101,7 +114,36 @@ _TIER_MODULES: dict[str, str | None] = {
     "tls": "curl_cffi",
     "browser": "patchright",
     "uc": "seleniumbase",
+    "camoufox": "camoufox",
 }
+
+
+def _camoufox_install_ready(**kwargs: str) -> bool:
+    from .adapters.camoufox import camoufox_ready
+
+    return camoufox_ready(**kwargs)
+
+
+# Tiers whose importable module is not enough on its own: the camoufox
+# package downloads a browser at launch when its pinned binary is missing.
+_TIER_READINESS: dict[str, Callable[..., bool]] = {
+    "camoufox": _camoufox_install_ready,
+}
+
+
+def _tier_available(fetcher_name: str,
+                    readiness_kwargs: Mapping[str, Mapping[str, str]]) -> bool:
+    if fetcher_name not in _TIER_MODULES:
+        return False
+    module = _TIER_MODULES[fetcher_name]
+    if module is None:
+        return True
+    if importlib.util.find_spec(module) is None:
+        return False
+    readiness = _TIER_READINESS.get(fetcher_name)
+    if readiness is None:
+        return True
+    return readiness(**readiness_kwargs.get(fetcher_name, {}))
 
 
 def tier_available(fetcher_name: str) -> bool:
@@ -109,7 +151,8 @@ def tier_available(fetcher_name: str) -> bool:
     deployment. Uses importlib.util.find_spec, which locates a module WITHOUT
     importing it -- a slim image still never pays the cost of an unavailable
     tier's import (same rationale as the deferred imports in _make_tls/
-    _make_browser/_make_uc above).
+    _make_browser/_make_uc above). A tier listed in _TIER_READINESS must also
+    pass its own install check, with that adapter's default install location.
 
     An UNKNOWN tier name (not in _TIER_MODULES, e.g. a config typo landed in
     config.db via `kerdoos config import`, which does not go through
@@ -119,12 +162,7 @@ def tier_available(fetcher_name: str) -> bool:
     run_now/_run_plan_a call tier_available too, so a row that reached
     config.db some other way (bulk import, a future MCP door, a pre-existing
     row) is still rejected/skipped, not just newly-typed ones."""
-    if fetcher_name not in _TIER_MODULES:
-        return False
-    module = _TIER_MODULES[fetcher_name]
-    if module is None:
-        return True
-    return importlib.util.find_spec(module) is not None
+    return _tier_available(fetcher_name, {})
 
 
 def known_tiers() -> frozenset[str]:
@@ -149,6 +187,12 @@ class StaticRouter:
         browser_fetch_timeout_seconds: float | None = None,
         browser_max_abandoned_fetches: int | None = None,
         uc_fetch_timeout_seconds: float | None = None,
+        camoufox_launch_timeout_seconds: float | None = None,
+        camoufox_nav_timeout_seconds: float | None = None,
+        camoufox_fetch_timeout_seconds: float | None = None,
+        camoufox_max_abandoned_fetches: int | None = None,
+        camoufox_executable_path: str | None = None,
+        camoufox_expected_version: str | None = None,
     ) -> None:
         self._domain_policy = domain_policy
         # Defaults to the SAME module-level singleton as a directly-
@@ -162,10 +206,11 @@ class StaticRouter:
         # KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce),
         # KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS and
         # KERDOOS_BROWSER_MAX_ABANDONED_FETCHES (roadmap d8b7b8fd),
-        # KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da) are injected by
+        # KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da) and the
+        # KERDOOS_CAMOUFOX_* settings (roadmap 5438dd0b) are injected by
         # the kerdoos composition root -- autolycos itself never reads any
         # of these env vars (invariant 2).
-        self._extra_kwargs: dict[str, dict[str, float | int]] = {}
+        self._extra_kwargs: dict[str, dict[str, float | int | str]] = {}
         if uc_launch_timeout_seconds is not None:
             self._extra_kwargs.setdefault("uc", {})[
                 "launch_timeout_seconds"] = uc_launch_timeout_seconds
@@ -184,6 +229,24 @@ class StaticRouter:
         if uc_fetch_timeout_seconds is not None:
             self._extra_kwargs.setdefault("uc", {})[
                 "fetch_timeout_seconds"] = uc_fetch_timeout_seconds
+        camoufox_kwargs = {
+            "launch_timeout_seconds": camoufox_launch_timeout_seconds,
+            "nav_timeout_seconds": camoufox_nav_timeout_seconds,
+            "fetch_timeout_seconds": camoufox_fetch_timeout_seconds,
+            "max_abandoned_fetches": camoufox_max_abandoned_fetches,
+            "executable_path": camoufox_executable_path,
+            "expected_version": camoufox_expected_version,
+        }
+        for name, value in camoufox_kwargs.items():
+            if value is not None:
+                self._extra_kwargs.setdefault("camoufox", {})[name] = value
+        # tier_available() must judge the install this router will launch,
+        # not the adapter's default location.
+        self._readiness_kwargs: dict[str, dict[str, str]] = {}
+        for name in ("executable_path", "expected_version"):
+            value = camoufox_kwargs[name]
+            if value is not None:
+                self._readiness_kwargs.setdefault("camoufox", {})[name] = value
         self._cache: dict[tuple[str, frozenset[str]], Fetcher] = {}
 
     def select(
@@ -198,8 +261,8 @@ class StaticRouter:
         # tier with different render CDNs get distinct instances.
         key = (fetcher_name, frozenset(subresource_domains))
         if key not in self._cache:
-            # Only browser/uc take extra kwargs: http/tls's factories don't
-            # declare any, keeping their own call shape untouched.
+            # Only the browser tiers take extra kwargs: http/tls's factories
+            # don't declare any, keeping their own call shape untouched.
             extra = self._extra_kwargs.get(fetcher_name, {})
             self._cache[key] = _FACTORIES[fetcher_name](
                 self._domain_policy, subresource_domains, self._browser_gate,
@@ -207,7 +270,7 @@ class StaticRouter:
         return self._cache[key]
 
     def tier_available(self, fetcher_name: str) -> bool:
-        return tier_available(fetcher_name)
+        return _tier_available(fetcher_name, self._readiness_kwargs)
 
     def known_tiers(self) -> frozenset[str]:
         return known_tiers()
