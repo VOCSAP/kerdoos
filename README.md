@@ -88,8 +88,11 @@ Behind a reverse proxy, set `KERDOOS_FORWARDED_ALLOW_IPS` in the Docker image
 to the address the proxy connects from (see `env.example`). Left unset, the
 Docker image trusts no forwarding header: every request appears to come from
 the proxy, so the access log sees a single address. Keep the list as narrow as
-the proxy itself: any trusted address can forge the client IP, and a value that
-trusts everyone (`*`, or a `/0` CIDR) is refused at startup. Configure the
+the proxy itself: any trusted address can forge the client IP, so an entry
+naming far more than a proxy (`*`, or any network wider than a `/8`) is refused
+at startup with exit 64. With `restart: unless-stopped` that shows up only as
+`Restarting (64)`, and the offending entry is named in the container logs.
+Configure the
 proxy to overwrite `X-Forwarded-Proto` and append to `X-Forwarded-For` -- in
 nginx, `proxy_set_header X-Forwarded-Proto $scheme;` and `proxy_set_header
 X-Forwarded-For $proxy_add_x_forwarded_for;` -- otherwise a client can

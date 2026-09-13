@@ -137,13 +137,43 @@ class DockerCmdProxyArgsTest(unittest.TestCase):
         self.assertEqual(argv[index + 1], "4")
 
 
+_TRUSTS_EVERYONE = (
+    "0.0.0.0/0", "0.0.0.0/00", "0.0.0.0/000", "::/0", "::/00",
+    # Netmask form, and two halves that cover the whole space between them:
+    # neither contains the substring a textual "/0" match looks for.
+    "0.0.0.0/0.0.0.0", "0.0.0.0/1,128.0.0.0/1", "::/1,8000::/1",
+    "172.20.0.1, 0.0.0.0/0",
+    # Unicode blanks that `tr -d ' \t'` leaves in place while uvicorn's
+    # str.strip() removes them: vertical tab, form feed, no-break space.
+    "0.0.0.0/0\v", "0.0.0.0/0\f", "0.0.0.0/0\xa0",
+)
+
+# Refused by assumed strictness. MEASURED on uvicorn 0.51: only a value that
+# is exactly "*" sets always_trust, so these three leave the client at the
+# real peer. They are still refused, because a trust list written this way
+# states an intent the deployment should not express.
+_REFUSED_BY_STRICTNESS = ("*", " * ", "172.20.0.1,*")
+
+_LEGITIMATE = (
+    "", "172.20.0.1", "198.51.100.0/24, 10.0.0.0/8", "100.64.0.0/10",
+    "10.0.0.0/20", "10.10.0.0/30", "fd00::/8", "2001:db8::/32",
+    "10.0.0.0/255.0.0.0", "127.0.0.1,::1", "172.20.0.1,", "proxy.internal",
+)
+
+# Probes for the parity test. Neither may belong to any _LEGITIMATE entry,
+# or the test would fail on a sound value: 2001:db8::/32 is in that corpus,
+# so the documentation range cannot supply the IPv6 probe.
+_PUBLIC_PROBES = ("1.1.1.1", "2606:4700:4700::1111")
+
+
 @unittest.skipUnless(_SH, "sh not available")
 class TrustEveryoneIsRefusedTest(unittest.TestCase):
-    """A trust list naming every address is refused before uvicorn runs.
+    """A trust list entry naming far more than a proxy is refused.
 
-    uvicorn resolves `*` to always=True, and a `/0` CIDR to the same thing,
-    so a value that looks narrow ("172.20.0.1, 0.0.0.0/0") still trusts the
-    whole internet and lets any client forge its own address.
+    The check parses the value the way uvicorn's `_TrustedHosts` does, so it
+    closes the class rather than the spellings: `0.0.0.0/00`, the netmask
+    form `0.0.0.0/0.0.0.0` and the union `0.0.0.0/1,128.0.0.0/1` all trust
+    the whole internet without containing what a textual match looks for.
     """
 
     def _assert_refused(self, value: str) -> None:
@@ -155,34 +185,55 @@ class TrustEveryoneIsRefusedTest(unittest.TestCase):
             result.stdout, "",
             f"{value!r} reached uvicorn instead of being refused")
 
-    def test_bare_star_is_refused(self) -> None:
-        self._assert_refused("*")
+    def test_values_trusting_everyone_are_refused(self) -> None:
+        for value in _TRUSTS_EVERYONE:
+            with self.subTest(value=value):
+                self._assert_refused(value)
 
-    def test_padded_star_is_refused(self) -> None:
-        self._assert_refused(" * ")
+    def test_star_forms_are_refused(self) -> None:
+        for value in _REFUSED_BY_STRICTNESS:
+            with self.subTest(value=value):
+                self._assert_refused(value)
 
-    def test_star_inside_a_list_is_refused(self) -> None:
-        self._assert_refused("172.20.0.1,*")
+    def test_refusal_names_the_offending_entry(self) -> None:
+        result = _launch(
+            {"KERDOOS_FORWARDED_ALLOW_IPS": "172.20.0.1, 0.0.0.0/0"})
+        # Under `restart: unless-stopped` the operator sees only
+        # "Restarting (64)", so the log line is the only diagnosis available.
+        self.assertIn("0.0.0.0/0", result.stderr)
+        self.assertIn("172.20.0.1", result.stderr)
 
-    def test_ipv4_default_route_is_refused(self) -> None:
-        self._assert_refused("0.0.0.0/0")
+    def test_legitimate_values_still_launch(self) -> None:
+        for value in _LEGITIMATE:
+            with self.subTest(value=value):
+                argv = _launch_argv({"KERDOOS_FORWARDED_ALLOW_IPS": value})
+                if value:
+                    index = argv.index("--forwarded-allow-ips")
+                    self.assertEqual(argv[index + 1], value)
+                else:
+                    self.assertIn("--no-proxy-headers", argv)
 
-    def test_ipv6_default_route_is_refused(self) -> None:
-        self._assert_refused("::/0")
 
-    def test_default_route_inside_a_padded_list_is_refused(self) -> None:
-        self._assert_refused("172.20.0.1, 0.0.0.0/0")
+@unittest.skipUnless(_SH, "sh not available")
+@unittest.skipUnless(_HAS_UVICORN, "uvicorn not available")
+class AcceptedValuesTrustNoPublicAddressTest(unittest.TestCase):
+    """Parity between what the guard accepts and what uvicorn then trusts.
 
-    def test_narrow_trust_list_still_launches(self) -> None:
-        argv = _launch_argv({"KERDOOS_FORWARDED_ALLOW_IPS": _PROXY})
-        index = argv.index("--forwarded-allow-ips")
-        self.assertEqual(argv[index + 1], _PROXY)
+    The guard mirrors uvicorn's parsing, so it can only stay correct while
+    that parsing does. This drives the real `_TrustedHosts` for every value
+    the guard lets through: should uvicorn ever widen what it trusts, this
+    fails here instead of in a deployment.
+    """
 
-    def test_narrow_cidr_is_not_mistaken_for_a_default_route(self) -> None:
-        value = "198.51.100.0/24, 10.0.0.0/8"
-        argv = _launch_argv({"KERDOOS_FORWARDED_ALLOW_IPS": value})
-        index = argv.index("--forwarded-allow-ips")
-        self.assertEqual(argv[index + 1], value)
+    def test_no_accepted_value_trusts_a_public_address(self) -> None:
+        from uvicorn.middleware.proxy_headers import _TrustedHosts
+
+        for value in _LEGITIMATE:
+            for probe in _PUBLIC_PROBES:
+                with self.subTest(value=value, probe=probe):
+                    self.assertNotIn(
+                        probe, _TrustedHosts(value),
+                        f"uvicorn trusts {probe} for an accepted value")
 
 
 @unittest.skipUnless(_SH, "sh not available")

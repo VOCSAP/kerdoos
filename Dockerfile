@@ -71,11 +71,14 @@ EXPOSE 8000
 # FORWARDED_ALLOW_IPS present in the environment, letting a forged
 # X-Forwarded-For through.
 #
-# The trust list is refused when it names every address. Refusing only "*"
-# would be bypassable: uvicorn resolves a /0 CIDR to the same always-true
-# match, and either form still trusts everything as one element of an
-# otherwise narrow list. Spaces are stripped first, and the value is wrapped
-# in commas so a list element is matched like a whole value.
+# The trust list is refused when an entry names far more than a proxy. The
+# check is delegated to a module that parses the value the way uvicorn's
+# _TrustedHosts does, because uvicorn decides on semantics, not spelling: a
+# textual match on "/0" misses `0.0.0.0/00`, the netmask form
+# `0.0.0.0/0.0.0.0`, and the union `0.0.0.0/1,128.0.0.0/1`, all of which do
+# trust the whole internet. A bare "*" is refused too, by assumed strictness
+# rather than because it trusts everyone: uvicorn only trusts everything
+# when the WHOLE value is exactly "*".
 #
 # Shell form + exec: KERDOOS_WORKERS drives the REAL uvicorn worker count
 # (not just the digest evaluator's workers>1 guard-rail), so "N workers +
@@ -96,10 +99,7 @@ CMD case "$KERDOOS_WORKERS" in \
       ''|*[!0-9]*) W=1 ;; \
       *) W="$KERDOOS_WORKERS"; [ "$W" -gt 32 ] && W=32 ;; \
     esac; \
-    v=$(printf '%s' "$KERDOOS_FORWARDED_ALLOW_IPS" | tr -d ' \t'); \
-    case ",$v," in *,\*,*|*/0,*) \
-      echo "KERDOOS_FORWARDED_ALLOW_IPS must name the proxy, not every address" >&2; exit 64 ;; \
-    esac; \
+    python -m kerdoos.interfaces.web.forwarded_allow_ips || exit 64; \
     if [ -n "$KERDOOS_FORWARDED_ALLOW_IPS" ]; then \
       set -- "$@" --proxy-headers --forwarded-allow-ips "$KERDOOS_FORWARDED_ALLOW_IPS"; \
     else \

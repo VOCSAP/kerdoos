@@ -96,7 +96,7 @@ operator-configured.
 | `KERDOOS_STATE_DB` | `state.db` | SQLite `StateStore` path. |
 | `KERDOOS_COOKIE_SECURE` | `true` | Set the session cookie's `Secure` flag; set `false` for a plain-HTTP LAN deployment. |
 | `KERDOOS_WORKERS` | `1` | Process count the operator has deployed; gates the digest evaluator's `workers>1` guard-rail. |
-| `KERDOOS_FORWARDED_ALLOW_IPS` | none (trust nothing) | Image CMD only. Reverse proxy address(es) allowed to set `X-Forwarded-For` / `X-Forwarded-Proto`. A value trusting everyone (`*`, `/0` CIDR) is refused with exit 64. |
+| `KERDOOS_FORWARDED_ALLOW_IPS` | none (trust nothing) | Image CMD only. Reverse proxy address(es) allowed to set `X-Forwarded-For` / `X-Forwarded-Proto`. An entry naming far more than a proxy (`*`, or a network wider than `/8`) is refused with exit 64, naming the entry in the logs. |
 | `KERDOOS_DIGEST_EVALUATOR_ENABLED` | `false` | Opt-in switch for the WebUI's intra-process digest evaluator lifespan task. |
 | `KERDOOS_SMTP_HOST` | none | SMTP relay host. Digest mail falls back to a log-only sender until this is set. |
 | `KERDOOS_SMTP_PORT` | `587` | SMTP port (only applied once `KERDOOS_SMTP_HOST` is set). |
