@@ -20,6 +20,9 @@ dependencies = [
     # (zoneinfo is stdlib 3.9+ but ships no data on slim images).
     "croniter>=2.0",
     "tzdata>=2024.1",
+    # MCP server mounted in the WebUI app (Phase 5, ADR 0005): official SDK
+    # v2 (`MCPServer`), not the third-party `fastmcp` package.
+    "mcp>=2.2,<3",
 ]
 
 [project.optional-dependencies]

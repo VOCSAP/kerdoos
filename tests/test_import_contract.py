@@ -18,7 +18,7 @@ KERDOOS_SRC = ROOT / "packages" / "kerdoos" / "src" / "kerdoos"
 
 TOOLS = {"requests", "curl_cffi", "playwright", "patchright",
          "playwright_stealth", "seleniumbase", "selenium", "bs4", "httpx",
-         "yaml", "argon2"}
+         "yaml", "argon2", "mcp"}
 
 # Concrete adapter / wiring module suffixes that core must never import.
 CONCRETE_SUFFIXES = ("adapters", "router", "factory",
@@ -69,6 +69,17 @@ class ImportContractTest(unittest.TestCase):
                     top, ("core", "kerdoos"),
                     f"{f.relative_to(ROOT)} imports {top!r} (extractibility "
                     "invariant: autolycos never imports kerdoos/core)",
+                )
+
+    def test_mcp_interface_never_imports_autolycos(self) -> None:
+        files = _py_files(KERDOOS_SRC / "interfaces" / "mcp")
+        self.assertTrue(files, "no module found under kerdoos/interfaces/mcp")
+        for f in files:
+            for name in _imports(f):
+                self.assertNotEqual(
+                    name.split(".")[0], "autolycos",
+                    f"{f.relative_to(ROOT)} imports {name!r}: MCP tools reach "
+                    "fetching only through AppService and RunQueue",
                 )
 
     def test_core_port_dependencies_are_tool_free(self) -> None:

@@ -292,6 +292,9 @@ class Settings:
     browser_fetch_timeout_seconds: float
     browser_max_abandoned_fetches: int
     uc_fetch_timeout_seconds: float
+    mcp_enabled: bool = False
+    public_url: str | None = None
+    mcp_allowed_hosts: tuple[str, ...] = ()
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -573,4 +576,11 @@ def get_settings() -> Settings:
             DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP, int, lambda v: v > 0),
         uc_orphan_sweep_delay_seconds=uc_orphan_sweep_delay_seconds,
         uc_fetch_timeout_seconds=uc_fetch_timeout_seconds,
+        mcp_enabled=(
+            os.environ.get("KERDOOS_MCP_ENABLED", "false").lower() == "true"),
+        public_url=os.environ.get("KERDOOS_PUBLIC_URL") or None,
+        mcp_allowed_hosts=tuple(
+            host.strip()
+            for host in os.environ.get("KERDOOS_MCP_ALLOWED_HOSTS", "").split(",")
+            if host.strip()),
     )
