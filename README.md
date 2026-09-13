@@ -99,6 +99,30 @@ X-Forwarded-For $proxy_add_x_forwarded_for;` -- otherwise a client can
 downgrade the scheme of the slash redirect, the one absolute URL the app
 generates.
 
+### MCP server
+
+Kerdoos can also serve an MCP (Model Context Protocol) endpoint from the same
+process. It is off by default (`KERDOOS_MCP_ENABLED=false`, see `env.example`).
+Enabling it also requires `KERDOOS_PUBLIC_URL`, the URL clients use: without
+it the process refuses to start, on purpose. The endpoint is
+`<KERDOOS_PUBLIC_URL>/mcp` (`/mcp/` is answered too), and clients authenticate
+with a bearer token created on the WebUI profile page. Keep
+`KERDOOS_WORKERS=1`: MCP sessions live in a single worker process, so with
+more workers a warning is logged at startup and a client can lose its session.
+Requests carrying an `Origin` header are refused with 403, whatever its value:
+browser-based clients are not supported.
+
+`KERDOOS_FORWARDED_ALLOW_IPS` and `KERDOOS_PUBLIC_URL` answer two different
+questions: the first says which proxy is trusted, the second which URL the
+client sees. The MCP endpoint only accepts the `Host` headers derived from
+`KERDOOS_PUBLIC_URL` (plus any listed in `KERDOOS_MCP_ALLOWED_HOSTS`) and
+answers 421 to any other, so the proxy must pass the client's `Host` through.
+nginx sends the upstream address by default: set `proxy_set_header Host
+$host;`. When `KERDOOS_PUBLIC_URL` has a path prefix that the proxy strips
+(for instance `https://example.org/kerdoos`), the MCP discovery metadata is
+advertised at `/.well-known/oauth-protected-resource/kerdoos/mcp` on the same
+host: route that path to Kerdoos unchanged.
+
 ## License
 
 See [LICENSE](./LICENSE).

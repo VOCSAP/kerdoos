@@ -60,9 +60,13 @@ RUN useradd -u 10001 -m kerdoos \
     && mkdir -p /data \
     && chown 10001:10001 /data
 VOLUME ["/data"]
+# MCP stays off until an operator opts in: enabling it also requires
+# KERDOOS_PUBLIC_URL, which has no usable default, and create_app refuses to
+# start without it.
 ENV KERDOOS_CONFIG_DB=/data/config.db \
     KERDOOS_STATE_DB=/data/state.db \
-    KERDOOS_DIGEST_EVALUATOR_ENABLED=true
+    KERDOOS_DIGEST_EVALUATOR_ENABLED=true \
+    KERDOOS_MCP_ENABLED=false
 
 EXPOSE 8000
 
