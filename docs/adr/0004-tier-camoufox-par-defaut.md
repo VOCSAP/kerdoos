@@ -343,13 +343,64 @@ Firefox de `strip_dangerous_browser_args` :
 - Le reglage de resolution mesure pendant le spike (`network.dns.forceResolve`) n'est
   **pas** un controle retenu.
 
-### C3 -- Garde au niveau du contexte
+### C3 -- Structure du contexte et proxy inevitable (revise le 2026-09-13)
+
+**Fait mesure qui motive la revision** (lentille securite, vrai Firefox dans un
+conteneur, source `autolycos@3758a8b` montee en lecture seule, playwright 1.62.0 dans
+l'image de spike contre 1.61.0 dans le lock) : `context.route("**/*")` n'invoque
+**jamais** son handler avec le couple Camoufox/Playwright. Sur un fetch reel vers le
+loopback, la liste des appels au predicat est vide ; sur les autres scenarios, le
+predicat n'est appele que depuis le thread du proxy, jamais depuis celui du fetch, et
+la premiere instruction du handler n'apparait dans aucun journal. `route_web_socket`
+est presume inerte de la meme facon (non mesure separement). Le test unitaire de T1
+tourne sur un faux Camoufox : il prouve que le code POSE la garde, pas qu'elle MORD.
+Dans la meme campagne, garde de contexte RETIREE, dix-sept canaux declenches par la
+page vers le loopback (img, preconnect, dns-prefetch, prefetch, preload, iframe, ping,
+form, fetch, sendBeacon, WebSocket, EventSource, Worker, `window.open`, plus deux
+hotes de rebinding) ont donne zero connexion hors proxy : le `PinningProxy` arrete
+tout, et l'anti-rebinding est ferme deux fois (domaine avant resolution, `ip_is_safe`
+apres). Exploitabilite mesuree : nulle.
+
+**Ce que C3 exige desormais** (la version precedente comptait la garde de contexte
+comme un second rempart ; elle ne l'est pas sur ce tier) :
+
 - Validation de la cible (`validate_target`) **avant** tout lancement.
 - Un **contexte par fetch** et une page par contexte ; contexte cree avec
-  `service_workers="block"`.
-- Garde pose sur le **contexte** (`context.route("**/*")`), donc applique aussi aux
-  popups ; garde WebSocket au niveau du contexte si l'API le permet (sinon, le controle
-  C1 du proxy suffit).
+  `service_workers="block"`. Cette structure est tenue par le code (un navigateur et un
+  contexte par fetch, fermes en `finally`) ; l'effet de `service_workers="block"` sur
+  ce couple est a **mesurer** en T4 (preuve T4-4), pas presume.
+- **Le second rempart du tier est le proxy inevitable, pas la garde de contexte.** Il
+  est constitue par les preferences imposees de C2 qui retirent a Firefox tout chemin
+  direct (`network.proxy.allow_hijacking_localhost=true`,
+  `network.proxy.no_proxies_on=""`, `network.proxy.failover_direct=false`,
+  `network.trr.mode=5`, WebRTC et HTTP/3 coupes) et par le fait que le proxy est
+  configure par le dictionnaire `proxy=` du lancement, jamais par un argument
+  scrubbable. Deux couches independantes subsistent donc : (1) aucune sortie sans
+  CONNECT (C2 + proxy inevitable, preuves T4-1, T4-2, T4-6 et T4-10) ; (2) chaque
+  CONNECT est juge deux fois par le proxy, domaine avant resolution puis IP apres
+  (C1, preuves "hote hors allowlist" et anti-rebinding). Ce sont ces deux couches que
+  la tracabilite compte, et que T4 doit prouver separement.
+- **La garde de contexte est conservee dans le code au rang de "meilleur effort, non
+  compte"** : elle ne coute rien, elle peut mordre sur une autre version du couple, et
+  T4-11 mesure si elle mord. Aucun document, aucune docstring, aucun test ne peut la
+  presenter comme un rempart tant que T4-11 ne l'a pas vue s'executer sur le thread du
+  fetch. Regle de decision de T4-11 : si `page.route` (ou `context.route`) invoque son
+  handler sur le thread du fetch pour une sous-ressource hors allowlist, la garde est
+  re-promue rempart sur la forme mesuree (page ou contexte) et sa docstring le dit ;
+  si aucune forme ne mord sur l'image reelle (lock 1.61.0), le code de la garde est
+  **retire** de l'adaptateur, parce qu'un rempart inerte est une fausse assurance
+  que la prochaine revue recomptera.
+- **Voie ecartee pour l'instant** : un rempart intra-navigateur par WebExtension
+  (`webRequest.onBeforeRequest` bloquant, allowlist par fetch, chargee par
+  `addons=`). Il serait reel et independant de l'interception Playwright, mais il
+  ajoute un artefact a epingler (C4), une surface de detection non mesuree (les
+  interceptions de requetes sont un signal de detection connu du projet amont,
+  issues daijro/camoufox #271 et #428, lues le 2026-09-13) et un cout de
+  construction que rien ne justifie tant que la preuve T4-10 tient. A rouvrir
+  seulement si T4-10 ou T4-2 revele une sortie hors proxy.
+- La meme question est posee au tier `browser` (patchright/Chromium) : sa docstring
+  compte aussi `context.route` en defense en profondeur, sans mesure. T4-11 est
+  execute sur les deux tiers.
 
 ### Preuves d'execution exigees (tranche T4, dans l'image, `KERDOOS_REQUIRE_IMAGE_TESTS=1`)
 Chaque preuve est **jugee au contenu** (titre, code d'erreur, journal), jamais a la
@@ -376,6 +427,23 @@ des centaines de Ko.
   l'allowlist.
 - **T4-5** : `RTCPeerConnection` est indefini dans la page.
 - **T4-6** : proxy tue pendant un fetch -> aucune bascule en connexion directe.
+- **T4-10 (C3 revise) -- proxy suffisant, garde retiree** : avec la garde de contexte
+  neutralisee (handler remplace par un no-op qui journalise), une page servie sur un
+  hote allowliste declenche les dix-sept canaux de la campagne du 2026-09-13 vers le
+  loopback, une IP privee, l'adresse metadata et deux hotes de rebinding ; attendu :
+  zero connexion sur les ecouteurs de test, zero `connect`/`sendto`/`sendmsg` hors
+  proxy dans `strace` (T4-2), et une ligne de refus du proxy par canal. C'est la preuve
+  que la couche "aucune sortie sans CONNECT" tient seule.
+- **T4-11 (C3 revise) -- la garde mord-elle ?** Sur l'image reelle (playwright du
+  lock), la meme page charge `<img src="https://bloque.example/x.png">` et ouvre un
+  `WebSocket` vers un hote hors allowlist ; le handler de garde journalise, en
+  premiere instruction, le nom du thread courant et l'URL. Attendu pour re-promouvoir
+  la garde : au moins un appel dont le thread est celui du fetch (`camoufox-fetch`)
+  et dont l'URL est `bloque.example`, ET aucun CONNECT `bloque.example` dans le
+  journal du proxy (la garde a refuse avant le proxy). Les deux formes sont mesurees,
+  `context.route` puis `page.route`, et `route_web_socket` de la meme facon. Un
+  handler jamais appele = garde retiree du code (regle de decision de C3). Execute
+  aussi sur le tier `browser`.
 
 ## Decision 5 -- Liveness : lecons obligatoires des tiers Chromium
 
@@ -531,7 +599,7 @@ mise a jour le rende "meilleure" que Camoufox. »
 |---|---|---|
 | C1 | Allowlist de domaines dans le proxy, point de controle suffisant | Decision 4 (C1), tranche T0.5 |
 | C2 | Preferences Firefox imposees, OCSP tranche | Decision 4 (C2) |
-| C3 | Garde au niveau du contexte | Decision 4 (C3) |
+| C3 | Structure du contexte + proxy inevitable comme second rempart ; garde de contexte "meilleur effort, non comptee" jusqu'a T4-11 | Decision 4 (C3 revise), preuves T4-10 et T4-11 |
 | C4 | Build deterministe, provenance, secrets de build | Decision 2 (build deterministe) |
 | C5 | Zero telechargement a l'execution, par construction | Decision 1 (disponibilite), Decision 6 |
 | C6 | Durcissement de l'image | Decision 8 |
@@ -615,3 +683,13 @@ decision operateur requise :
   `CLAUDE.md` et `README.md` est portee par la tranche T3. La correction de la cle
   `uc` de l'indicateur WebUI, encore due dans la version precedente, est faite sur
   `main` (commit ffc2fb8).
+- **2026-09-13 -- C3 revise (garde de contexte inerte sur Camoufox)**. La lentille
+  securite a mesure, sur le vrai Firefox en conteneur (`autolycos@3758a8b`), que
+  `context.route` n'invoque jamais son handler avec ce couple, et que le proxy seul
+  arrete les dix-sept canaux testes. C3 ne compte plus la garde de contexte comme
+  rempart : le second rempart du tier est le proxy inevitable (preferences C2 +
+  `proxy=` de lancement), prouve par T4-10 ; la garde reste dans le code au rang de
+  "meilleur effort, non comptee", et T4-11 decide de sa re-promotion ou de son
+  retrait sur mesure. La voie WebExtension est ecartee tant que T4-10 tient. Le
+  tier `browser` passe par la meme mesure. Arbitrage architecte a la demande du
+  team-lead ; ratification au titre du mandat d'autonomie.
