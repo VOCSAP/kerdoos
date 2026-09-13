@@ -61,8 +61,9 @@ docs/adr/            architecture decision records (authoritative)
    (`availability: OutOfStock`).
 4. Collection reads the current price; it does not check a frozen value.
 5. Retry with backoff on non-determinism.
-6. Fetcher escalation by increasing cost: `http` to `tls` to `browser` to `uc`,
-   stopping at the first success.
+6. Fetcher tiers ordered by increasing cost: `http` < `tls` < `browser` < `uc`
+   (deprecated) < `camoufox`. The order is a cost, not a path: there is no
+   automatic escalation, each site declares the cheapest tier that passes.
 7. **Config and state are separate stores** (`ConfigStore` vs `StateStore`),
    each behind its abstraction, so storage can migrate without touching the core.
 8. Digests are per-owner and configurable; never a hardcoded per-product blast.

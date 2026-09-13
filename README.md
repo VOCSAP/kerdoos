@@ -44,7 +44,8 @@ core. Configuration and state are kept in separate stores so migrating storage
 
 The hard part of this product is getting the page at all. That lives in
 [**autolycos**](https://github.com/VOCSAP/autolycos), a standalone subsystem that
-escalates through fetcher tiers (`http` to `tls` to `browser` to `uc`) behind a
+offers fetcher tiers of increasing cost (`http`, `tls`, `browser`, `uc`
+deprecated, `camoufox`), each site declaring the cheapest one that passes, behind a
 stable port, with fail-closed SSRF guards. It is domain-agnostic and reusable on
 its own. Kerdoos is the orchestrator (scheduling, retries, state machine, digest
 aggregation); autolycos is how it reaches protected sites.

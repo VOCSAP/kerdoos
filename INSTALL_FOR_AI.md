@@ -26,8 +26,10 @@ uv sync --extra web
 ```
 
 Anti-bot fetch tiers beyond `http` are also optional extras on `autolycos`
-(`tls`, `browser`, `uc`) -- add them only if you need that escalation tier
-locally; the Docker images (see below) wire them per profile.
+(`tls`, `browser`, `uc`, `camoufox`) -- add them only if you need that tier
+locally; the Docker images (see below) wire them per profile. The `camoufox`
+extra also needs its pinned browser binary: the tier never downloads one and
+stays unavailable without it.
 
 ## Run the CLI
 

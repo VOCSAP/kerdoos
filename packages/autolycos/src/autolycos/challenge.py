@@ -1,6 +1,6 @@
 """Shared anti-bot challenge heuristic (pure module, no tool imports).
 
-Hoisted so EVERY fetcher tier (http/tls/browser/uc) derives
+Hoisted so EVERY fetcher tier (http/tls/browser/uc/camoufox) derives
 FetchResult.challenged from the SAME markers. The core retry loop keys on that
 abstract signal, so it must be consistent across tiers -- a marker known to one
 tier but not another would make retry behave differently per tool.

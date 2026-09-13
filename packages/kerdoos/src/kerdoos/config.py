@@ -118,6 +118,16 @@ injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. MEASURED: none of
 get_page_source/current_url/quit, nor a client-side Selenium command
 timeout, are bounded on their own when Chrome freezes after navigation.
 
+KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS / KERDOOS_CAMOUFOX_NAV_TIMEOUT_SECONDS /
+KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS (ADR 0004 D2) and
+KERDOOS_CAMOUFOX_MAX_ABANDONED_FETCHES (D5): the camoufox tier's launch,
+navigation (including the Akamai interstitial wait) and total fetch
+deadlines, and its abandoned-thread ceiling; defaults are CamoufoxFetcher's
+own measured values. Same floor-with-warning discipline and StaticRouter
+injection path. get_settings() WARNS (never refuses) when the fetch is not
+above launch + navigation, or when the fetch plus the cleanup a frozen fetch
+runs under the browser gate reaches KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS.
+
 KERDOOS_MCP_ENABLED (ADR 0005, card 362d5dab): mounts the MCP server at /mcp
 in the WebUI app; default off. When on, KERDOOS_PUBLIC_URL (the URL MCP
 clients use) is required, create_app refuses to start without it, and the
@@ -145,6 +155,14 @@ from autolycos.adapters.browser import (
     BROWSER_LAUNCH_TIMEOUT_SECONDS as _BROWSER_TIER_LAUNCH_TIMEOUT_SECONDS,
     MAX_ABANDONED_FETCH_THREADS as _BROWSER_TIER_MAX_ABANDONED_FETCHES,
     NAV_TIMEOUT_MS as _BROWSER_TIER_NAV_TIMEOUT_MS,
+)
+from autolycos.adapters.camoufox import (
+    CAMOUFOX_FETCH_TIMEOUT_SECONDS as _CAMOUFOX_TIER_FETCH_TIMEOUT_SECONDS,
+    CAMOUFOX_LAUNCH_TIMEOUT_SECONDS as _CAMOUFOX_TIER_LAUNCH_TIMEOUT_SECONDS,
+    CAMOUFOX_NAV_TIMEOUT_SECONDS as _CAMOUFOX_TIER_NAV_TIMEOUT_SECONDS,
+    KILL_WAIT_SECONDS as _CAMOUFOX_TIER_KILL_WAIT_SECONDS,
+    LATE_SWEEP_SECONDS as _CAMOUFOX_TIER_LATE_SWEEP_SECONDS,
+    MAX_ABANDONED_FETCH_THREADS as _CAMOUFOX_TIER_MAX_ABANDONED_FETCHES,
 )
 from autolycos.adapters.uc import (
     KILL_WAIT_SECONDS as _UC_TIER_KILL_WAIT_SECONDS,
@@ -269,6 +287,15 @@ DEFAULT_BROWSER_MAX_ABANDONED_FETCHES = _BROWSER_TIER_MAX_ABANDONED_FETCHES
 # so an unset env var falls back to exactly what UcFetcher would use anyway.
 DEFAULT_UC_FETCH_TIMEOUT_SECONDS = float(_UC_TIER_FETCH_TIMEOUT_SECONDS)
 
+# ADR 0004 D2 and D5: single source of truth shared with the camoufox tier,
+# so an unset env var falls back to exactly what CamoufoxFetcher uses.
+DEFAULT_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS = float(
+    _CAMOUFOX_TIER_LAUNCH_TIMEOUT_SECONDS)
+DEFAULT_CAMOUFOX_NAV_TIMEOUT_SECONDS = float(_CAMOUFOX_TIER_NAV_TIMEOUT_SECONDS)
+DEFAULT_CAMOUFOX_FETCH_TIMEOUT_SECONDS = float(
+    _CAMOUFOX_TIER_FETCH_TIMEOUT_SECONDS)
+DEFAULT_CAMOUFOX_MAX_ABANDONED_FETCHES = _CAMOUFOX_TIER_MAX_ABANDONED_FETCHES
+
 # Card 362d5dab: bounds the memory a single bearer token holder can pin
 # through MCP sessions in the process shared with the WebUI. The SDK
 # defaults (10000 sessions, 1800 s idle) let one tenant exhaust it.
@@ -308,6 +335,10 @@ class Settings:
     browser_fetch_timeout_seconds: float
     browser_max_abandoned_fetches: int
     uc_fetch_timeout_seconds: float
+    camoufox_launch_timeout_seconds: float
+    camoufox_nav_timeout_seconds: float
+    camoufox_fetch_timeout_seconds: float
+    camoufox_max_abandoned_fetches: int
     mcp_enabled: bool
     public_url: str | None
     mcp_allowed_hosts: tuple[str, ...]
@@ -489,10 +520,55 @@ def _warn_if_uc_fetch_timeout_out_of_order(
         _uc_fetch_timeout_above_acquire_warned = True
 
 
+def _warn_if_camoufox_fetch_timeout_out_of_order(
+    camoufox_fetch_timeout_seconds: float,
+    camoufox_launch_timeout_seconds: float,
+    camoufox_nav_timeout_seconds: float,
+    browser_acquire_timeout_seconds: float,
+) -> None:
+    """ADR 0004 D2: the camoufox deadline holds the SAME gate as the browser
+    and uc tiers. Past it, a frozen fetch keeps that gate through a first
+    confirmed-death wait, the owner thread's grace and a second wait
+    (CamoufoxFetcher._kill_after_deadline), so the acquire-side budget
+    counts that cleanup. The floor uses the CONFIGURED launch and
+    navigation. WARNS, never refuses, each condition once per process."""
+    global _camoufox_fetch_timeout_below_navigation_warned
+    global _camoufox_fetch_timeout_above_acquire_warned
+    min_expected = camoufox_launch_timeout_seconds + camoufox_nav_timeout_seconds
+    if (camoufox_fetch_timeout_seconds <= min_expected
+            and not _camoufox_fetch_timeout_below_navigation_warned):
+        logger.warning(
+            "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=%s is not above the "
+            "camoufox tier's launch (%.1fs) + navigation (%.1fs) budget "
+            "(%.1fs) -- a fetch could be abandoned before the timeout it "
+            "wraps ever gets a chance to fire.",
+            camoufox_fetch_timeout_seconds, camoufox_launch_timeout_seconds,
+            camoufox_nav_timeout_seconds, min_expected)
+        _camoufox_fetch_timeout_below_navigation_warned = True
+    cleanup_seconds = (2 * _CAMOUFOX_TIER_KILL_WAIT_SECONDS
+                       + _CAMOUFOX_TIER_LATE_SWEEP_SECONDS)
+    held = camoufox_fetch_timeout_seconds + cleanup_seconds
+    if (held >= browser_acquire_timeout_seconds
+            and not _camoufox_fetch_timeout_above_acquire_warned):
+        logger.warning(
+            "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=%s plus the cleanup it "
+            "triggers (%.1fs: two confirmed-death waits of %.1fs plus the "
+            "late sweep's %.1fs grace) would hold the browser gate for "
+            "%.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- "
+            "another caller waiting for that gate could time out its own "
+            "wait before this one ever frees it.",
+            camoufox_fetch_timeout_seconds, cleanup_seconds,
+            _CAMOUFOX_TIER_KILL_WAIT_SECONDS, _CAMOUFOX_TIER_LATE_SWEEP_SECONDS,
+            held, browser_acquire_timeout_seconds)
+        _camoufox_fetch_timeout_above_acquire_warned = True
+
+
 _browser_fetch_timeout_below_launch_warned = False
 _browser_fetch_timeout_above_acquire_warned = False
 _uc_fetch_timeout_below_navigation_warned = False
 _uc_fetch_timeout_above_acquire_warned = False
+_camoufox_fetch_timeout_below_navigation_warned = False
+_camoufox_fetch_timeout_above_acquire_warned = False
 
 
 def get_settings() -> Settings:
@@ -530,6 +606,18 @@ def get_settings() -> Settings:
     _warn_if_uc_fetch_timeout_out_of_order(
         uc_fetch_timeout_seconds, uc_orphan_sweep_delay_seconds,
         browser_acquire_timeout_seconds)
+    camoufox_launch_timeout_seconds = _env_number(
+        "KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS",
+        DEFAULT_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    camoufox_nav_timeout_seconds = _env_number(
+        "KERDOOS_CAMOUFOX_NAV_TIMEOUT_SECONDS",
+        DEFAULT_CAMOUFOX_NAV_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    camoufox_fetch_timeout_seconds = _env_number(
+        "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS",
+        DEFAULT_CAMOUFOX_FETCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
+    _warn_if_camoufox_fetch_timeout_out_of_order(
+        camoufox_fetch_timeout_seconds, camoufox_launch_timeout_seconds,
+        camoufox_nav_timeout_seconds, browser_acquire_timeout_seconds)
     return Settings(
         session_secret=os.environ.get("KERDOOS_SESSION_SECRET"),
         config_db=os.environ.get("KERDOOS_CONFIG_DB", "config.db"),
@@ -594,6 +682,12 @@ def get_settings() -> Settings:
             DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP, int, lambda v: v > 0),
         uc_orphan_sweep_delay_seconds=uc_orphan_sweep_delay_seconds,
         uc_fetch_timeout_seconds=uc_fetch_timeout_seconds,
+        camoufox_launch_timeout_seconds=camoufox_launch_timeout_seconds,
+        camoufox_nav_timeout_seconds=camoufox_nav_timeout_seconds,
+        camoufox_fetch_timeout_seconds=camoufox_fetch_timeout_seconds,
+        camoufox_max_abandoned_fetches=_env_number(
+            "KERDOOS_CAMOUFOX_MAX_ABANDONED_FETCHES",
+            DEFAULT_CAMOUFOX_MAX_ABANDONED_FETCHES, int, lambda v: v > 0),
         mcp_enabled=(
             os.environ.get("KERDOOS_MCP_ENABLED", "false").lower() == "true"),
         public_url=os.environ.get("KERDOOS_PUBLIC_URL") or None,

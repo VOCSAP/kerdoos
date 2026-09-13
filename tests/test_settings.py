@@ -23,6 +23,10 @@ from kerdoos.config import (
     DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS,
     DEFAULT_BROWSER_LAUNCH_TIMEOUT_SECONDS,
     DEFAULT_BROWSER_MAX_ABANDONED_FETCHES, DEFAULT_BROWSER_MAX_CONCURRENT,
+    DEFAULT_CAMOUFOX_FETCH_TIMEOUT_SECONDS,
+    DEFAULT_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS,
+    DEFAULT_CAMOUFOX_MAX_ABANDONED_FETCHES,
+    DEFAULT_CAMOUFOX_NAV_TIMEOUT_SECONDS,
     DEFAULT_DIGEST_REAPER_TIMEOUT_SECONDS,
     DEFAULT_LOGIN_RATE_LIMIT_MAX_ATTEMPTS,
     DEFAULT_LOGIN_RATE_LIMIT_ROW_CAP,
@@ -54,6 +58,10 @@ _SMTP_ENV_VARS = (
     "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS",
     "KERDOOS_BROWSER_MAX_ABANDONED_FETCHES",
     "KERDOOS_UC_FETCH_TIMEOUT_SECONDS",
+    "KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS",
+    "KERDOOS_CAMOUFOX_NAV_TIMEOUT_SECONDS",
+    "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS",
+    "KERDOOS_CAMOUFOX_MAX_ABANDONED_FETCHES",
 )
 
 
@@ -67,6 +75,8 @@ _WARN_ONCE_LATCHES = (
     "_browser_fetch_timeout_above_acquire_warned",
     "_uc_fetch_timeout_below_navigation_warned",
     "_uc_fetch_timeout_above_acquire_warned",
+    "_camoufox_fetch_timeout_below_navigation_warned",
+    "_camoufox_fetch_timeout_above_acquire_warned",
 )
 
 
@@ -958,6 +968,150 @@ class UcFetchTimeoutFloorTest(_SettingsTestBase):
                 self.assertTrue(
                     any("KERDOOS_UC_FETCH_TIMEOUT_SECONDS" in msg
                         for msg in cm.output), cm.output)
+
+
+class CamoufoxSettingsFloorTest(_SettingsTestBase):
+    """ADR 0004 D2 and D5: an unset KERDOOS_CAMOUFOX_* variable falls back to
+    what CamoufoxFetcher would use anyway; a malformed or non-positive one
+    warns and falls back to the same value."""
+
+    _FIELDS = (
+        ("KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS",
+         "camoufox_launch_timeout_seconds",
+         DEFAULT_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS),
+        ("KERDOOS_CAMOUFOX_NAV_TIMEOUT_SECONDS",
+         "camoufox_nav_timeout_seconds",
+         DEFAULT_CAMOUFOX_NAV_TIMEOUT_SECONDS),
+        ("KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS",
+         "camoufox_fetch_timeout_seconds",
+         DEFAULT_CAMOUFOX_FETCH_TIMEOUT_SECONDS),
+        ("KERDOOS_CAMOUFOX_MAX_ABANDONED_FETCHES",
+         "camoufox_max_abandoned_fetches",
+         DEFAULT_CAMOUFOX_MAX_ABANDONED_FETCHES),
+    )
+
+    def test_defaults_are_the_camoufox_tier_constants(self) -> None:
+        from autolycos.adapters import camoufox
+
+        self.assertEqual(
+            (DEFAULT_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS,
+             DEFAULT_CAMOUFOX_NAV_TIMEOUT_SECONDS,
+             DEFAULT_CAMOUFOX_FETCH_TIMEOUT_SECONDS,
+             DEFAULT_CAMOUFOX_MAX_ABANDONED_FETCHES),
+            (camoufox.CAMOUFOX_LAUNCH_TIMEOUT_SECONDS,
+             camoufox.CAMOUFOX_NAV_TIMEOUT_SECONDS,
+             camoufox.CAMOUFOX_FETCH_TIMEOUT_SECONDS,
+             camoufox.MAX_ABANDONED_FETCH_THREADS))
+
+    def test_unset_values_use_the_defaults(self) -> None:
+        settings = get_settings()
+        for _, attr, default in self._FIELDS:
+            with self.subTest(field=attr):
+                self.assertEqual(getattr(settings, attr), default)
+
+    def test_valid_values_pass_through(self) -> None:
+        os.environ["KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS"] = "12"
+        os.environ["KERDOOS_CAMOUFOX_NAV_TIMEOUT_SECONDS"] = "34"
+        os.environ["KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS"] = "56"
+        os.environ["KERDOOS_CAMOUFOX_MAX_ABANDONED_FETCHES"] = "7"
+        settings = get_settings()
+        self.assertEqual(
+            (settings.camoufox_launch_timeout_seconds,
+             settings.camoufox_nav_timeout_seconds,
+             settings.camoufox_fetch_timeout_seconds,
+             settings.camoufox_max_abandoned_fetches),
+            (12.0, 34.0, 56.0, 7))
+
+    def test_invalid_or_non_positive_values_fall_back_with_a_warning(
+        self,
+    ) -> None:
+        for var, attr, default in self._FIELDS:
+            for raw in ("abc", "0", "-1"):
+                with self.subTest(var=var, raw=raw):
+                    os.environ[var] = raw
+                    with self.assertLogs("kerdoos.config", "WARNING") as cm:
+                        settings = get_settings()
+                    self.assertEqual(getattr(settings, attr), default)
+                    self.assertTrue(
+                        any(var in msg for msg in cm.output), cm.output)
+                    del os.environ[var]
+
+
+class CamoufoxFetchTimeoutOrderingWarningTest(_SettingsTestBase):
+    """ADR 0004 D2: the camoufox deadline holds the SAME gate as the browser
+    and uc tiers. Past it, a frozen fetch still holds that gate for two
+    confirmed-death waits and the late sweep, so those count against the
+    acquire timeout. WARNS, never refuses."""
+
+    @staticmethod
+    def _cleanup_seconds() -> float:
+        from autolycos.adapters import camoufox
+
+        return 2 * camoufox.KILL_WAIT_SECONDS + camoufox.LATE_SWEEP_SECONDS
+
+    def test_fetch_not_above_launch_plus_navigation_warns(self) -> None:
+        os.environ["KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS"] = "30"
+        os.environ["KERDOOS_CAMOUFOX_NAV_TIMEOUT_SECONDS"] = "40"
+        os.environ["KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS"] = "70"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            get_settings()
+        self.assertTrue(
+            any("not above the camoufox tier's launch" in msg
+                for msg in cm.output), cm.output)
+
+    def test_the_configured_launch_and_navigation_are_the_ones_charged(
+        self,
+    ) -> None:
+        # 60 is below the DEFAULT launch + navigation, above the configured.
+        os.environ["KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS"] = "10"
+        os.environ["KERDOOS_CAMOUFOX_NAV_TIMEOUT_SECONDS"] = "20"
+        os.environ["KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS"] = "60"
+        self.assertLessEqual(
+            60, DEFAULT_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS
+            + DEFAULT_CAMOUFOX_NAV_TIMEOUT_SECONDS)
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+        spy.assert_not_called()
+
+    def test_fetch_plus_cleanup_reaching_the_acquire_timeout_warns(self) -> None:
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        fetch = 120 - self._cleanup_seconds()
+        self.assertLess(fetch, 120)
+        os.environ["KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS"] = str(fetch)
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            get_settings()
+        self.assertTrue(
+            any("KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS" in msg
+                and "cleanup" in msg for msg in cm.output), cm.output)
+
+    def test_fetch_plus_cleanup_just_under_the_acquire_timeout_is_silent(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS"] = str(
+            120 - self._cleanup_seconds() - 1)
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+        spy.assert_not_called()
+
+    def test_default_values_do_not_warn(self) -> None:
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+        spy.assert_not_called()
+
+    def test_same_out_of_order_value_warns_once_across_multiple_calls(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS"] = "30"
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+            get_settings()
+            get_settings()
+        self.assertEqual(spy.call_count, 1)
 
 
 if __name__ == "__main__":

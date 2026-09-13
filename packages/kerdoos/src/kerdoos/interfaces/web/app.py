@@ -30,7 +30,6 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from autolycos.browser_gate import BrowserGate
-from autolycos.router import StaticRouter
 
 from kerdoos.config import get_settings
 from kerdoos.core.app.auth import AuthService
@@ -40,6 +39,7 @@ from kerdoos.core.evaluator import (
 from kerdoos.core.run_queue import RunQueue
 from kerdoos.digest.factory import build_sender
 from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
+from kerdoos.interfaces.routing import build_static_router
 from kerdoos.interfaces.mcp.server import (
     MOUNT_PATH, ExactMountPathMiddleware, build_mcp_server)
 from kerdoos.interfaces.web import health
@@ -92,15 +92,8 @@ def create_app() -> FastAPI:
         max_concurrent=settings.browser_max_concurrent,
         lock_dir=Path(settings.state_db).parent,
         acquire_timeout_seconds=settings.browser_acquire_timeout_seconds)
-    router = StaticRouter(
-        domain_policy, browser_gate=browser_gate,
-        uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds,
-        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds,
-        uc_orphan_sweep_delay_seconds=settings.uc_orphan_sweep_delay_seconds,
-        browser_fetch_timeout_seconds=settings.browser_fetch_timeout_seconds,
-        browser_max_abandoned_fetches=settings.browser_max_abandoned_fetches,
-        uc_fetch_timeout_seconds=settings.uc_fetch_timeout_seconds)
-    log_unavailable_fetcher_tiers(config_store)
+    router = build_static_router(domain_policy, browser_gate, settings)
+    log_unavailable_fetcher_tiers(config_store, router)
     app_service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
     # Card ca30b736: POST /run enqueues here instead of blocking on a scrape

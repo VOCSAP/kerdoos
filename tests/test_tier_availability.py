@@ -273,7 +273,7 @@ class BootLogTest(_AppServiceTestBase):
 
         with _tier_forced_missing("uc"), \
              self.assertLogs("kerdoos.interfaces.boot_checks", level="ERROR") as cm:
-            log_unavailable_fetcher_tiers(self.config)
+            log_unavailable_fetcher_tiers(self.config, self.router)
         self.assertEqual(len(cm.output), 1)
         self.assertIn("uc", cm.output[0])
 
@@ -283,7 +283,7 @@ class BootLogTest(_AppServiceTestBase):
             "owner1", "p1", "kabum", "https://www.kabum.com.br/p/1")
         logger = logging.getLogger("kerdoos.interfaces.boot_checks")
         with mock.patch.object(logger, "error") as spy:
-            log_unavailable_fetcher_tiers(self.config)  # must not raise
+            log_unavailable_fetcher_tiers(self.config, self.router)  # must not raise
         spy.assert_not_called()
 
 
@@ -406,7 +406,8 @@ class ConfigImportTypoTierTest(unittest.TestCase):
                 site="typo", url="https://example.com.br/p/1"))
             with self.assertLogs(
                 "kerdoos.interfaces.boot_checks", level="ERROR") as cm:
-                log_unavailable_fetcher_tiers(config)
+                log_unavailable_fetcher_tiers(
+                    config, StaticRouter(CatalogueDomainPolicy(config)))
         finally:
             config.close()
         self.assertIn("uC", cm.output[0])

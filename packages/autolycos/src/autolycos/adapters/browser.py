@@ -34,7 +34,8 @@ Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
     address class this posture exists to refuse. It must travel in the proxy
     dict, never in `args` -- --proxy-bypass-list is on the scrub list, so an
     args-borne copy would be stripped and the hole would reopen silently.
-  * DEFENSE IN DEPTH, not the primary control: context.route("**/*") (bound to
+  * BEST EFFORT, not counted as a control (ADR 0004 C3: never measured to
+    run on this tier, T4-11 decides): context.route("**/*") (bound to
     the browser CONTEXT, not just the page, so it also covers popups/new pages
     opened via window.open) aborts any request whose host the proxy would
     also refuse. route() does not see WebSockets at all, which is a separate

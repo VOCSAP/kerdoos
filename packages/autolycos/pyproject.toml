@@ -1,7 +1,7 @@
 [project]
 name = "autolycos"
 version = "0.1.0"
-description = "Anti-bot fetching subsystem: escalating Fetcher tiers (http/tls/browser/uc) behind a stable port, with fail-closed SSRF guards. Domain-agnostic: the caller injects a DomainPolicy."
+description = "Anti-bot fetching subsystem: Fetcher tiers of increasing cost (http/tls/browser/uc/camoufox) behind a stable port, with fail-closed SSRF guards. Domain-agnostic: the caller injects a DomainPolicy."
 requires-python = ">=3.11"
 dependencies = [
     # Floor is 2.34 (matches the tested 2.34.2), NOT 2.31: the http tier's IP

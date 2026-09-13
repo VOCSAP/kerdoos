@@ -1,14 +1,15 @@
-"""tier_level / tier() macro: the fetcher escalation micro-indicator.
+"""tier_level / tier() macro: the fetcher cost micro-indicator.
 
 _TIER_LADDER must use the SAME tier names as the real Fetcher adapters
 (method_name), never a stale/renamed alias -- otherwise tier_level() silently
-falls through to 0 (unknown) for a tier that is actually the top of the
-escalation ladder (invariant #6: http -> tls -> browser -> uc).
+falls through to 0 (unknown) for a tier that is actually on the ladder
+(ADR 0004: http < tls < browser < uc < camoufox, a cost order, not a path).
 """
 
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from autolycos.router import known_tiers
 from kerdoos.interfaces.web.templates import (
@@ -19,14 +20,18 @@ class TierLevelTest(unittest.TestCase):
     def test_uc_is_above_browser(self) -> None:
         self.assertGreater(tier_level("uc"), tier_level("browser"))
 
-    def test_uc_is_top_of_the_ladder(self) -> None:
-        self.assertEqual(tier_level("uc"), 4)
+    def test_camoufox_is_top_of_the_ladder(self) -> None:
+        self.assertEqual(tier_level("camoufox"), len(known_tiers()))
 
-    def test_ladder_order_matches_the_escalation_invariant(self) -> None:
+    def test_deprecated_uc_keeps_its_rung_below_camoufox(self) -> None:
+        self.assertLess(tier_level("uc"), tier_level("camoufox"))
+
+    def test_ladder_order_matches_the_cost_order_of_adr_0004(self) -> None:
         self.assertEqual(tier_level("http"), 1)
         self.assertEqual(tier_level("tls"), 2)
         self.assertEqual(tier_level("browser"), 3)
         self.assertEqual(tier_level("uc"), 4)
+        self.assertEqual(tier_level("camoufox"), 5)
 
     def test_unknown_method_is_zero(self) -> None:
         self.assertEqual(tier_level("uc_selenium"), 0)
@@ -60,16 +65,33 @@ class TierMacroRenderTest(unittest.TestCase):
         # which one imported _macros.html first.
         original = templates.env.globals["tier_ladder"]
         templates.env.globals["tier_ladder"] = ladder
-        templates.env.cache.clear()
+        self._drop_template_cache()
         try:
             return self._render(method)
         finally:
             templates.env.globals["tier_ladder"] = original
+            self._drop_template_cache()
+
+    @staticmethod
+    def _drop_template_cache() -> None:
+        # With caching disabled there is no module to rebuild, so the global
+        # override already applies.
+        if templates.env.cache is not None:
             templates.env.cache.clear()
 
-    def test_uc_source_renders_four_lit_pips(self) -> None:
+    def test_ladder_override_works_with_caching_disabled(self) -> None:
+        stretched = tuple(sorted(known_tiers())) + ("spare-rung",)
+        with mock.patch.object(templates.env, "cache", None):
+            html = self._render_with_ladder("http", stretched)
+        self.assertEqual(html.count('class="tier__pip'), len(stretched))
+
+    def test_uc_source_lights_one_pip_per_rung_up_to_its_own(self) -> None:
         html = self._render("uc")
-        self.assertEqual(html.count("tier__pip--on"), 4)
+        self.assertEqual(html.count("tier__pip--on"), tier_level("uc"))
+
+    def test_camoufox_source_lights_every_pip(self) -> None:
+        html = self._render("camoufox")
+        self.assertEqual(html.count("tier__pip--on"), len(known_tiers()))
 
     def test_browser_source_renders_three_lit_pips(self) -> None:
         html = self._render("browser")

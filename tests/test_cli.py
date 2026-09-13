@@ -260,7 +260,7 @@ class CompositionRootUcOrphanSweepDelayTest(unittest.TestCase):
         os.environ["KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS"] = "17"
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            service, config_store, state_store = cli._build_app_service(
+            service, config_store, state_store, _router = cli._build_app_service(
                 str(d / "config.db"), str(d / "state.db"))
             try:
                 fetcher = service._router.select("uc")
@@ -289,7 +289,7 @@ class CompositionRootUcFetchTimeoutTest(unittest.TestCase):
         os.environ["KERDOOS_UC_FETCH_TIMEOUT_SECONDS"] = "23"
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            service, config_store, state_store = cli._build_app_service(
+            service, config_store, state_store, _router = cli._build_app_service(
                 str(d / "config.db"), str(d / "state.db"))
             try:
                 fetcher = service._router.select("uc")

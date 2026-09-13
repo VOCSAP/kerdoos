@@ -47,13 +47,13 @@ Deux packages du workspace : `packages/kerdoos/src/kerdoos/` (coeur --
 domain, scheduler, use-cases, registry/ConfigStore, parsers, digest,
 persistence, interfaces cli/web minces) et
 `packages/autolycos/src/autolycos/` (sous-systeme anti-bot -- Fetcher,
-routeur, safety/SSRF, egress-proxy, adapters http/tls/browser/uc). Le reste
+routeur, safety/SSRF, egress-proxy, adapters http/tls/browser/uc/camoufox). Le reste
 se lit sur disque.
 
 ## Invariants -- a ne jamais violer
 
 1. **Aucun outil ne fuit dans `core/`.** `core/` importe des ports, jamais
-   `playwright`, `curl_cffi`, `patchright`, `seleniumbase` -- ces outils
+   `playwright`, `curl_cffi`, `patchright`, `seleniumbase`, `camoufox` -- ces outils
    vivent uniquement dans `autolycos/adapters/` (et les parsers concrets dans
    `kerdoos/parsers/`).
 2. **`autolycos/` n'importe jamais `core/`/`kerdoos`.** Sous-systeme
@@ -67,8 +67,10 @@ se lit sur disque.
    stock" au premier scrape reel.
 4. **La collecte lit le prix courant**, elle ne verifie pas une valeur figee.
 5. **Retry + backoff** systematiques sur non-determinisme.
-6. **Escalade par cout croissant** cote Fetcher : `http` -> `tls` -> `browser`
-   -> `uc`. Arret au premier succes.
+6. **Echelle des tiers par cout croissant** cote Fetcher : `http` < `tls` <
+   `browser` < `uc` (deprecie) < `camoufox`. L'ordre est un cout, pas un
+   parcours : aucune escalade automatique, chaque site declare le tier le
+   moins couteux qui passe (`docs/adr/0004-tier-camoufox-par-defaut.md`).
 7. **Config et etat separes** : `ConfigStore` (`config.db`) vs `StateStore`
    (`state.db`), fichiers physiquement distincts, chacun derriere son
    abstraction -> migration (Postgres) sans toucher le coeur.

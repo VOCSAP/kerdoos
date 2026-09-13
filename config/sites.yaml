@@ -19,8 +19,12 @@ sites:
       # anchors are fixed in the adapter, so no locators are authored here.
       kind: amazon
   mercadolivre:
-    fetcher: browser           # SPA; price injected by client-side JS (Chromium)
+    fetcher: camoufox          # Chromium lands on an account-verification wall; ADR 0004 T4
+                               # confirms on several samples, else back to browser
     domain: mercadolivre.com.br
+    # Source URLs must use www.mercadolivre.com.br: mercadolivre.com.br and
+    # produto.mercadolivre.com.br redirect there, and the camoufox tier refuses
+    # a page whose final host differs.
     # Render-critical CDN: ML is a full client-side render whose price and
     # availability are injected by the http2.mlstatic.com JS bundle. Allow it as
     # a browser SUB-RESOURCE only (never a navigation target) so the page can
@@ -47,10 +51,12 @@ sites:
       # price is the card price) and base_price (reference).
       kind: pichau
   magalu:
-    fetcher: uc                # Akamai Bot Manager; only SeleniumBase UC passes
+    fetcher: camoufox          # Akamai Bot Manager blocks the Chromium tiers in a container
     domain: magazineluiza.com.br
-    # Render-critical CDN allowed to resolve (Option A host-resolver EXCLUDE);
-    # mlcdn.com.br serves Magalu's JS/asset bundles (wx./a-static. subdomains).
+    # Source URLs must use www.magazineluiza.com.br: the bare host redirects
+    # there, and the camoufox tier refuses a page whose final host differs.
+    # mlcdn.com.br serves Magalu's JS/asset bundles (wx./a-static. subdomains),
+    # allowed as sub-resources through the egress proxy.
     subresource_domains:
       - mlcdn.com.br
     parser:

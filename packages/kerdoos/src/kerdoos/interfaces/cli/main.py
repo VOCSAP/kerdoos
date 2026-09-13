@@ -35,6 +35,7 @@ from kerdoos.config import get_settings
 from kerdoos.digest.factory import build_sender
 from kerdoos.digest.render import render_digest
 from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
+from kerdoos.interfaces.routing import build_static_router
 from kerdoos.parsers.factory import build_parser
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.errors import ConfigError, ConfigImportError
@@ -83,29 +84,22 @@ def _build_browser_gate(state_db: str) -> BrowserGate:
 
 def _build_app_service(
     config_db: str, db: str, browser_gate: BrowserGate | None = None,
-) -> tuple[AppService, SqliteConfigStore, SqliteStateStore]:
+) -> tuple[AppService, SqliteConfigStore, SqliteStateStore, StaticRouter]:
     config_store = SqliteConfigStore(config_db)
     state_store = SqliteStateStore(db)
     domain_policy = CatalogueDomainPolicy(config_store)
     gate = browser_gate if browser_gate is not None else _build_browser_gate(db)
-    settings = get_settings()
-    router = StaticRouter(
-        domain_policy, browser_gate=gate,
-        uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds,
-        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds,
-        uc_orphan_sweep_delay_seconds=settings.uc_orphan_sweep_delay_seconds,
-        browser_fetch_timeout_seconds=settings.browser_fetch_timeout_seconds,
-        browser_max_abandoned_fetches=settings.browser_max_abandoned_fetches,
-        uc_fetch_timeout_seconds=settings.uc_fetch_timeout_seconds)
+    router = build_static_router(domain_policy, gate, get_settings())
     service = AppService(
         config_store, state_store, router, domain_policy, build_parser)
-    return service, config_store, state_store
+    return service, config_store, state_store, router
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    service, config_store, state_store = _build_app_service(args.config_db, args.db)
+    service, config_store, state_store, router = _build_app_service(
+        args.config_db, args.db)
     try:
-        log_unavailable_fetcher_tiers(config_store)
+        log_unavailable_fetcher_tiers(config_store, router)
         result = service.run_now(args.owner)
     finally:
         config_store.close()
@@ -124,20 +118,12 @@ def cmd_digest(args: argparse.Namespace) -> int:
     # router below -- two separate BrowserGate instances would each bound
     # their own callers independently, defeating the single-door guarantee.
     browser_gate = _build_browser_gate(args.db)
-    _service, config_store, state_store = _build_app_service(
+    _service, config_store, state_store, router = _build_app_service(
         args.config_db, args.db, browser_gate=browser_gate)
     domain_policy = CatalogueDomainPolicy(config_store)
     settings = get_settings()
-    router = StaticRouter(
-        domain_policy, browser_gate=browser_gate,
-        uc_launch_timeout_seconds=settings.uc_launch_timeout_seconds,
-        browser_launch_timeout_seconds=settings.browser_launch_timeout_seconds,
-        uc_orphan_sweep_delay_seconds=settings.uc_orphan_sweep_delay_seconds,
-        browser_fetch_timeout_seconds=settings.browser_fetch_timeout_seconds,
-        browser_max_abandoned_fetches=settings.browser_max_abandoned_fetches,
-        uc_fetch_timeout_seconds=settings.uc_fetch_timeout_seconds)
     try:
-        log_unavailable_fetcher_tiers(config_store)
+        log_unavailable_fetcher_tiers(config_store, router)
         sender = build_sender(
             settings, config_store, domain_policy, config_db_path=args.config_db)
         summary = asyncio.run(evaluate_tick(
@@ -165,7 +151,8 @@ def cmd_config_import(args: argparse.Namespace) -> int:
     # than committing sites/products one at a time and leaving a partially
     # imported catalogue on a later rejection.
     config_dir = Path(args.config_dir)
-    service, config_store, state_store = _build_app_service(args.config_db, args.db)
+    service, config_store, state_store, router = _build_app_service(
+        args.config_db, args.db)
     try:
         sites = parse_sites_yaml(config_dir / "sites.yaml")
         products: list[tuple[str, list[tuple[str, str]]]] = []
