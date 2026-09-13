@@ -206,8 +206,7 @@ class StaticRouter:
         # KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce),
         # KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS and
         # KERDOOS_BROWSER_MAX_ABANDONED_FETCHES (roadmap d8b7b8fd),
-        # KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da) and the
-        # KERDOOS_CAMOUFOX_* settings (roadmap 5438dd0b) are injected by
+        # KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da) are injected by
         # the kerdoos composition root -- autolycos itself never reads any
         # of these env vars (invariant 2).
         self._extra_kwargs: dict[str, dict[str, float | int | str]] = {}

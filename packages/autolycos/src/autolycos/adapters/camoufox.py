@@ -173,7 +173,9 @@ def merged_firefox_prefs(
 
 def _build_key(build: str) -> tuple[int, ...]:
     # Same ordering as camoufox.pkgman.Version, so this floor check agrees
-    # with the one the package applies before deciding to download.
+    # with the one the package applies before deciding to download. That
+    # ordering is private to the package; re-check it on any camoufox
+    # version bump.
     parts = [int(x) if x.isdigit() else ord(x[0]) - 1024
              for x in build.split(".")]
     return tuple(parts + [0] * (5 - build.count(".")))
@@ -496,6 +498,7 @@ class CamoufoxFetcher:
             # route handler was measured never to be invoked, and the
             # WebSocket one is presumed alike. Neither is a rampart: egress
             # rests on the proxy and on the prefs that leave no direct path.
+            # Kept until ADR 0004 T4-11 measures it.
             context.route("**/*", _guard)
             context.route_web_socket("**/*", lambda ws: ws.close())
             page = context.new_page()
@@ -595,6 +598,13 @@ class CamoufoxFetcher:
             "timeout": self._launch_timeout_seconds * 1000,
         }
 
+        # Same cycle ownership as BrowserFetcher: the sync API is not
+        # thread-safe, so one thread runs launch to close under a total
+        # deadline. Three deliberate differences: the abandoned counter rises
+        # at the deadline and falls when the thread exits, so clean kills never
+        # pin the ceiling; attribution by PID novelty under a single-flight
+        # gate reaches a launch killed before Firefox existed; a second pass
+        # after the grace catches what the thread spawned after the freeze.
         holder: dict = {}
         state = {"claimed": False, "finished": False, "abandoned": False}
         claim_lock = threading.Lock()

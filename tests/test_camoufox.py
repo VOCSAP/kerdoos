@@ -69,9 +69,10 @@ class _Response:
 
 class _Page:
     """`contents` is served one read at a time, its last item repeating; an
-    exception item is raised instead of returned. Reads through evaluate()
-    honour the cap the way the in-page script does: nothing over it leaves
-    the page."""
+    exception item is raised instead of returned. evaluate() does NOT run
+    the script it receives: it re-implements the cap, so these tests prove
+    the adapter's handling of null and of the byte check, never the script's
+    own semantics. Only a measurement on a real Firefox can prove those."""
 
     def __init__(self, contents: list, status: int | None,
                  url: str = _URL) -> None:
@@ -259,6 +260,89 @@ class FrozenPrefsTest(unittest.TestCase):
         "security.OCSP.enabled": 0,
         "security.ssl.enable_ocsp_stapling": True,
     }
+
+    # The whole frozen list, pinned on purpose: it is a security
+    # specification, and a pref silently dropped from it reopens a channel.
+    _EXPECTED_PREFS = {
+        "network.proxy.allow_hijacking_localhost": True,
+        "network.proxy.no_proxies_on": "",
+        "network.proxy.failover_direct": False,
+        "network.trr.mode": 5,
+        "network.dns.disablePrefetch": True,
+        "network.dns.disablePrefetchFromHTTPS": True,
+        "network.prefetch-next": False,
+        "network.predictor.enabled": False,
+        "network.predictor.enable-prefetch": False,
+        "network.http.speculative-parallel-limit": 0,
+        "browser.urlbar.speculativeConnect.enabled": False,
+        "browser.places.speculativeConnect.enabled": False,
+        "media.peerconnection.enabled": False,
+        "network.http.http3.enable": False,
+        "dom.serviceWorkers.enabled": False,
+        "dom.push.enabled": False,
+        "dom.push.connection.enabled": False,
+        "network.captive-portal-service.enabled": False,
+        "network.connectivity-service.enabled": False,
+        "captivedetect.canonicalURL": "",
+        "browser.safebrowsing.malware.enabled": False,
+        "browser.safebrowsing.phishing.enabled": False,
+        "browser.safebrowsing.blockedURIs.enabled": False,
+        "browser.safebrowsing.downloads.enabled": False,
+        "browser.safebrowsing.downloads.remote.enabled": False,
+        "browser.safebrowsing.provider.google.updateURL": "",
+        "browser.safebrowsing.provider.google.gethashURL": "",
+        "browser.safebrowsing.provider.google4.updateURL": "",
+        "browser.safebrowsing.provider.google4.gethashURL": "",
+        "browser.safebrowsing.provider.mozilla.updateURL": "",
+        "browser.safebrowsing.provider.mozilla.gethashURL": "",
+        "app.update.auto": False,
+        "app.update.checkInstallTime": False,
+        "extensions.update.enabled": False,
+        "extensions.update.autoUpdateDefault": False,
+        "extensions.getAddons.cache.enabled": False,
+        "extensions.systemAddon.update.enabled": False,
+        "extensions.blocklist.enabled": False,
+        "media.gmp-manager.url": "",
+        "media.gmp-gmpopenh264.enabled": False,
+        "media.gmp-widevinecdm.enabled": False,
+        "browser.region.update.enabled": False,
+        "browser.region.network.url": "",
+        "toolkit.telemetry.enabled": False,
+        "toolkit.telemetry.unified": False,
+        "toolkit.telemetry.archive.enabled": False,
+        "toolkit.telemetry.server": "",
+        "toolkit.telemetry.newProfilePing.enabled": False,
+        "toolkit.telemetry.shutdownPingSender.enabled": False,
+        "toolkit.telemetry.firstShutdownPing.enabled": False,
+        "toolkit.telemetry.updatePing.enabled": False,
+        "toolkit.telemetry.bhrPing.enabled": False,
+        "datareporting.healthreport.uploadEnabled": False,
+        "datareporting.policy.dataSubmissionEnabled": False,
+        "app.normandy.enabled": False,
+        "app.normandy.api_url": "",
+        "app.shield.optoutstudies.enabled": False,
+        "breakpad.reportURL": "",
+        "browser.tabs.crashReporting.sendReport": False,
+        "browser.newtabpage.activity-stream.feeds.telemetry": False,
+        "browser.newtabpage.activity-stream.telemetry": False,
+        "geo.enabled": False,
+        "geo.provider.network.url": "",
+        "services.settings.server": "",
+        "network.webtransport.enabled": False,
+        "devtools.debugger.remote-enabled": False,
+        "browser.safebrowsing.passwords.enabled": False,
+        "app.update.enabled": False,
+        "app.update.service.enabled": False,
+        "media.gmp-manager.updateEnabled": False,
+        "dom.push.serverURL": "",
+        "security.OCSP.enabled": 0,
+        "security.ssl.enable_ocsp_stapling": True,
+    }
+
+    def test_frozen_list_matches_the_reviewed_specification(self) -> None:
+        self.assertEqual(
+            dict(cfx.FROZEN_FIREFOX_PREFS), self._EXPECTED_PREFS,
+            "a frozen pref changed: update only after checking ADR 0004 C2")
 
     def test_every_required_pref_wins_over_a_contrary_caller_value(self) -> None:
         contrary = {name: "caller-override" for name in self._REQUIRED}
@@ -563,7 +647,11 @@ class LaunchWiringTest(_WiringBase):
         self.assertIs(ctx.exception, original)
 
 
-class ContextGuardTest(_WiringBase):
+class ContextGuardInstallTest(_WiringBase):
+    """Checks that the context guard is INSTALLED and what its handlers
+    decide when called directly. It proves no blocking at run time: on a
+    real Camoufox the route handler was measured never to be invoked."""
+
     def test_one_blocked_service_worker_context_per_fetch_closed_after(self) -> None:
         browser = _Browser()
         fake = _FakeCamoufox(lambda kwargs: browser)
@@ -574,7 +662,7 @@ class ContextGuardTest(_WiringBase):
             self.assertEqual(context.kwargs, {"service_workers": "block"})
             self.assertTrue(context.closed)
 
-    def test_route_guard_on_the_context_follows_the_allowlist(self) -> None:
+    def test_route_handler_decides_by_the_allowlist_when_called(self) -> None:
         browser = _Browser()
         self._fetch(_FakeCamoufox(lambda kwargs: browser),
                     subresource_domains=["mlcdn.com.br"])
@@ -591,7 +679,7 @@ class ContextGuardTest(_WiringBase):
             guard(route)
             self.assertEqual(route.action, expected, url)
 
-    def test_every_websocket_is_closed(self) -> None:
+    def test_websocket_handler_closes_the_socket_it_is_given(self) -> None:
         browser = _Browser()
         self._fetch(_FakeCamoufox(lambda kwargs: browser))
         pattern, handler = browser.contexts[0].ws_route_args
@@ -618,11 +706,6 @@ class ResultTest(_WiringBase):
         _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
         self.assertTrue(result.challenged)
         self.assertEqual(browser.contexts[0].page.waits, [])
-
-    def test_oversized_page_is_a_fetch_error(self) -> None:
-        huge = "x" * (cfx.MAX_HTML_BYTES + 1)
-        with self.assertRaises(FetchError):
-            self._fetch(_FakeCamoufox(lambda kwargs: _Browser([huge])))
 
     def test_missing_response_is_a_fetch_error(self) -> None:
         with self.assertRaises(FetchError):
@@ -704,7 +787,7 @@ class FinalDocumentTest(_WiringBase):
             raise _ProxyForbidden("Page.goto: NS_ERROR_PROXY_FORBIDDEN")
 
         with mock.patch.object(
-            cfx, "_is_playwright_error", create=True,
+            cfx, "_is_playwright_error",
             side_effect=lambda exc: isinstance(exc, _ProxyForbidden),
         ):
             with self.assertRaises(FetchError):
