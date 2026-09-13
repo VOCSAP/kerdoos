@@ -31,7 +31,7 @@ sent.
 Kerdoos is a hexagonal (ports and adapters) application. The core knows only
 stable **ports**, never concrete tools:
 
-- `Fetcher` -- resolve access to a URL (escalating anti-bot tiers).
+- `Fetcher` -- resolve access to a URL (anti-bot tiers of increasing cost).
 - `Parser` -- extract price, currency, and availability from a page.
 - `ConfigStore` -- source of configuration (sites, products, jobs).
 - `StateStore` -- persistence of scrape history.
