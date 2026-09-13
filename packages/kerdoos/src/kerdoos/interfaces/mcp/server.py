@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from urllib.parse import quote, urlsplit
 
 from mcp.server import MCPServer
@@ -11,6 +12,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from kerdoos.config import Settings
 from kerdoos.core.app.auth import AuthService
@@ -19,6 +21,28 @@ from kerdoos.interfaces.mcp.tools import register_tools
 
 MOUNT_PATH = "/mcp"
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class McpMount:
+    server: MCPServer
+    app: Starlette
+    discovery_routes: list[Route]
+
+
+class ExactMountPathMiddleware:
+    """Answers a request on exactly MOUNT_PATH as if it targeted
+    MOUNT_PATH + "/", so the advertised resource URL is served without the
+    307 slash redirect a Mount produces."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"] == MOUNT_PATH:
+            scope = dict(
+                scope, path=f"{MOUNT_PATH}/", raw_path=f"{MOUNT_PATH}/".encode())
+        await self.app(scope, receive, send)
 
 
 def _public_url(settings: Settings) -> str:
@@ -30,7 +54,8 @@ def _public_url(settings: Settings) -> str:
             "from which the Host allowlist is derived.")
     try:
         parts = urlsplit(raw)
-        parts.port
+        # urlsplit validates the port only when .port is read.
+        _ = parts.port
     except ValueError:
         parts = None
     if (parts is None or parts.scheme not in ("http", "https")
@@ -39,9 +64,9 @@ def _public_url(settings: Settings) -> str:
         raise RuntimeError(
             f"KERDOOS_PUBLIC_URL={raw!r} must be an http(s) URL with a host "
             "and no credentials, query or fragment.")
-    # The advertised discovery URL is rebuilt from this path; one that is
-    # not already in its percent-encoded form would be advertised but never
-    # served.
+    # The advertised discovery URL is rebuilt from this path: any character
+    # outside the unreserved set, a percent-escape included, risks being
+    # advertised in a form the route does not match.
     if parts.path != quote(parts.path, safe="/-._~"):
         raise RuntimeError(
             f"KERDOOS_PUBLIC_URL={raw!r} has a path with characters outside "
@@ -70,7 +95,7 @@ def _allowed_hosts(settings: Settings, public_url: str) -> list[str]:
 
 def build_mcp_server(
     settings: Settings, auth_service: AuthService,
-) -> tuple[MCPServer, Starlette, list[Route]]:
+) -> McpMount:
     """Return the server (whose session_manager the host lifespan must run),
     the ASGI app to mount at MOUNT_PATH, and the discovery routes the host
     app must serve at its own root. Raises RuntimeError on an unusable
@@ -111,4 +136,4 @@ def build_mcp_server(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts),
     )
-    return mcp, app, discovery_routes
+    return McpMount(server=mcp, app=app, discovery_routes=discovery_routes)

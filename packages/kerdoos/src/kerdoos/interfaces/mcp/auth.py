@@ -24,6 +24,9 @@ class KerdoosTokenVerifier:
         principal = await asyncio.to_thread(self._auth.verify_bearer, token)
         if principal is None:
             return None
+        # scopes carries the Kerdoos role for current_principal(). Never set
+        # AuthSettings.required_scopes: it would turn a role into an access
+        # requirement enforced by the SDK.
         return AccessToken(
             token=token, client_id=principal.owner_id,
             subject=principal.owner_id, scopes=[principal.role])

@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
 
-from kerdoos.config import get_settings
+from kerdoos.config import DEFAULT_MCP_MAX_SESSIONS, get_settings
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import Principal
 from kerdoos.interfaces.web.app import create_app
@@ -29,13 +29,12 @@ from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 _PROTOCOL_VERSION = "2025-11-25"
 _METADATA_PATH = "/mcp/.well-known/oauth-protected-resource/mcp"
-_FORBIDDEN_TOOLS = frozenset({
-    "create_token", "list_tokens", "revoke_token", "revoke_all", "set_email",
-    "add_site"})
+_EXPOSED_TOOLS = frozenset({"whoami"})
 _OWNER_ID = "owner-5f1c9e"
 _OWNER_NAME = "alice-mcp"
 _MCP_ENV_VARS = (
-    "KERDOOS_MCP_ENABLED", "KERDOOS_PUBLIC_URL", "KERDOOS_MCP_ALLOWED_HOSTS")
+    "KERDOOS_MCP_ENABLED", "KERDOOS_PUBLIC_URL", "KERDOOS_MCP_ALLOWED_HOSTS",
+    "KERDOOS_MCP_MAX_SESSIONS", "KERDOOS_MCP_SESSION_IDLE_TIMEOUT_SECONDS")
 
 
 def _base_env(directory: str) -> dict[str, str]:
@@ -146,7 +145,7 @@ class _McpTestBase(unittest.TestCase):
             conn.close()
 
     def _post(self, body: dict, *, authorization: str | None = None,
-              headers: dict[str, str] | None = None):
+              headers: dict[str, str] | None = None, path: str = "/mcp"):
         request_headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
@@ -155,7 +154,8 @@ class _McpTestBase(unittest.TestCase):
             request_headers["Authorization"] = authorization
         request_headers.update(headers or {})
         return self.client.post(
-            "/mcp/", content=json.dumps(body), headers=request_headers)
+            path, content=json.dumps(body), headers=request_headers,
+            follow_redirects=False)
 
     def _bearer_for_new_owner(self, role: str = "user") -> str:
         self._add_owner(_OWNER_ID, _OWNER_NAME, role=role)
@@ -294,20 +294,38 @@ class BearerGateTest(_McpTestBase):
     def test_metadata_url_advertised_by_the_401_is_served(self) -> None:
         self._assert_advertised_metadata_is_served()
 
-    def test_no_tool_mints_credentials_touches_identity_or_takes_an_owner(
+    def test_tool_surface_is_exactly_the_allowlist_and_takes_no_owner(
         self,
     ) -> None:
         responses = self._request_in_session(
             self._bearer_for_new_owner(), "tools/list", {})
         tools = _jsonrpc_payload(responses[-1])["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        self.assertIn("whoami", names)
-        with self.subTest(check="credential and identity tools"):
-            self.assertEqual(names & _FORBIDDEN_TOOLS, set())
+        with self.subTest(check="exposed tool names"):
+            self.assertEqual(
+                names, _EXPOSED_TOOLS,
+                "tool surface changed: extend _EXPOSED_TOOLS only after "
+                "checking ADR 0005 D3")
         for tool in tools:
             for schema in ("inputSchema", "outputSchema"):
                 with self.subTest(tool=tool["name"], schema=schema):
                     self.assertEqual(_owner_keys(tool.get(schema) or {}), [])
+
+    def test_announced_resource_path_is_served_without_redirect(self) -> None:
+        resource = self.client.get(_METADATA_PATH).json()["resource"]
+        path = urlsplit(resource).path
+        authorization = self._bearer_for_new_owner()
+        expected = {"anonymous": 401, "authenticated": 200}
+        for label, value in (("anonymous", None),
+                             ("authenticated", authorization)):
+            with self.subTest(request=label):
+                response = self._post(
+                    _initialize(), authorization=value, path=path)
+                self.assertEqual(
+                    response.status_code, expected[label],
+                    f"{path} announced as the resource, got "
+                    f"{response.status_code} to "
+                    f"{response.headers.get('location')}")
 
     def test_unauthenticated_resource_metadata_names_no_owner(self) -> None:
         self._add_owner(_OWNER_ID, _OWNER_NAME)
@@ -360,9 +378,7 @@ class DefaultSessionBoundTest(_McpTestBase):
 
     def test_default_bound_applies_without_configuration(self) -> None:
         bound = get_settings().mcp_max_sessions
-        self.assertLess(
-            bound, 1000,
-            "a bound this large lets one token holder pin hundreds of MB")
+        self.assertEqual(bound, DEFAULT_MCP_MAX_SESSIONS)
         authorization = self._bearer_for_new_owner()
         for _ in range(bound):
             opened = self._post(_initialize(), authorization=authorization)
@@ -466,6 +482,17 @@ class McpBootTest(unittest.TestCase):
             with self.assertNoLogs(
                     "kerdoos.interfaces.mcp.server", level="WARNING"):
                 create_app()
+
+    def test_mcp_with_several_workers_logs_a_warning(self) -> None:
+        env = self._mcp_env("https://kerdoos.lan")
+        env["KERDOOS_WORKERS"] = "2"
+        with mock.patch.dict(os.environ, env):
+            with self.assertLogs(
+                    "kerdoos.interfaces.web.app", level="WARNING") as logs:
+                create_app()
+        self.assertTrue(
+            any("KERDOOS_WORKERS" in line and "MCP" in line
+                for line in logs.output), logs.output)
 
     def test_enabling_mcp_leaves_the_root_logger_untouched(self) -> None:
         env = _base_env(self._dir)

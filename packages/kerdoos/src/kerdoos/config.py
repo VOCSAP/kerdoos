@@ -117,6 +117,16 @@ fetch_timeout_seconds), same floor-with-warning discipline and StaticRouter
 injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. MEASURED: none of
 get_page_source/current_url/quit, nor a client-side Selenium command
 timeout, are bounded on their own when Chrome freezes after navigation.
+
+KERDOOS_MCP_ENABLED (ADR 0005, card 362d5dab): mounts the MCP server at /mcp
+in the WebUI app; default off. When on, KERDOOS_PUBLIC_URL (the URL MCP
+clients use) is required, create_app refuses to start without it, and the
+Host allowlist, OAuth issuer and resource URL derive from it.
+KERDOOS_MCP_ALLOWED_HOSTS adds comma-separated Host values (wildcards
+refused). KERDOOS_MCP_MAX_SESSIONS / KERDOOS_MCP_SESSION_IDLE_TIMEOUT_SECONDS
+bound the MCP sessions one process keeps (defaults 32 and 300 s; the SDK's
+own 10000 sessions / 1800 s let a single token holder exhaust memory shared
+with the WebUI). Same floor-with-warning discipline.
 """
 
 from __future__ import annotations
@@ -298,12 +308,11 @@ class Settings:
     browser_fetch_timeout_seconds: float
     browser_max_abandoned_fetches: int
     uc_fetch_timeout_seconds: float
-    mcp_enabled: bool = False
-    public_url: str | None = None
-    mcp_allowed_hosts: tuple[str, ...] = ()
-    mcp_max_sessions: int = DEFAULT_MCP_MAX_SESSIONS
-    mcp_session_idle_timeout_seconds: float = (
-        DEFAULT_MCP_SESSION_IDLE_TIMEOUT_SECONDS)
+    mcp_enabled: bool
+    public_url: str | None
+    mcp_allowed_hosts: tuple[str, ...]
+    mcp_max_sessions: int
+    mcp_session_idle_timeout_seconds: float
 
     def require_session_secret(self) -> str:
         if not self.session_secret:

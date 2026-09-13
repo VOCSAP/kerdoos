@@ -40,7 +40,8 @@ from kerdoos.core.evaluator import (
 from kerdoos.core.run_queue import RunQueue
 from kerdoos.digest.factory import build_sender
 from kerdoos.interfaces.boot_checks import log_unavailable_fetcher_tiers
-from kerdoos.interfaces.mcp.server import MOUNT_PATH, build_mcp_server
+from kerdoos.interfaces.mcp.server import (
+    MOUNT_PATH, ExactMountPathMiddleware, build_mcp_server)
 from kerdoos.interfaces.web import health
 from kerdoos.interfaces.web.routers import admin, protected, public, web
 from kerdoos.interfaces.web.security import SessionCookie
@@ -117,9 +118,15 @@ def create_app() -> FastAPI:
             login_rate_limit_row_cap=settings.login_rate_limit_row_cap,
         ),
         Argon2Hasher())
-    mcp_server, mcp_app, mcp_discovery_routes = (
+    mcp_mount = (
         build_mcp_server(settings, auth_service)
-        if settings.mcp_enabled else (None, None, []))
+        if settings.mcp_enabled else None)
+    if mcp_mount is not None and settings.workers > 1:
+        logger.warning(
+            "MCP: KERDOOS_MCP_ENABLED with KERDOOS_WORKERS=%d > 1 -- MCP "
+            "sessions live in a single worker process, so a client whose "
+            "next request reaches another worker loses its session "
+            "(ADR 0005).", settings.workers)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -155,9 +162,9 @@ def create_app() -> FastAPI:
             async with contextlib.AsyncExitStack() as stack:
                 # A Mount never runs its sub-app's lifespan: without this the
                 # first /mcp request raises "Task group is not initialized".
-                if mcp_server is not None:
+                if mcp_mount is not None:
                     await stack.enter_async_context(
-                        mcp_server.session_manager.run())
+                        mcp_mount.server.session_manager.run())
                 yield
         finally:
             if evaluator_task is not None:
@@ -195,7 +202,8 @@ def create_app() -> FastAPI:
     app.include_router(protected.router)
     app.include_router(admin.router)
     app.include_router(web.router)  # tenant HTML views (verify_session + CSRF)
-    if mcp_app is not None:
-        app.router.routes.extend(mcp_discovery_routes)
-        app.mount(MOUNT_PATH, mcp_app)
+    if mcp_mount is not None:
+        app.router.routes.extend(mcp_mount.discovery_routes)
+        app.mount(MOUNT_PATH, mcp_mount.app)
+        app.add_middleware(ExactMountPathMiddleware)
     return app
