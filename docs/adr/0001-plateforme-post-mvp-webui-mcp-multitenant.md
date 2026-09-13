@@ -823,6 +823,15 @@ re-pin par hop deja en place dans `http.py`, conservee).
 
 ## 10. (Q2) Montage du serveur MCP : same-app ASGI (tranche)
 
+> **Renvoi ([ADR 0005](./0005-serveur-mcp-same-app.md), 2026-09-13)** : "FastMCP"
+> ci-dessous designe la classe `MCPServer` du SDK officiel `mcp` v2 (`FastMCP` y
+> est renommee, l'ancien chemin `mcp.server.fastmcp` supprime) et non le paquet
+> tiers `fastmcp`. Le montage n'est pas un simple `include_router` : le
+> lifespan du sous-app monte ne s'execute pas, `create_app` doit entrer
+> `mcp.session_manager.run()` dans son propre lifespan. Bibliotheque, auth
+> (`TokenVerifier` sur `AuthService.verify_bearer`), surface de tools et
+> tranches : ADR 0005.
+
 **Decision operateur : same-app ASGI.** FastMCP est monte dans la **meme
 application ASGI** que la WebUI (une sous-app / route montee). Un seul process, un
 seul deploiement (section 8). Benefices : resolution de principal + `AppService` +

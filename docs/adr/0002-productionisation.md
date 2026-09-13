@@ -439,6 +439,16 @@ jamais `core/`" reste **inchange** et garanti par la separation de packages.
 
 ## Decision 9 -- Point de branchement MCP (Phase 5, confirme topologie-neutre)
 
+> **Renvoi ([ADR 0005](./0005-serveur-mcp-same-app.md), 2026-09-13)** : deux
+> affirmations ci-dessous sont corrigees. (1) "FastMCP" designe la classe
+> `MCPServer` du SDK officiel `mcp` v2 (renommage, ancien chemin supprime), pas
+> le paquet tiers `fastmcp`. (2) "Aucun rework du composition root" est faux a
+> la marge : le lifespan du sous-app monte ne s'execute pas, `create_app` doit
+> entrer `mcp.session_manager.run()` dans son propre lifespan, et
+> `deps.verify_bearer` existe mais n'a jamais ete exerce par une requete HTTP.
+> La topologie Docker (meme container, meme process, meme uvicorn) reste
+> inchangee.
+
 Le serveur MCP (FastMCP) se monte **same-app ASGI** : `create_app` inclut le
 sub-app / router MCP ; `bearer -> Principal` est **deja construit** (`verify_bearer`
 existe depuis Phase 4a). Meme container, meme process, meme uvicorn, **+ routes**.
