@@ -178,9 +178,11 @@ d'architecture du `README.md` enumerent aujourd'hui quatre barreaux et s'arreten
   seule image qui franchit Akamai n'est pas celle que l'operateur lance par defaut ;
   toute configuration de site en `camoufox` est fail-closed sur l'image standard.
   **Retenue dans la premiere version de cet ADR, annulee par la revision operateur.**
-- **B -- Binaire toujours present dans `autonomous`, actif d'office.** *Cout* : environ
-  +1,5 a 2,5 Go (estimation, mesure due en T2) sur l'image par defaut, pour tous les
-  deploiements `autonomous`, y compris ceux qui ne surveillent aucun site Akamai.
+- **B -- Binaire toujours present dans `autonomous`, actif d'office.** *Cout* :
+  **+2,20 Go mesures en T2** (image `autonomous` a 4,62 Go contre 2,42 Go avant
+  Camoufox, dont 1,29 Go pour la seule couche du binaire ; l'estimation initiale de
+  +1,5 a 2,5 Go tombait juste) sur l'image par defaut, pour tous les deploiements
+  `autonomous`, y compris ceux qui ne surveillent aucun site Akamai.
   *Risque* : la surface de securite de Firefox s'ajoute a celle de Chromium dans
   l'image par defaut, ce qui rend le durcissement de la Decision 8 obligatoire et non
   plus local a une variante. *Reversibilite* : bonne, la cible reste une cible du
@@ -219,14 +221,21 @@ resolution dynamique, pas un epinglage.
 - Le Dockerfile telecharge l'**URL d'asset exacte** du tag retenu. Son sha256 est un
   `ARG` du Dockerfile, verifie au build (echec du build sinon), et recoupe **au moment de
   la capture** avec le digest publie par GitHub pour cet asset.
-- Provenance notee a cote de l'`ARG` : tag, URL d'asset, digest GitHub, date de
-  capture.
+- **Provenance** notee a cote de l'`ARG`, dans le Dockerfile : tag amont, URL d'asset
+  exacte, digest publie par GitHub, version de Firefox de base. **Contexte de
+  capture** (date, outil, qui a recoupe le digest) dans le **message du commit** qui
+  introduit ou change le digest, jamais dans le code : la convention du depot refuse
+  les dates dans les commentaires (garde de commentaires), et le pin `UC_DRIVER_SHA256`
+  de l'ADR 0002 a deja tranche ainsi. La version precedente de cette exigence demandait
+  la date de capture a cote de l'`ARG` ; elle ne pouvait etre satisfaite qu'en
+  contournant le garde, ce qui en faisait une exigence mal ecrite. (Revise le
+  2026-09-13.)
 - Les addons embarques et les donnees `browserforge` sont epingles de la meme facon
   (URL exacte + sha256), jamais resolus au build.
 - Si un `GITHUB_TOKEN` sert au build (limite de debit de l'API) : secret BuildKit
   uniquement, jamais en `ARG` ni en `ENV`, jamais present a l'execution.
-- Taille de l'image **mesuree** sur l'image reelle en tranche T2 (le delta de +1,5 a
-  2,5 Go reste une estimation).
+- Taille de l'image **mesuree en T2** : 4,62 Go contre 2,42 Go avant Camoufox, soit
+  +2,20 Go dont 1,29 Go pour la couche du binaire.
 
 ### Licence MPL-2.0 du binaire embarque
 
@@ -380,16 +389,28 @@ comme un second rempart ; elle ne l'est pas sur ce tier) :
   CONNECT est juge deux fois par le proxy, domaine avant resolution puis IP apres
   (C1, preuves "hote hors allowlist" et anti-rebinding). Ce sont ces deux couches que
   la tracabilite compte, et que T4 doit prouver separement.
-- **La garde de contexte est conservee dans le code au rang de "meilleur effort, non
-  compte"** : elle ne coute rien, elle peut mordre sur une autre version du couple, et
-  T4-11 mesure si elle mord. Aucun document, aucune docstring, aucun test ne peut la
-  presenter comme un rempart tant que T4-11 ne l'a pas vue s'executer sur le thread du
-  fetch. Regle de decision de T4-11 : si `page.route` (ou `context.route`) invoque son
-  handler sur le thread du fetch pour une sous-ressource hors allowlist, la garde est
-  re-promue rempart sur la forme mesuree (page ou contexte) et sa docstring le dit ;
-  si aucune forme ne mord sur l'image reelle (lock 1.61.0), le code de la garde est
-  **retire** de l'adaptateur, parce qu'un rempart inerte est une fausse assurance
-  que la prochaine revue recomptera.
+- **La garde de contexte est RETIREE de l'adaptateur `camoufox`** (T4-11 executee le
+  2026-09-13, resultat ci-dessous). La version precedente de ce point la conservait
+  "au rang de meilleur effort, non comptee" en attendant la mesure ; la regle de
+  decision qu'elle fixait (un handler jamais appele sur le thread du fetch = garde
+  retiree) a fait son office. **Ne pas la reintroduire**, meme de bonne foi et meme
+  sur une autre version du couple, sans une nouvelle preuve T4-11 positive : deux
+  motifs de retrait, pas un.
+  1. **Inerte** : sur l'image reelle avec le playwright du lock (1.61.0, et non le
+     1.62.0 de l'image de spike du premier constat), le handler de `context.route` est
+     invoque ZERO fois sur trois essais.
+  2. **Nuisible la ou elle etait censee proteger** : en A/B a une seule variable,
+     reproduit deux fois sur deux, AVEC la garde un fetch sur une page qui ouvre
+     beaucoup de canaux part en timeout total de 90 s (99,4 s puis 108,6 s de tenue
+     de la porte) ; SANS elle, le meme fetch rend 200 en 16,2 s puis 19,0 s. Un fetch
+     normal rend un resultat en 7,5 s avec la garde : elle ne casse pas tous les
+     fetches, elle degrade precisement les pages hostiles, celles qui multiplient les
+     canaux. Une garde qui n'arrete rien ET qui transforme les pages qu'elle vise en
+     timeouts de porte n'est pas neutre a conserver : c'est un cout de liveness paye
+     sur la porte partagee (Decision 3) sans aucun benefice de securite. L'argument
+     "elle ne coute rien" de la version precedente etait faux, et non anticipe.
+  Le retrait couvre `context.route` et `route_web_socket` ; `service_workers="block"`
+  reste (structure du contexte), son effet etant mesure par T4-4.
 - **Voie ecartee pour l'instant** : un rempart intra-navigateur par WebExtension
   (`webRequest.onBeforeRequest` bloquant, allowlist par fetch, chargee par
   `addons=`). Il serait reel et independant de l'interception Playwright, mais il
@@ -398,9 +419,16 @@ comme un second rempart ; elle ne l'est pas sur ce tier) :
   issues daijro/camoufox #271 et #428, lues le 2026-09-13) et un cout de
   construction que rien ne justifie tant que la preuve T4-10 tient. A rouvrir
   seulement si T4-10 ou T4-2 revele une sortie hors proxy.
-- La meme question est posee au tier `browser` (patchright/Chromium) : sa docstring
-  compte aussi `context.route` en defense en profondeur, sans mesure. T4-11 est
-  execute sur les deux tiers.
+- **Le tier `browser` (patchright/Chromium) porte la meme construction** (`context.route`
+  + `route_web_socket` + `service_workers="block"`), qualifiee depuis T3 de "meilleur
+  effort, non comptee" dans sa docstring, jamais mesuree. La meme mesure lui est due,
+  sous le nom **T4-11-browser**, avec la meme regle de decision ET le meme A/B de
+  liveness (page multi-canaux avec et sans garde, duree du fetch et tenue de la
+  porte) : le resultat Camoufox ne se transpose pas (autre navigateur, autre
+  mecanisme d'interception), mais le risque qu'il a revele, une garde qui coute sur
+  la porte partagee sans mordre, vaut pour tout rempart intra-navigateur. Tant que
+  T4-11-browser n'est pas executee, la garde du tier `browser` reste non comptee et
+  son cout de liveness est inconnu.
 
 ### Preuves d'execution exigees (tranche T4, dans l'image, `KERDOOS_REQUIRE_IMAGE_TESTS=1`)
 Chaque preuve est **jugee au contenu** (titre, code d'erreur, journal), jamais a la
@@ -434,16 +462,28 @@ des centaines de Ko.
   zero connexion sur les ecouteurs de test, zero `connect`/`sendto`/`sendmsg` hors
   proxy dans `strace` (T4-2), et une ligne de refus du proxy par canal. C'est la preuve
   que la couche "aucune sortie sans CONNECT" tient seule.
-- **T4-11 (C3 revise) -- la garde mord-elle ?** Sur l'image reelle (playwright du
-  lock), la meme page charge `<img src="https://bloque.example/x.png">` et ouvre un
-  `WebSocket` vers un hote hors allowlist ; le handler de garde journalise, en
-  premiere instruction, le nom du thread courant et l'URL. Attendu pour re-promouvoir
-  la garde : au moins un appel dont le thread est celui du fetch (`camoufox-fetch`)
-  et dont l'URL est `bloque.example`, ET aucun CONNECT `bloque.example` dans le
-  journal du proxy (la garde a refuse avant le proxy). Les deux formes sont mesurees,
-  `context.route` puis `page.route`, et `route_web_socket` de la meme facon. Un
-  handler jamais appele = garde retiree du code (regle de decision de C3). Execute
-  aussi sur le tier `browser`.
+- **T4-11 (C3 revise) -- la garde mord-elle ? EXECUTEE le 2026-09-13 en T2, par le
+  release-engineer, sur l'image `autonomous` reelle avec le playwright du lock
+  (1.61.0).** Methode : handler de `context.route` journalisant en premiere
+  instruction le thread courant et l'URL, page multi-canaux servie sur un hote
+  allowliste avec des sous-ressources hors allowlist ; puis A/B a une seule variable
+  (garde posee / garde absente) sur la meme page, deux repetitions. Resultat :
+  handler invoque **zero fois sur trois essais** ; avec la garde, le fetch multi-
+  canaux atteint le timeout total de 90 s (tenue de la porte 99,4 s puis 108,6 s) ;
+  sans la garde, 200 en 16,2 s puis 19,0 s ; un fetch normal rend en 7,5 s avec la
+  garde. Verdict par la regle de decision : **garde retiree** de l'adaptateur
+  `camoufox` (`context.route` et `route_web_socket`). La forme initiale de cette
+  preuve (attendu pour re-promouvoir : au moins un appel sur le thread `camoufox-fetch`
+  pour `bloque.example` sans CONNECT correspondant au proxy) reste la forme a
+  rejouer si quelqu'un veut reintroduire une garde intra-navigateur sur ce tier.
+- **T4-11-browser -- meme preuve sur le tier `browser` (patchright/Chromium), NON
+  EXECUTEE.** Handler journalisant thread + URL, `<img src="https://bloque.example/
+  x.png">` et un `WebSocket` hors allowlist, formes `context.route`, `page.route` et
+  `route_web_socket`, PLUS l'A/B de liveness (page multi-canaux avec et sans garde,
+  duree du fetch et tenue de la porte, deux repetitions). Regle de decision
+  identique : jamais appele, ou appele mais degradant les fetches, = retrait ;
+  appele sur le thread du fetch sans degradation = re-promotion au rang de rempart
+  avec sa docstring. Due en T4.
 
 ## Decision 5 -- Liveness : lecons obligatoires des tiers Chromium
 
@@ -495,6 +535,21 @@ exigees ici des la tranche T1 :
   - **assertion au build** : le build echoue si la version du binaire ne satisfait pas
     le plancher calcule ; tout changement de version de Playwright ou de patchright
     dans `uv.lock` force donc la reverification du binaire au build.
+    **Mesure en T2** : cette assertion a mordu des le premier build, parce que le
+    fichier `version.json` que la readiness lit a cote du binaire **n'est pas dans
+    l'archive amont** ; c'est l'installeur du paquet (`camoufox fetch`, que C4
+    interdit) qui l'ecrit apres extraction. Sans l'assertion, l'image aurait ete
+    livree avec un tier qui se declare indisponible a chaque scrape (fail-closed
+    silencieux, patron 3aeb8a19). Exigence explicite depuis : le Dockerfile ecrit
+    lui-meme `version.json` (version et build du tag epingle) a cote du binaire,
+    et l'assertion de readiness au build reste la preuve que l'image livre une
+    installation que l'adaptateur accepte.
+- **Bruit de journal, mesure en T1/T2** : chaque lancement emet un `LeakWarning`
+  `proxy_without_geoip` que `i_know_what_im_doing=True` ne masque pas. Il est
+  supprime par un filtre de warnings pose **une seule fois, au niveau du module**
+  de l'adaptateur, jamais par lancement : les filtres de `warnings` sont globaux au
+  process, et deux fetches concurrents qui poseraient et retireraient chacun le
+  leur se marcheraient dessus.
 - Le registre du routeur recoit le tier `camoufox` (module et fabrique).
 - Le paquet Camoufox depend de Playwright, et l'image contient deja patchright :
   cohabitation presumee sans conflit (noms de module distincts), a verifier par la
@@ -599,7 +654,7 @@ mise a jour le rende "meilleure" que Camoufox. »
 |---|---|---|
 | C1 | Allowlist de domaines dans le proxy, point de controle suffisant | Decision 4 (C1), tranche T0.5 |
 | C2 | Preferences Firefox imposees, OCSP tranche | Decision 4 (C2) |
-| C3 | Structure du contexte + proxy inevitable comme second rempart ; garde de contexte "meilleur effort, non comptee" jusqu'a T4-11 | Decision 4 (C3 revise), preuves T4-10 et T4-11 |
+| C3 | Structure du contexte + proxy inevitable comme second rempart ; garde de contexte RETIREE du tier `camoufox` (T4-11 executee : inerte et degradant les pages hostiles) ; T4-11-browser due | Decision 4 (C3 referme), preuves T4-10, T4-11, T4-11-browser |
 | C4 | Build deterministe, provenance, secrets de build | Decision 2 (build deterministe) |
 | C5 | Zero telechargement a l'execution, par construction | Decision 1 (disponibilite), Decision 6 |
 | C6 | Durcissement de l'image | Decision 8 |
@@ -613,9 +668,9 @@ mise a jour le rende "meilleure" que Camoufox. »
   herite des protections deja mesurees (porte unique, liveness) ; l'allowlist de
   domaines dans le proxy ferme un trou preexistant du tier `browser` ; l'image
   `autonomous` passe non-root, ce qu'elle aurait du etre de toute facon.
-- **Negatives / dettes** : environ +1,5 a 2,5 Go (estimation) sur l'image par defaut,
-  pour tous les deploiements `autonomous`, y compris ceux qui ne surveillent aucun
-  site protege ; un pic memoire par place qui passe d'environ 0,65 a environ 1,26 Go ;
+- **Negatives / dettes** : +2,20 Go mesures (4,62 Go contre 2,42 Go) sur l'image par
+  defaut, pour tous les deploiements `autonomous`, y compris ceux qui ne surveillent
+  aucun site protege ; un pic memoire par place qui passe d'environ 0,65 a environ 1,26 Go ;
   un binaire de plus a re-epingler a chaque release de securite amont de Firefox ; une
   dependance tierce MPL-2.0 dans l'image (obligation dormante tant qu'aucune image
   n'est publiee) ; OCSP desactive sur ce tier ; un tier `uc` conserve sans usage
@@ -645,8 +700,10 @@ decision operateur requise :
    resolution de `uv.lock` en T1 et par les tests en image en T4.
 3. **Routage de MercadoLivre** : pose sur un seul echantillon, confirme ou infirme en
    T4 ; retour a `browser` si T4 n'y confirme pas Camoufox.
-4. **Taille reelle de l'image** : l'estimation de +1,5 a 2,5 Go n'est pas une mesure ;
-   T2 la remplace par la mesure.
+4. **Taille reelle de l'image** : **fermee en T2**, mesuree a 4,62 Go contre 2,42 Go
+   (+2,20 Go, dont 1,29 Go pour la couche du binaire).
+5. **T4-11-browser** : la garde de contexte du tier `browser` n'a jamais ete mesuree ;
+   sa preuve (Decision 4, C3) est due en T4, avec l'A/B de liveness.
 
 ## Changelog
 
@@ -693,3 +750,19 @@ decision operateur requise :
   retrait sur mesure. La voie WebExtension est ecartee tant que T4-10 tient. Le
   tier `browser` passe par la meme mesure. Arbitrage architecte a la demande du
   team-lead ; ratification au titre du mandat d'autonomie.
+- **2026-09-13 -- T4-11 executee, C3 referme, mesures de T2 versees**. T4-11 (image
+  reelle, playwright du lock 1.61.0) : handler de `context.route` invoque zero fois
+  sur trois essais, et A/B reproduit deux fois : avec la garde un fetch multi-canaux
+  atteint le timeout de 90 s (99,4 s puis 108,6 s), sans elle 200 en 16,2 s puis
+  19,0 s ; un fetch normal rend en 7,5 s avec la garde. La garde est RETIREE du tier
+  `camoufox` pour deux motifs, inerte et degradant precisement les pages hostiles ;
+  le tier `browser` recoit la preuve T4-11-browser (non executee). L'exigence de
+  provenance de C4 est reecrite : provenance dans l'`ARG`, contexte de capture dans
+  le message de commit, jamais de date dans le code (convention du depot, precedent
+  `UC_DRIVER_SHA256`). Mesures de T2 versees : image `autonomous` a 4,62 Go contre
+  2,42 Go (+2,20 Go, 1,29 Go de couche binaire) ; l'assertion de readiness au build a
+  mordu au premier build parce que `version.json` n'est pas dans l'archive amont
+  (ecrit par l'installeur du paquet), le Dockerfile l'ecrit desormais ; le
+  `LeakWarning proxy_without_geoip` est filtre une fois au niveau module (filtres
+  globaux au process). Question ouverte 4 fermee, question 5 (T4-11-browser)
+  ouverte.
