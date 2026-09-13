@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
+from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
 
@@ -67,6 +68,13 @@ def _jsonrpc_payload(response) -> dict:
                 if line.startswith("data:")]
         return json.loads(data[-1])
     return response.json()
+
+
+def _advertised_metadata_url(rejected_response) -> str:
+    challenge = rejected_response.headers["www-authenticate"]
+    marker = 'resource_metadata="'
+    start = challenge.index(marker) + len(marker)
+    return challenge[start:challenge.index('"', start)]
 
 
 def _sha256(token: str) -> str:
@@ -144,6 +152,22 @@ class _McpTestBase(unittest.TestCase):
              "params": {"name": "whoami", "arguments": {}}},
             authorization=authorization, headers=session)
         return [init, initialized, call]
+
+    def _assert_advertised_metadata_is_served(self) -> None:
+        rejected = self._post(_initialize())
+        self.assertEqual(rejected.status_code, 401)
+        advertised = urlsplit(_advertised_metadata_url(rejected))
+        self.assertEqual(advertised.netloc, "testserver")
+        served = self.client.get(advertised.path)
+        self.assertEqual(
+            served.status_code, 200,
+            f"{advertised.path} is advertised by the 401 but not served")
+        in_mount = self.client.get(f"/mcp{advertised.path}")
+        self.assertEqual(in_mount.status_code, 200, in_mount.text)
+        self.assertEqual(served.json(), in_mount.json())
+        self.assertEqual(
+            served.json()["resource"],
+            os.environ["KERDOOS_PUBLIC_URL"] + "/mcp")
 
 
 class BearerGateTest(_McpTestBase):
@@ -240,6 +264,9 @@ class BearerGateTest(_McpTestBase):
             for message in handler.messages:
                 self.assertNotIn(secret_value, message)
 
+    def test_metadata_url_advertised_by_the_401_is_served(self) -> None:
+        self._assert_advertised_metadata_is_served()
+
     def test_unauthenticated_resource_metadata_names_no_owner(self) -> None:
         self._add_owner(_OWNER_ID, _OWNER_NAME)
         metadata = self.client.get(_METADATA_PATH)
@@ -260,6 +287,16 @@ class HostAllowlistTest(_McpTestBase):
             _initialize(), authorization=f"Bearer {token}",
             headers={"Host": "attacker.example"})
         self.assertEqual(response.status_code, 421)
+
+
+class PublicUrlWithPathTest(_McpTestBase):
+    extra_env = {
+        "KERDOOS_PUBLIC_URL": "http://testserver/kerdoos",
+        "KERDOOS_MCP_ALLOWED_HOSTS": "testserver",
+    }
+
+    def test_metadata_url_advertised_by_the_401_is_served(self) -> None:
+        self._assert_advertised_metadata_is_served()
 
 
 class ExtraAllowedHostTest(_McpTestBase):
@@ -302,6 +339,27 @@ class McpBootTest(unittest.TestCase):
                     with self.assertRaisesRegex(
                             RuntimeError, "KERDOOS_MCP_ALLOWED_HOSTS"):
                         create_app()
+
+    def test_enabling_mcp_leaves_the_root_logger_untouched(self) -> None:
+        env = _base_env(self._dir)
+        env.update({
+            "KERDOOS_MCP_ENABLED": "true",
+            "KERDOOS_PUBLIC_URL": "http://testserver",
+        })
+        _patch_env(self, env)
+        root = logging.getLogger()
+        saved_handlers, saved_level = root.handlers[:], root.level
+        # An empty root is the only state in which basicConfig acts.
+        root.handlers[:] = []
+        root.setLevel(logging.WARNING)
+        try:
+            create_app()
+            handlers_after, level_after = root.handlers[:], root.level
+        finally:
+            root.handlers[:] = saved_handlers
+            root.setLevel(saved_level)
+        self.assertEqual(handlers_after, [])
+        self.assertEqual(logging.getLevelName(level_after), "WARNING")
 
     def test_disabled_by_default_mounts_nothing(self) -> None:
         _patch_env(self, _base_env(self._dir))

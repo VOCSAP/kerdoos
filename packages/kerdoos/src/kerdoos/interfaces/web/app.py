@@ -117,9 +117,9 @@ def create_app() -> FastAPI:
             login_rate_limit_row_cap=settings.login_rate_limit_row_cap,
         ),
         Argon2Hasher())
-    mcp_server, mcp_app = (
+    mcp_server, mcp_app, mcp_discovery_routes = (
         build_mcp_server(settings, auth_service)
-        if settings.mcp_enabled else (None, None))
+        if settings.mcp_enabled else (None, None, []))
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -196,5 +196,6 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(web.router)  # tenant HTML views (verify_session + CSRF)
     if mcp_app is not None:
+        app.router.routes.extend(mcp_discovery_routes)
         app.mount(MOUNT_PATH, mcp_app)
     return app
