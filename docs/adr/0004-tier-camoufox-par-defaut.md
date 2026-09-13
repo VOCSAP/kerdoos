@@ -401,8 +401,11 @@ comme un second rempart ; elle ne l'est pas sur ce tier) :
      invoque ZERO fois sur trois essais.
   2. **Nuisible la ou elle etait censee proteger** : en A/B a une seule variable,
      reproduit deux fois sur deux, AVEC la garde un fetch sur une page qui ouvre
-     beaucoup de canaux part en timeout total de 90 s (99,4 s puis 108,6 s de tenue
-     de la porte) ; SANS elle, le meme fetch rend 200 en 16,2 s puis 19,0 s. Un fetch
+     beaucoup de canaux part en timeout total de 90 s (duree du fetch mesuree en
+     temps mural par la sonde, fetch plus une pause d'une seconde et le teardown :
+     99,4 s puis 108,6 s ; que la porte soit tenue pendant l'essentiel de cet
+     intervalle est DEDUIT du cycle de l'adaptateur, pas mesure) ; SANS elle, le
+     meme fetch rend 200 en 16,2 s puis 19,0 s (meme temps mural). Un fetch
      normal rend un resultat en 7,5 s avec la garde : elle ne casse pas tous les
      fetches, elle degrade precisement les pages hostiles, celles qui multiplient les
      canaux. Une garde qui n'arrete rien ET qui transforme les pages qu'elle vise en
@@ -469,8 +472,10 @@ des centaines de Ko.
   allowliste avec des sous-ressources hors allowlist ; puis A/B a une seule variable
   (garde posee / garde absente) sur la meme page, deux repetitions. Resultat :
   handler invoque **zero fois sur trois essais** ; avec la garde, le fetch multi-
-  canaux atteint le timeout total de 90 s (tenue de la porte 99,4 s puis 108,6 s) ;
-  sans la garde, 200 en 16,2 s puis 19,0 s ; un fetch normal rend en 7,5 s avec la
+  canaux atteint le timeout total de 90 s (duree du fetch en temps mural de la sonde,
+  fetch plus une pause d'une seconde et teardown : 99,4 s puis 108,6 s ; la tenue de
+  la porte sur l'essentiel de cet intervalle est deduite, non mesuree) ; sans la
+  garde, 200 en 16,2 s puis 19,0 s (meme temps mural) ; un fetch normal rend en 7,5 s avec la
   garde. Verdict par la regle de decision : **garde retiree** de l'adaptateur
   `camoufox` (`context.route` et `route_web_socket`). La forme initiale de cette
   preuve (attendu pour re-promouvoir : au moins un appel sur le thread `camoufox-fetch`
@@ -537,8 +542,11 @@ exigees ici des la tranche T1 :
     dans `uv.lock` force donc la reverification du binaire au build.
     **Mesure en T2** : cette assertion a mordu des le premier build, parce que le
     fichier `version.json` que la readiness lit a cote du binaire **n'est pas dans
-    l'archive amont** ; c'est l'installeur du paquet (`camoufox fetch`, que C4
-    interdit) qui l'ecrit apres extraction. Sans l'assertion, l'image aurait ete
+    l'archive amont** ; c'est la methode `set_version()` du module `pkgman` du
+    paquet qui l'ecrit apres extraction, sur le chemin d'installation dont
+    `camoufox fetch` (interdit par C4) n'est qu'un declencheur parmi d'autres. C'est
+    pourquoi un telechargement deterministe qui remplace ce chemin doit produire le
+    fichier lui-meme. Sans l'assertion, l'image aurait ete
     livree avec un tier qui se declare indisponible a chaque scrape (fail-closed
     silencieux, patron 3aeb8a19). Exigence explicite depuis : le Dockerfile ecrit
     lui-meme `version.json` (version et build du tag epingle) a cote du binaire,
@@ -753,8 +761,9 @@ decision operateur requise :
 - **2026-09-13 -- T4-11 executee, C3 referme, mesures de T2 versees**. T4-11 (image
   reelle, playwright du lock 1.61.0) : handler de `context.route` invoque zero fois
   sur trois essais, et A/B reproduit deux fois : avec la garde un fetch multi-canaux
-  atteint le timeout de 90 s (99,4 s puis 108,6 s), sans elle 200 en 16,2 s puis
-  19,0 s ; un fetch normal rend en 7,5 s avec la garde. La garde est RETIREE du tier
+  atteint le timeout de 90 s (temps mural de la sonde 99,4 s puis 108,6 s, tenue de
+  la porte deduite), sans elle 200 en 16,2 s puis 19,0 s ; un fetch normal rend en
+  7,5 s avec la garde. La garde est RETIREE du tier
   `camoufox` pour deux motifs, inerte et degradant precisement les pages hostiles ;
   le tier `browser` recoit la preuve T4-11-browser (non executee). L'exigence de
   provenance de C4 est reecrite : provenance dans l'`ARG`, contexte de capture dans
@@ -762,7 +771,8 @@ decision operateur requise :
   `UC_DRIVER_SHA256`). Mesures de T2 versees : image `autonomous` a 4,62 Go contre
   2,42 Go (+2,20 Go, 1,29 Go de couche binaire) ; l'assertion de readiness au build a
   mordu au premier build parce que `version.json` n'est pas dans l'archive amont
-  (ecrit par l'installeur du paquet), le Dockerfile l'ecrit desormais ; le
+  (ecrit par `pkgman.set_version()` sur le chemin d'installation du paquet), le
+  Dockerfile l'ecrit desormais ; le
   `LeakWarning proxy_without_geoip` est filtre une fois au niveau module (filtres
   globaux au process). Question ouverte 4 fermee, question 5 (T4-11-browser)
   ouverte.
