@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from mcp.server import MCPServer
 from mcp.server.auth.routes import create_protected_resource_routes
@@ -18,6 +18,7 @@ from kerdoos.interfaces.mcp.auth import KerdoosTokenVerifier
 from kerdoos.interfaces.mcp.tools import register_tools
 
 MOUNT_PATH = "/mcp"
+logger = logging.getLogger(__name__)
 
 
 def _public_url(settings: Settings) -> str:
@@ -38,6 +39,17 @@ def _public_url(settings: Settings) -> str:
         raise RuntimeError(
             f"KERDOOS_PUBLIC_URL={raw!r} must be an http(s) URL with a host "
             "and no credentials, query or fragment.")
+    # The advertised discovery URL is rebuilt from this path; one that is
+    # not already in its percent-encoded form would be advertised but never
+    # served.
+    if parts.path != quote(parts.path, safe="/-._~"):
+        raise RuntimeError(
+            f"KERDOOS_PUBLIC_URL={raw!r} has a path with characters outside "
+            "the unreserved URL set (letters, digits, '/-._~').")
+    if parts.scheme == "http":
+        logger.warning(
+            "KERDOOS_PUBLIC_URL=%s is plain http: bearer tokens sent to the "
+            "MCP endpoint travel unencrypted.", raw)
     return raw.rstrip("/")
 
 
@@ -93,6 +105,8 @@ def build_mcp_server(
         scopes_supported=auth.required_scopes)
     app = mcp.streamable_http_app(
         streamable_http_path="/",
+        max_sessions=settings.mcp_max_sessions,
+        session_idle_timeout=settings.mcp_session_idle_timeout_seconds,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts),

@@ -12,6 +12,7 @@ import secrets
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
 
+from kerdoos.config import get_settings
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import Principal
 from kerdoos.interfaces.web.app import create_app
@@ -27,6 +29,9 @@ from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 _PROTOCOL_VERSION = "2025-11-25"
 _METADATA_PATH = "/mcp/.well-known/oauth-protected-resource/mcp"
+_FORBIDDEN_TOOLS = frozenset({
+    "create_token", "list_tokens", "revoke_token", "revoke_all", "set_email",
+    "add_site"})
 _OWNER_ID = "owner-5f1c9e"
 _OWNER_NAME = "alice-mcp"
 _MCP_ENV_VARS = (
@@ -79,6 +84,19 @@ def _advertised_metadata_url(rejected_response) -> str:
 
 def _sha256(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _owner_keys(schema) -> list[str]:
+    found: list[str] = []
+    if isinstance(schema, dict):
+        for key, value in schema.items():
+            if "owner" in key.lower():
+                found.append(key)
+            found.extend(_owner_keys(value))
+    elif isinstance(schema, list):
+        for item in schema:
+            found.extend(_owner_keys(item))
+    return found
 
 
 class _RecordingHandler(logging.Handler):
@@ -139,7 +157,13 @@ class _McpTestBase(unittest.TestCase):
         return self.client.post(
             "/mcp/", content=json.dumps(body), headers=request_headers)
 
-    def _whoami(self, authorization: str) -> list:
+    def _bearer_for_new_owner(self, role: str = "user") -> str:
+        self._add_owner(_OWNER_ID, _OWNER_NAME, role=role)
+        return f"Bearer {self.auth.create_token(Principal(_OWNER_ID, role)).token}"
+
+    def _request_in_session(
+        self, authorization: str, method: str, params: dict,
+    ) -> list:
         init = self._post(_initialize(), authorization=authorization)
         session = {"mcp-protocol-version": _PROTOCOL_VERSION}
         if "mcp-session-id" in init.headers:
@@ -148,10 +172,13 @@ class _McpTestBase(unittest.TestCase):
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             authorization=authorization, headers=session)
         call = self._post(
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-             "params": {"name": "whoami", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 2, "method": method, "params": params},
             authorization=authorization, headers=session)
         return [init, initialized, call]
+
+    def _whoami(self, authorization: str) -> list:
+        return self._request_in_session(
+            authorization, "tools/call", {"name": "whoami", "arguments": {}})
 
     def _assert_advertised_metadata_is_served(self) -> None:
         rejected = self._post(_initialize())
@@ -267,6 +294,21 @@ class BearerGateTest(_McpTestBase):
     def test_metadata_url_advertised_by_the_401_is_served(self) -> None:
         self._assert_advertised_metadata_is_served()
 
+    def test_no_tool_mints_credentials_touches_identity_or_takes_an_owner(
+        self,
+    ) -> None:
+        responses = self._request_in_session(
+            self._bearer_for_new_owner(), "tools/list", {})
+        tools = _jsonrpc_payload(responses[-1])["result"]["tools"]
+        names = {tool["name"] for tool in tools}
+        self.assertIn("whoami", names)
+        with self.subTest(check="credential and identity tools"):
+            self.assertEqual(names & _FORBIDDEN_TOOLS, set())
+        for tool in tools:
+            for schema in ("inputSchema", "outputSchema"):
+                with self.subTest(tool=tool["name"], schema=schema):
+                    self.assertEqual(_owner_keys(tool.get(schema) or {}), [])
+
     def test_unauthenticated_resource_metadata_names_no_owner(self) -> None:
         self._add_owner(_OWNER_ID, _OWNER_NAME)
         metadata = self.client.get(_METADATA_PATH)
@@ -297,6 +339,60 @@ class PublicUrlWithPathTest(_McpTestBase):
 
     def test_metadata_url_advertised_by_the_401_is_served(self) -> None:
         self._assert_advertised_metadata_is_served()
+
+
+class SessionBoundTest(_McpTestBase):
+    extra_env = {"KERDOOS_MCP_MAX_SESSIONS": "2"}
+
+    def test_session_beyond_the_bound_gets_503_while_the_webui_stays_up(
+        self,
+    ) -> None:
+        authorization = self._bearer_for_new_owner()
+        for _ in range(2):
+            opened = self._post(_initialize(), authorization=authorization)
+            self.assertEqual(opened.status_code, 200, opened.text)
+        refused = self._post(_initialize(), authorization=authorization)
+        self.assertEqual(refused.status_code, 503, refused.text)
+        self.assertEqual(self.client.get("/health").status_code, 200)
+
+
+class DefaultSessionBoundTest(_McpTestBase):
+
+    def test_default_bound_applies_without_configuration(self) -> None:
+        bound = get_settings().mcp_max_sessions
+        self.assertLess(
+            bound, 1000,
+            "a bound this large lets one token holder pin hundreds of MB")
+        authorization = self._bearer_for_new_owner()
+        for _ in range(bound):
+            opened = self._post(_initialize(), authorization=authorization)
+            self.assertEqual(opened.status_code, 200, opened.text)
+        refused = self._post(_initialize(), authorization=authorization)
+        self.assertEqual(refused.status_code, 503, refused.text)
+        self.assertEqual(self.client.get("/health").status_code, 200)
+
+
+class IdleSessionTest(_McpTestBase):
+    extra_env = {
+        "KERDOOS_MCP_MAX_SESSIONS": "1",
+        "KERDOOS_MCP_SESSION_IDLE_TIMEOUT_SECONDS": "1",
+    }
+
+    def test_idle_session_is_reclaimed_and_frees_its_slot(self) -> None:
+        authorization = self._bearer_for_new_owner()
+        self.assertEqual(
+            self._post(_initialize(), authorization=authorization).status_code,
+            200)
+        self.assertEqual(
+            self._post(_initialize(), authorization=authorization).status_code,
+            503)
+        deadline = time.monotonic() + 15
+        status = 503
+        while status == 503 and time.monotonic() < deadline:
+            time.sleep(0.25)
+            status = self._post(
+                _initialize(), authorization=authorization).status_code
+        self.assertEqual(status, 200)
 
 
 class ExtraAllowedHostTest(_McpTestBase):
@@ -340,6 +436,37 @@ class McpBootTest(unittest.TestCase):
                             RuntimeError, "KERDOOS_MCP_ALLOWED_HOSTS"):
                         create_app()
 
+    def _mcp_env(self, public_url: str) -> dict[str, str]:
+        env = _base_env(self._dir)
+        env.update({
+            "KERDOOS_MCP_ENABLED": "true", "KERDOOS_PUBLIC_URL": public_url})
+        return env
+
+    def test_public_url_path_that_is_not_url_safe_refuses_to_start(
+        self,
+    ) -> None:
+        for public_url in ("http://kerdoos.lan/a b",
+                           "http://kerdoos.lan/%2e%2e/admin",
+                           "http://kerdoos.lan/a%20b"):
+            with self.subTest(public_url=public_url):
+                with mock.patch.dict(os.environ, self._mcp_env(public_url)):
+                    with self.assertRaisesRegex(
+                            RuntimeError, "KERDOOS_PUBLIC_URL"):
+                        create_app()
+
+    def test_plain_http_public_url_logs_a_warning(self) -> None:
+        with mock.patch.dict(os.environ, self._mcp_env("http://kerdoos.lan")):
+            with self.assertLogs(
+                    "kerdoos.interfaces.mcp.server", level="WARNING") as logs:
+                create_app()
+        self.assertIn("KERDOOS_PUBLIC_URL", "\n".join(logs.output))
+
+    def test_https_public_url_logs_no_warning(self) -> None:
+        with mock.patch.dict(os.environ, self._mcp_env("https://kerdoos.lan")):
+            with self.assertNoLogs(
+                    "kerdoos.interfaces.mcp.server", level="WARNING"):
+                create_app()
+
     def test_enabling_mcp_leaves_the_root_logger_untouched(self) -> None:
         env = _base_env(self._dir)
         env.update({
@@ -367,7 +494,12 @@ class McpBootTest(unittest.TestCase):
         self.assertNotIn("/mcp", [getattr(route, "path", None) for route in app.routes])
         with TestClient(app) as client:
             response = client.post("/mcp/", json=_initialize())
+            discovery = {path: client.get(path).status_code for path in (
+                "/.well-known/oauth-protected-resource",
+                "/.well-known/oauth-protected-resource/mcp",
+                _METADATA_PATH)}
         self.assertEqual(response.status_code, 404)
+        self.assertEqual(discovery, dict.fromkeys(discovery, 404))
 
 
 if __name__ == "__main__":

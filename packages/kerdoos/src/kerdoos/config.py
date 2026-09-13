@@ -259,6 +259,12 @@ DEFAULT_BROWSER_MAX_ABANDONED_FETCHES = _BROWSER_TIER_MAX_ABANDONED_FETCHES
 # so an unset env var falls back to exactly what UcFetcher would use anyway.
 DEFAULT_UC_FETCH_TIMEOUT_SECONDS = float(_UC_TIER_FETCH_TIMEOUT_SECONDS)
 
+# Card 362d5dab: bounds the memory a single bearer token holder can pin
+# through MCP sessions in the process shared with the WebUI. The SDK
+# defaults (10000 sessions, 1800 s idle) let one tenant exhaust it.
+DEFAULT_MCP_MAX_SESSIONS = 32
+DEFAULT_MCP_SESSION_IDLE_TIMEOUT_SECONDS = 300.0
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -295,6 +301,9 @@ class Settings:
     mcp_enabled: bool = False
     public_url: str | None = None
     mcp_allowed_hosts: tuple[str, ...] = ()
+    mcp_max_sessions: int = DEFAULT_MCP_MAX_SESSIONS
+    mcp_session_idle_timeout_seconds: float = (
+        DEFAULT_MCP_SESSION_IDLE_TIMEOUT_SECONDS)
 
     def require_session_secret(self) -> str:
         if not self.session_secret:
@@ -583,4 +592,11 @@ def get_settings() -> Settings:
             host.strip()
             for host in os.environ.get("KERDOOS_MCP_ALLOWED_HOSTS", "").split(",")
             if host.strip()),
+        mcp_max_sessions=_env_number(
+            "KERDOOS_MCP_MAX_SESSIONS", DEFAULT_MCP_MAX_SESSIONS, int,
+            lambda v: v > 0),
+        mcp_session_idle_timeout_seconds=_env_number(
+            "KERDOOS_MCP_SESSION_IDLE_TIMEOUT_SECONDS",
+            DEFAULT_MCP_SESSION_IDLE_TIMEOUT_SECONDS, float,
+            lambda v: 0 < v < float("inf")),
     )
