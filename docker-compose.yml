@@ -24,7 +24,8 @@
 # Port 9222 (Chromium CDP) is never mapped and must stay that way. Port 8000
 # is bound to loopback only -- put a reverse proxy in front for LAN access,
 # do not widen this to "8000:8000" (that publishes on every interface,
-# including any WAN/VPN one the host may have).
+# including any WAN/VPN one the host may have). That proxy is only trusted
+# for the client IP once KERDOOS_FORWARDED_ALLOW_IPS names it in `.env`.
 
 services:
   kerdoos-slim:

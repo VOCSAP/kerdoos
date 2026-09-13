@@ -84,6 +84,12 @@ its own digests, and needs only an SMTP relay (read from configuration, never
 hardcoded) and a volume for its SQLite databases. The specific host is a
 deployment detail, not a design constraint.
 
+Behind a reverse proxy, set `KERDOOS_FORWARDED_ALLOW_IPS` to the address the
+proxy connects from (see `env.example`). Left unset, Kerdoos trusts no
+forwarding header: every request appears to come from the proxy, so the `/login`
+rate limit and the logs see a single address. Keep the list as narrow as the
+proxy itself: any trusted address can forge the client IP.
+
 ## License
 
 See [LICENSE](./LICENSE).

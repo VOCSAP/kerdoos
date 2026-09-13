@@ -64,7 +64,12 @@ ENV KERDOOS_CONFIG_DB=/data/config.db \
     KERDOOS_STATE_DB=/data/state.db \
     KERDOOS_DIGEST_EVALUATOR_ENABLED=true
 
+# --no-proxy-headers when KERDOOS_FORWARDED_ALLOW_IPS is empty, rather than
+# omitting the flag: uvicorn would otherwise still trust 127.0.0.1 and any
+# FORWARDED_ALLOW_IPS present in the environment, letting a forged
+# X-Forwarded-For through.
 EXPOSE 8000
+
 # Shell form + exec: KERDOOS_WORKERS drives the REAL uvicorn worker count
 # (not just the digest evaluator's workers>1 guard-rail), so "N workers +
 # the intra-process evaluator both on" is unreachable by construction --
@@ -80,8 +85,13 @@ CMD case "$KERDOOS_WORKERS" in \
       ''|*[!0-9]*) W=1 ;; \
       *) W="$KERDOOS_WORKERS"; [ "$W" -gt 32 ] && W=32 ;; \
     esac; \
+    if [ -n "$KERDOOS_FORWARDED_ALLOW_IPS" ]; then \
+      set -- --proxy-headers --forwarded-allow-ips "$KERDOOS_FORWARDED_ALLOW_IPS"; \
+    else \
+      set -- --no-proxy-headers; \
+    fi; \
     exec uvicorn kerdoos.interfaces.web.app:create_app --factory \
-      --host 0.0.0.0 --port 8000 --workers "$W"
+      --host 0.0.0.0 --port 8000 --workers "$W" "$@"
 
 # --- slim: http + tls tiers, web extra (uvicorn) -----------------------
 FROM base AS slim
