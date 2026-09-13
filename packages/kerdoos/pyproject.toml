@@ -26,7 +26,13 @@ dependencies = [
 web = ["uvicorn[standard]>=0.30"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "httpx>=0.27"]
+# uvicorn is in the `web` extra for runtime, and ALSO here: the Dockerfile
+# CMD's proxy-header tests drive uvicorn's own CLI parser and Config wiring
+# to resolve a client address. Without it in the dev group they skip, and a
+# skip in a suite that already has 27 of them is indistinguishable from a
+# pass -- the guard would be unprotected in exactly the environment the
+# contributing docs tell a developer to use.
+dev = ["pytest>=8.0", "httpx>=0.27", "uvicorn>=0.30"]
 
 # Makes `kerdoos digest` / `kerdoos run` / `kerdoos config ...` resolve to a
 # real executable (uv/pip install puts it on PATH) instead of only being

@@ -84,11 +84,17 @@ its own digests, and needs only an SMTP relay (read from configuration, never
 hardcoded) and a volume for its SQLite databases. The specific host is a
 deployment detail, not a design constraint.
 
-Behind a reverse proxy, set `KERDOOS_FORWARDED_ALLOW_IPS` to the address the
-proxy connects from (see `env.example`). Left unset, Kerdoos trusts no
-forwarding header: every request appears to come from the proxy, so the `/login`
-rate limit and the logs see a single address. Keep the list as narrow as the
-proxy itself: any trusted address can forge the client IP.
+Behind a reverse proxy, set `KERDOOS_FORWARDED_ALLOW_IPS` in the Docker image
+to the address the proxy connects from (see `env.example`). Left unset, the
+Docker image trusts no forwarding header: every request appears to come from
+the proxy, so the access log sees a single address. Keep the list as narrow as
+the proxy itself: any trusted address can forge the client IP, and a value that
+trusts everyone (`*`, or a `/0` CIDR) is refused at startup. Configure the
+proxy to overwrite `X-Forwarded-Proto` and append to `X-Forwarded-For` -- in
+nginx, `proxy_set_header X-Forwarded-Proto $scheme;` and `proxy_set_header
+X-Forwarded-For $proxy_add_x_forwarded_for;` -- otherwise a client can
+downgrade the scheme of the slash redirect, the one absolute URL the app
+generates.
 
 ## License
 

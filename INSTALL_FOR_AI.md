@@ -71,11 +71,17 @@ The WebUI is a FastAPI app built by the `create_app()` factory
 (`packages/kerdoos/src/kerdoos/interfaces/web/app.py`):
 
 ```bash
-uv run --extra web uvicorn kerdoos.interfaces.web.app:create_app --factory --host 0.0.0.0 --port 8000
+uv run --extra web uvicorn kerdoos.interfaces.web.app:create_app --factory --host 0.0.0.0 --port 8000 --no-proxy-headers
 ```
 
 `KERDOOS_SESSION_SECRET` is required (see Environment variables below); the
 app refuses to start without it.
+
+Only the Docker image's CMD reads `KERDOOS_FORWARDED_ALLOW_IPS`. A bare
+`uvicorn` launch like the one above must set the proxy flags itself:
+`--no-proxy-headers` when nothing is in front of it (otherwise uvicorn trusts
+127.0.0.1 and any `FORWARDED_ALLOW_IPS` in the environment), or
+`--proxy-headers --forwarded-allow-ips <proxy address>` behind a reverse proxy.
 
 ## Environment variables
 
@@ -90,6 +96,7 @@ operator-configured.
 | `KERDOOS_STATE_DB` | `state.db` | SQLite `StateStore` path. |
 | `KERDOOS_COOKIE_SECURE` | `true` | Set the session cookie's `Secure` flag; set `false` for a plain-HTTP LAN deployment. |
 | `KERDOOS_WORKERS` | `1` | Process count the operator has deployed; gates the digest evaluator's `workers>1` guard-rail. |
+| `KERDOOS_FORWARDED_ALLOW_IPS` | none (trust nothing) | Image CMD only. Reverse proxy address(es) allowed to set `X-Forwarded-For` / `X-Forwarded-Proto`. A value trusting everyone (`*`, `/0` CIDR) is refused with exit 64. |
 | `KERDOOS_DIGEST_EVALUATOR_ENABLED` | `false` | Opt-in switch for the WebUI's intra-process digest evaluator lifespan task. |
 | `KERDOOS_SMTP_HOST` | none | SMTP relay host. Digest mail falls back to a log-only sender until this is set. |
 | `KERDOOS_SMTP_PORT` | `587` | SMTP port (only applied once `KERDOOS_SMTP_HOST` is set). |

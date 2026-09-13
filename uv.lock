@@ -690,6 +690,7 @@ web = [
 dev = [
     { name = "httpx" },
     { name = "pytest" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -710,6 +711,7 @@ provides-extras = ["web"]
 dev = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=8.0" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [[package]]

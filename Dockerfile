@@ -64,12 +64,19 @@ ENV KERDOOS_CONFIG_DB=/data/config.db \
     KERDOOS_STATE_DB=/data/state.db \
     KERDOOS_DIGEST_EVALUATOR_ENABLED=true
 
+EXPOSE 8000
+
 # --no-proxy-headers when KERDOOS_FORWARDED_ALLOW_IPS is empty, rather than
 # omitting the flag: uvicorn would otherwise still trust 127.0.0.1 and any
 # FORWARDED_ALLOW_IPS present in the environment, letting a forged
 # X-Forwarded-For through.
-EXPOSE 8000
-
+#
+# The trust list is refused when it names every address. Refusing only "*"
+# would be bypassable: uvicorn resolves a /0 CIDR to the same always-true
+# match, and either form still trusts everything as one element of an
+# otherwise narrow list. Spaces are stripped first, and the value is wrapped
+# in commas so a list element is matched like a whole value.
+#
 # Shell form + exec: KERDOOS_WORKERS drives the REAL uvicorn worker count
 # (not just the digest evaluator's workers>1 guard-rail), so "N workers +
 # the intra-process evaluator both on" is unreachable by construction --
@@ -80,15 +87,23 @@ EXPOSE 8000
 # validated (falls back to 1 on empty/non-numeric input, clamped to 32) --
 # an unquoted `${VAR:-1}` word-splits on whitespace, and an unclamped huge
 # value forks enough processes to take the host down, typo or not.
+# The proxy flags go through the positional parameters because the trust
+# list may itself contain ", " and sh has no arrays: "$@" is the only way to
+# carry it as ONE word. Each branch appends to "$@" so a flag added later
+# composes instead of silently replacing the ones already set.
 # Both targets inherit this CMD unchanged; do not duplicate it per stage.
 CMD case "$KERDOOS_WORKERS" in \
       ''|*[!0-9]*) W=1 ;; \
       *) W="$KERDOOS_WORKERS"; [ "$W" -gt 32 ] && W=32 ;; \
     esac; \
+    v=$(printf '%s' "$KERDOOS_FORWARDED_ALLOW_IPS" | tr -d ' \t'); \
+    case ",$v," in *,\*,*|*/0,*) \
+      echo "KERDOOS_FORWARDED_ALLOW_IPS must name the proxy, not every address" >&2; exit 64 ;; \
+    esac; \
     if [ -n "$KERDOOS_FORWARDED_ALLOW_IPS" ]; then \
-      set -- --proxy-headers --forwarded-allow-ips "$KERDOOS_FORWARDED_ALLOW_IPS"; \
+      set -- "$@" --proxy-headers --forwarded-allow-ips "$KERDOOS_FORWARDED_ALLOW_IPS"; \
     else \
-      set -- --no-proxy-headers; \
+      set -- "$@" --no-proxy-headers; \
     fi; \
     exec uvicorn kerdoos.interfaces.web.app:create_app --factory \
       --host 0.0.0.0 --port 8000 --workers "$W" "$@"

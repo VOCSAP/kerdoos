@@ -48,7 +48,12 @@ def _launch_env(overrides: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def _launch_argv(overrides: dict[str, str]) -> list[str]:
+def _launch(overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the CMD with a stub `uvicorn` that echoes its argv.
+
+    Returns the raw result so a caller can assert on a REFUSED launch (a
+    non-zero exit and no argv at all), which `_launch_argv` cannot express.
+    """
     with tempfile.TemporaryDirectory() as stub_dir:
         stub = Path(stub_dir) / "uvicorn"
         stub.write_text(
@@ -56,9 +61,13 @@ def _launch_argv(overrides: dict[str, str]) -> list[str]:
         stub.chmod(0o755)
         env = _launch_env(overrides)
         env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")
-        result = subprocess.run(
+        return subprocess.run(
             [_SH, "-c", _cmd_script()], env=env, capture_output=True,
             text=True, timeout=30, check=False)
+
+
+def _launch_argv(overrides: dict[str, str]) -> list[str]:
+    result = _launch(overrides)
     assert result.returncode == 0, result.stderr
     return result.stdout.splitlines()
 
@@ -128,7 +137,56 @@ class DockerCmdProxyArgsTest(unittest.TestCase):
         self.assertEqual(argv[index + 1], "4")
 
 
-@unittest.skipUnless(_SH and _HAS_UVICORN, "sh or uvicorn not available")
+@unittest.skipUnless(_SH, "sh not available")
+class TrustEveryoneIsRefusedTest(unittest.TestCase):
+    """A trust list naming every address is refused before uvicorn runs.
+
+    uvicorn resolves `*` to always=True, and a `/0` CIDR to the same thing,
+    so a value that looks narrow ("172.20.0.1, 0.0.0.0/0") still trusts the
+    whole internet and lets any client forge its own address.
+    """
+
+    def _assert_refused(self, value: str) -> None:
+        result = _launch({"KERDOOS_FORWARDED_ALLOW_IPS": value})
+        self.assertEqual(
+            result.returncode, 64,
+            f"{value!r} must be refused with EX_USAGE, got {result.returncode}")
+        self.assertEqual(
+            result.stdout, "",
+            f"{value!r} reached uvicorn instead of being refused")
+
+    def test_bare_star_is_refused(self) -> None:
+        self._assert_refused("*")
+
+    def test_padded_star_is_refused(self) -> None:
+        self._assert_refused(" * ")
+
+    def test_star_inside_a_list_is_refused(self) -> None:
+        self._assert_refused("172.20.0.1,*")
+
+    def test_ipv4_default_route_is_refused(self) -> None:
+        self._assert_refused("0.0.0.0/0")
+
+    def test_ipv6_default_route_is_refused(self) -> None:
+        self._assert_refused("::/0")
+
+    def test_default_route_inside_a_padded_list_is_refused(self) -> None:
+        self._assert_refused("172.20.0.1, 0.0.0.0/0")
+
+    def test_narrow_trust_list_still_launches(self) -> None:
+        argv = _launch_argv({"KERDOOS_FORWARDED_ALLOW_IPS": _PROXY})
+        index = argv.index("--forwarded-allow-ips")
+        self.assertEqual(argv[index + 1], _PROXY)
+
+    def test_narrow_cidr_is_not_mistaken_for_a_default_route(self) -> None:
+        value = "198.51.100.0/24, 10.0.0.0/8"
+        argv = _launch_argv({"KERDOOS_FORWARDED_ALLOW_IPS": value})
+        index = argv.index("--forwarded-allow-ips")
+        self.assertEqual(argv[index + 1], value)
+
+
+@unittest.skipUnless(_SH, "sh not available")
+@unittest.skipUnless(_HAS_UVICORN, "uvicorn not available")
 class DockerCmdClientAddressTest(unittest.TestCase):
 
     def test_forged_header_from_loopback_peer_ignored_when_unset(self) -> None:
@@ -156,9 +214,14 @@ class DockerCmdClientAddressTest(unittest.TestCase):
         self.assertEqual(client, "198.51.100.200")
 
     def test_whitespace_only_trust_list_trusts_nothing(self) -> None:
+        # Peer 127.0.0.1 plus FORWARDED_ALLOW_IPS="*" exercises BOTH things a
+        # whitespace-only value must not reopen: uvicorn's implicit loopback
+        # trust and its env-var fallback. A peer that no list would trust
+        # anyway cannot tell the two apart, and passes either way.
         client = _resolved_client(
-            {"KERDOOS_FORWARDED_ALLOW_IPS": "   "}, _PROXY, _FORGED)
-        self.assertEqual(client, _PROXY)
+            {"KERDOOS_FORWARDED_ALLOW_IPS": "   ", "FORWARDED_ALLOW_IPS": "*"},
+            "127.0.0.1", _FORGED)
+        self.assertEqual(client, "127.0.0.1")
 
 
 if __name__ == "__main__":
