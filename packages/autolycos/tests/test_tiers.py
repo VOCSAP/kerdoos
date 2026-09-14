@@ -5,12 +5,13 @@ from __future__ import annotations
 import dataclasses
 import subprocess
 import sys
+import typing
 import unittest
 from unittest import mock
 
 from autolycos import tiers
 from autolycos.adapters import browser, camoufox, uc
-from autolycos.tiers import BudgetTerm, GateWarning, NavigationWarning
+from autolycos.tiers import BudgetTerm, GateWarning, NavigationWarning, TermName
 
 _TOOLS = ("playwright", "patchright", "playwright_stealth", "camoufox",
           "seleniumbase", "curl_cffi", "psutil")
@@ -178,6 +179,40 @@ class CamoufoxBudgetCheckTest(unittest.TestCase):
                         cleanup_terms=(
                             BudgetTerm("kill_wait_seconds", 4.0, count=2),
                             BudgetTerm("late_sweep_seconds", 3.0)))])
+
+
+class TermVocabularyTest(unittest.TestCase):
+    """The term names a consumer may look up are exactly the declared ones."""
+
+    def _forced_warnings(self) -> list[tiers.BudgetWarning]:
+        checks = {
+            "browser": tiers.BROWSER.check(
+                fetch_timeout_seconds=0.0, launch_timeout_seconds=1.0,
+                acquire_timeout_seconds=0.0),
+            "uc": tiers.UC.check(
+                fetch_timeout_seconds=0.0, orphan_sweep_delay_seconds=1.0,
+                acquire_timeout_seconds=0.0),
+            "camoufox": tiers.CAMOUFOX.check(
+                fetch_timeout_seconds=0.0, launch_timeout_seconds=1.0,
+                nav_timeout_seconds=1.0, acquire_timeout_seconds=0.0),
+        }
+        for tier, warnings in checks.items():
+            self.assertEqual(_conditions(warnings), ["navigation", "gate"],
+                             f"{tier}: a condition was not forced")
+        return [warning for warnings in checks.values()
+                for warning in warnings]
+
+    def test_emitted_names_are_exactly_the_declared_vocabulary(self) -> None:
+        emitted = set()
+        for warning in self._forced_warnings():
+            terms = (warning.terms if isinstance(warning, NavigationWarning)
+                     else warning.cleanup_terms)
+            emitted.update(term.name for term in terms)
+        declared = set(typing.get_args(TermName))
+        self.assertEqual(emitted - declared, set(),
+                         "emitted term names missing from TermName")
+        self.assertEqual(declared - emitted, set(),
+                         "TermName declares names no check emits")
 
 
 class ReExportTest(unittest.TestCase):

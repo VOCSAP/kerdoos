@@ -61,7 +61,7 @@ class DomainPolicy:
     """Caller-injected navigation-domain allowlist.
 
     autolycos is a generic anti-bot toolkit: it must not hardcode which
-    domains are legitimate to navigate to. The caller (kerdoos) constructs
+    domains are legitimate to navigate to. The caller constructs
     this from its own site catalogue and passes it into every Fetcher and
     into `validate_target`. A host is allowed iff it equals one of
     `allowed_domains` or is a subdomain (leading-dot match prevents suffix
@@ -100,7 +100,7 @@ def check_scheme_and_domain(url: str, domain_policy: DomainPolicy) -> tuple[str,
     Shared choke-point predicate (FD2): the ONE place that decides whether a
     url's scheme/host are structurally acceptable. Used by both
     validate_target (fetch-time gate, below) and
-    kerdoos.registry.url_validation.validate_source_url (config-mutation
+    the consumer's write-path URL validator (config-mutation
     gate) so the two independent SSRF gates can never drift apart on this
     check (ADR 0001 SSRF requirement #4: one predicate, no allowlist drift).
 

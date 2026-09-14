@@ -71,16 +71,17 @@ floor-with-warning discipline; keyed per owner_id (invariant 10).
 
 KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071): bounds the
 Chrome LAUNCH itself for the uc tier (default
-autolycos.tiers.UC.launch_timeout_seconds), same floor-with-warning discipline. Read here and
-INJECTED into autolycos.router.StaticRouter at composition-root time --
+autolycos.tiers.UC.launch_timeout_seconds), same floor-with-warning
+discipline. Read here and INJECTED into autolycos.router.StaticRouter at
+composition-root time --
 autolycos never reads this (or any other KERDOOS_*) env var itself
 (invariant 2).
 
 KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS (roadmap b3213f3c): bounds the
 Chromium LAUNCH itself for the browser tier (default
-autolycos.tiers.BROWSER.launch_timeout_seconds), same floor-with-warning discipline
-and the same StaticRouter injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS
-above.
+autolycos.tiers.BROWSER.launch_timeout_seconds), same floor-with-warning
+discipline and the same StaticRouter injection path as
+KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above.
 
 KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce): the delay of the
 uc tier's second orphan-process sweep, which runs SYNCHRONOUSLY, still
@@ -113,8 +114,9 @@ StaticRouter injection path; each refusal is also logged at ERROR.
 
 KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da): total deadline on the
 uc tier's navigate-through-quit cycle (default
-autolycos.tiers.UC.fetch_timeout_seconds), same floor-with-warning discipline and StaticRouter
-injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. MEASURED: none of
+autolycos.tiers.UC.fetch_timeout_seconds), same floor-with-warning
+discipline and StaticRouter injection path as
+KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. MEASURED: none of
 get_page_source/current_url/quit, nor a client-side Selenium command
 timeout, are bounded on their own when Chrome freezes after navigation.
 
@@ -414,18 +416,21 @@ def _safe_uc_orphan_sweep_delay(
     return clamped
 
 
+_Message = tuple[str, tuple[object, ...]]
+
+
 def _terms(terms: tuple[BudgetTerm, ...]) -> dict[str, BudgetTerm]:
     return {term.name: term for term in terms}
 
 
-def _browser_budget_message(warning: BudgetWarning) -> str:
+def _browser_budget_message(warning: BudgetWarning) -> _Message:
     if isinstance(warning, NavigationWarning):
         terms = _terms(warning.terms)
         return (
             "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=%s is not above the "
             "browser tier's own launch (%.1fs) + navigation (%.1fs) budget "
             "(%.1fs) -- a fetch could be abandoned before the launch or "
-            "navigation timeout it wraps ever gets a chance to fire.") % (
+            "navigation timeout it wraps ever gets a chance to fire."), (
             warning.fetch_timeout_seconds,
             terms["launch_timeout_seconds"].seconds,
             terms["nav_timeout_seconds"].seconds, warning.floor_seconds)
@@ -434,18 +439,18 @@ def _browser_budget_message(warning: BudgetWarning) -> str:
         "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- another caller "
         "waiting for the browser gate could time out its own wait "
         "before this fetch ever abandons its stuck launch and frees "
-        "the gate.") % (
+        "the gate."), (
         warning.fetch_timeout_seconds, warning.acquire_timeout_seconds)
 
 
-def _uc_budget_message(warning: BudgetWarning) -> str:
+def _uc_budget_message(warning: BudgetWarning) -> _Message:
     if isinstance(warning, NavigationWarning):
         terms = _terms(warning.terms)
         return (
             "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=%s is not above the uc tier's "
             "own page-load (%.1fs) + reconnect (%.1fs) + render (%.1fs) "
             "budget (%.1fs) -- a fetch could be abandoned before the "
-            "navigation timeout it wraps ever gets a chance to fire.") % (
+            "navigation timeout it wraps ever gets a chance to fire."), (
             warning.fetch_timeout_seconds,
             terms["page_load_timeout_seconds"].seconds,
             terms["reconnect_time"].seconds, terms["render_wait"].seconds,
@@ -458,21 +463,21 @@ def _uc_budget_message(warning: BudgetWarning) -> str:
         "plus the late sweep's %ss ceiling) would hold the browser gate "
         "for %.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS="
         "%s -- another caller waiting for that gate could time out its "
-        "own wait before this one ever frees it.") % (
+        "own wait before this one ever frees it."), (
         warning.fetch_timeout_seconds, warning.cleanup_seconds,
         kill_wait.count, kill_wait.seconds,
         terms["orphan_sweep_delay_seconds"].seconds, warning.held_seconds,
         warning.acquire_timeout_seconds)
 
 
-def _camoufox_budget_message(warning: BudgetWarning) -> str:
+def _camoufox_budget_message(warning: BudgetWarning) -> _Message:
     if isinstance(warning, NavigationWarning):
         terms = _terms(warning.terms)
         return (
             "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=%s is not above the "
             "camoufox tier's launch (%.1fs) + navigation (%.1fs) budget "
             "(%.1fs) -- a fetch could be abandoned before the timeout it "
-            "wraps ever gets a chance to fire.") % (
+            "wraps ever gets a chance to fire."), (
             warning.fetch_timeout_seconds,
             terms["launch_timeout_seconds"].seconds,
             terms["nav_timeout_seconds"].seconds, warning.floor_seconds)
@@ -483,7 +488,7 @@ def _camoufox_budget_message(warning: BudgetWarning) -> str:
         "late sweep's %.1fs grace) would hold the browser gate for "
         "%.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- "
         "another caller waiting for that gate could time out its own "
-        "wait before this one ever frees it.") % (
+        "wait before this one ever frees it."), (
         warning.fetch_timeout_seconds, warning.cleanup_seconds,
         terms["kill_wait_seconds"].seconds,
         terms["late_sweep_seconds"].seconds, warning.held_seconds,
@@ -492,7 +497,7 @@ def _camoufox_budget_message(warning: BudgetWarning) -> str:
 
 def _warn_once_per_condition(
     warnings: list[BudgetWarning], latches: Mapping[str, str],
-    message: Callable[[BudgetWarning], str],
+    message: Callable[[BudgetWarning], _Message],
 ) -> None:
     """WARNS, never refuses: a misordered tier budget degrades OTHER callers
     waiting for the shared browser gate, so a misconfigured deployment must
@@ -503,7 +508,8 @@ def _warn_once_per_condition(
     for warning in warnings:
         latch = latches[warning.condition]
         if not module_globals[latch]:
-            logger.warning("%s", message(warning))
+            template, args = message(warning)
+            logger.warning(template, *args)
             module_globals[latch] = True
 
 

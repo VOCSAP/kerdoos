@@ -79,10 +79,20 @@ def _autolycos_imports(source: str) -> list[tuple[str, str]]:
     return found
 
 
+def _dockerfile_snippets(text: str) -> list[str]:
+    return re.findall(r'python3 -c\s*\\?\s*"([^"]*)"', text)
+
+
 def _dockerfile_autolycos_imports(text: str) -> list[tuple[str, str]]:
-    snippets = re.findall(r'python3 -c\s*\\?\s*"([^"]*)"', text)
-    return [found for snippet in snippets
+    return [found for snippet in _dockerfile_snippets(text)
             for found in _autolycos_imports(snippet)]
+
+
+def _dockerfile_unscanned_mentions(text: str) -> int:
+    """autolycos mentions the snippet scan cannot see: another quoting,
+    another interpreter name, a comment."""
+    return text.count("autolycos.") - sum(
+        snippet.count("autolycos.") for snippet in _dockerfile_snippets(text))
 
 
 class ImportContractTest(unittest.TestCase):
@@ -197,6 +207,20 @@ class ImportContractTest(unittest.TestCase):
         ])
         self.assertEqual(_dockerfile_autolycos_imports(dockerfile),
                          [("autolycos.adapters.uc", "_find")])
+
+    def test_every_dockerfile_mention_sits_in_a_scanned_snippet(self) -> None:
+        self.assertEqual(
+            _dockerfile_unscanned_mentions(
+                DOCKERFILE.read_text(encoding="utf-8")), 0,
+            "an autolycos mention in the Dockerfile escapes the snippet scan")
+
+    def test_coverage_guard_counts_an_unscanned_mention(self) -> None:
+        for sample in (
+            "RUN X=$(python3 -c 'from autolycos.adapters.uc import _find')",
+            'RUN X=$(python -c "from autolycos.adapters.uc import _find")',
+        ):
+            with self.subTest(sample=sample):
+                self.assertEqual(_dockerfile_unscanned_mentions(sample), 1)
 
 
 if __name__ == "__main__":

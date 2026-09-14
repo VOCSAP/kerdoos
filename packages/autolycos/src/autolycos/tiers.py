@@ -23,10 +23,17 @@ __all__ = [
     "BROWSER", "CAMOUFOX", "CAMOUFOX_BROWSER_VERSION",
     "CAMOUFOX_EXECUTABLE_PATH", "UC", "BrowserBudget", "BudgetCondition",
     "BudgetTerm", "BudgetWarning", "CamoufoxBudget", "GateWarning",
-    "NavigationWarning", "UcBudget", "camoufox_ready", "chromium_executable",
+    "NavigationWarning", "TermName", "UcBudget", "camoufox_ready",
+    "chromium_executable",
 ]
 
 BudgetCondition = Literal["navigation", "gate"]
+
+TermName = Literal[
+    "launch_timeout_seconds", "nav_timeout_seconds",
+    "page_load_timeout_seconds", "reconnect_time", "render_wait",
+    "kill_wait_seconds", "orphan_sweep_delay_seconds", "late_sweep_seconds",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +41,7 @@ class BudgetTerm:
     """One summand of a budget: `count` times `seconds`. `name` is the budget
     field or check argument the value comes from."""
 
-    name: str
+    name: TermName
     seconds: float
     count: int = 1
 

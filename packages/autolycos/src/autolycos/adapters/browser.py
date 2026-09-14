@@ -74,7 +74,7 @@ NAV_TIMEOUT_MS = 30_000
 _WAIT_UNTIL = "networkidle"
 # Roadmap b3213f3c: bounds the Chromium LAUNCH itself (pw.chromium.launch),
 # which patchright otherwise bounds at its own 180s internal default --
-# longer than the 120s a caller typically waits to acquire the gate, so a
+# longer than any finite gate acquire timeout a caller sets, so a
 # stuck launch would hold the shared BrowserGate past every other caller's
 # own wait deadline. Kept below NAV_TIMEOUT_MS.
 BROWSER_LAUNCH_TIMEOUT_SECONDS = 20.0

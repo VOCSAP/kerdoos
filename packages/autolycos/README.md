@@ -90,9 +90,14 @@ which tool actually rendered the page.
   re-exported from `autolycos.errors`)
 - `autolycos.browser_gate`: `BrowserGate`
 - `autolycos.tiers`: the defaults of the browser-backed tiers (`BROWSER`,
-  `UC`, `CAMOUFOX`) and their budget checks, which report an out-of-order
-  setting as data (`NavigationWarning`, `GateWarning`, `BudgetTerm`) for you
-  to word; plus the install probes an image build runs (`chromium_executable`,
+  `UC`, `CAMOUFOX`, instances of `BrowserBudget`, `UcBudget`,
+  `CamoufoxBudget`) and their budget checks, which report an out-of-order
+  setting as data (a `BudgetWarning`: `NavigationWarning` or `GateWarning`,
+  made of `BudgetTerm`s) for you to word. A term's `name` is always one of `TermName`, so terms can be looked
+  up by name: `launch_timeout_seconds`, `nav_timeout_seconds`,
+  `page_load_timeout_seconds`, `reconnect_time`, `render_wait`,
+  `kill_wait_seconds`, `orphan_sweep_delay_seconds`, `late_sweep_seconds`.
+  Plus the install probes an image build runs (`chromium_executable`,
   `camoufox_ready`, `CAMOUFOX_BROWSER_VERSION`, `CAMOUFOX_EXECUTABLE_PATH`)
 
 Everything else (`adapters/*`, `challenge`, `egress_proxy`) is internal: the

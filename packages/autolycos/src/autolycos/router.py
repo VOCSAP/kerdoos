@@ -156,7 +156,7 @@ def tier_available(fetcher_name: str) -> bool:
     pass its own install check, with that adapter's default install location.
 
     An UNKNOWN tier name (not in _TIER_MODULES, e.g. a config typo landed in
-    config.db via `kerdoos config import`, which does not go through
+    config.db via the consumer's config import, which does not go through
     AppService.add_site's known_tiers() validation) is fail-closed -- reported
     as UNAVAILABLE, not available (card 3aeb8a19 F1). This is deliberately
     stricter than "tier-name validation only at add_site": add_source and

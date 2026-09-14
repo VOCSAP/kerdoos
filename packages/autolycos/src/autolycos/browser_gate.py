@@ -53,11 +53,10 @@ class BrowserGate:
             return
         if fcntl is None:
             logger.warning(
-                "max_concurrent is only enforced WITHIN this "
+                "BrowserGate(max_concurrent=%d) is only enforced WITHIN this "
                 "process on this platform (fcntl is unavailable, e.g. "
                 "Windows) -- separate processes launching Chromium are NOT "
-                "bounded against each other."
-            )
+                "bounded against each other.", max_concurrent)
             return
         lock_path = Path(lock_dir)
         lock_path.mkdir(parents=True, exist_ok=True)
