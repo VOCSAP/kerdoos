@@ -63,8 +63,13 @@ class _AddonsWithNewcomer(enum.Enum):
 
 
 class _Response:
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, main_frame: bool = True,
+                 navigation: bool = True) -> None:
         self.status = status
+        self.request = mock.Mock(
+            **{"is_navigation_request.return_value": navigation})
+        self.frame = mock.Mock(
+            parent_frame=None if main_frame else mock.Mock())
 
 
 class _Busy:
@@ -99,18 +104,34 @@ class _Page:
     semantics. Only a measurement on a real Firefox can prove those."""
 
     def __init__(self, contents: list, status: int | None,
-                 url: str = _URL) -> None:
+                 url: str = _URL, document_uri: str | None = None,
+                 later_responses: list | None = None) -> None:
         self._contents = list(contents)
         self._status = status
         self.url = url
+        self.document_uri = document_uri or url
+        self._later_responses = list(later_responses or [])
+        self._response_handlers: list = []
         self.goto_args: tuple | None = None
         self.waits: list[float] = []
         self.read_timeouts: list[float] = []
         self.content_reads = 0
 
+    def on(self, event: str, handler) -> None:  # noqa: ANN001
+        if event == "response":
+            self._response_handlers.append(handler)
+
+    def _emit(self, response: _Response) -> None:
+        for handler in self._response_handlers:
+            handler(response)
+
     def goto(self, url, wait_until, timeout):  # noqa: ANN001, ANN201
         self.goto_args = (url, wait_until, timeout)
-        return None if self._status is None else _Response(self._status)
+        if self._status is None:
+            return None
+        response = _Response(self._status)
+        self._emit(response)
+        return response
 
     def wait_for_timeout(self, ms: float) -> None:
         self.waits.append(ms)
@@ -128,6 +149,9 @@ class _Page:
 
     def wait_for_function(self, expression: str, arg, timeout):  # noqa: ANN001, ANN201
         self.read_timeouts.append(timeout)
+        later, self._later_responses = self._later_responses, []
+        for response in later:
+            self._emit(response)
         item = self._next()
         if isinstance(item, _Busy):
             if timeout and timeout / 1000 < item.seconds:
@@ -135,7 +159,9 @@ class _Page:
                 raise _PlaywrightTimeout(f"Timeout {timeout}ms exceeded")
             time.sleep(item.seconds)
             item = _PAGE
-        return _Handle(-1 if len(item) > arg else item)
+        if len(item) > arg:
+            return _Handle(-1)
+        return _Handle(f"{self.document_uri}\n{item}")
 
 
 class _Context:
@@ -161,15 +187,20 @@ class _Context:
 
 class _Browser:
     def __init__(self, contents: list | None = None,
-                 status: int | None = 200, url: str = _URL) -> None:
+                 status: int | None = 200, url: str = _URL,
+                 document_uri: str | None = None,
+                 later_responses: list | None = None) -> None:
         self._contents = contents if contents is not None else [_PAGE]
         self._status = status
         self._url = url
+        self._document_uri = document_uri
+        self._later_responses = later_responses
         self.contexts: list[_Context] = []
 
     def new_context(self, **kwargs) -> _Context:  # noqa: ANN003
         context = _Context(
-            _Page(self._contents, self._status, self._url), kwargs)
+            _Page(self._contents, self._status, self._url,
+                  self._document_uri, self._later_responses), kwargs)
         self.contexts.append(context)
         return context
 
@@ -811,6 +842,33 @@ class FinalDocumentTest(_WiringBase):
         browser = _Browser(url="https://WWW.MagazineLuiza.com.br./p/other")
         _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
         self.assertEqual(result.method, "camoufox")
+
+    def test_error_document_behind_the_attempted_url_is_a_fetch_error(
+            self) -> None:
+        browser = _Browser(document_uri=(
+            "about:neterror?e=connectionFailure"
+            "&u=https%3A//www.magazineluiza.com.br/p/bab5438g3h/"))
+        with self.assertRaises(FetchError):
+            self._fetch(_FakeCamoufox(lambda kwargs: browser))
+
+    def test_document_on_another_port_of_the_host_is_a_fetch_error(
+            self) -> None:
+        browser = _Browser(
+            url="https://www.magazineluiza.com.br:8443/p/bab5438g3h/")
+        with self.assertRaises(FetchError):
+            self._fetch(_FakeCamoufox(lambda kwargs: browser))
+
+    def test_scheme_upgrade_to_its_default_port_is_accepted(self) -> None:
+        cfx.CamoufoxFetcher._check_final_document(
+            "https://www.magazineluiza.com.br/p/x",
+            "http://www.magazineluiza.com.br/p/x")
+
+    def test_status_is_the_last_main_frame_navigation_response(self) -> None:
+        browser = _Browser(later_responses=[
+            _Response(404), _Response(500, main_frame=False),
+            _Response(503, navigation=False)])
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
+        self.assertEqual(result.status, 404)
 
     def test_playwright_navigation_error_is_a_fetch_error(self) -> None:
         class _ProxyForbidden(Exception):
