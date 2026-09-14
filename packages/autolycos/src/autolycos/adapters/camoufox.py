@@ -476,15 +476,11 @@ class CamoufoxFetcher:
         " : document.documentURI + String.fromCharCode(10) + h; }")
 
     @classmethod
-    def _read_document(cls, page, deadline: float | None = None) -> tuple[str, str]:  # type: ignore[no-untyped-def]
-        """(documentURI, rendered DOM). With a `deadline` (time.monotonic()),
-        a read still unanswered at it raises the Playwright TimeoutError;
-        without one the read is unbounded."""
-        if deadline is None:
-            timeout_ms = 0.0
-        else:
-            # Playwright reads a timeout of 0 as no timeout at all.
-            timeout_ms = max((deadline - time.monotonic()) * 1000, 1.0)
+    def _read_document(cls, page, deadline: float) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+        """(documentURI, rendered DOM). A read still unanswered at `deadline`
+        (time.monotonic()) raises the Playwright TimeoutError."""
+        # Playwright reads a timeout of 0 as no timeout at all.
+        timeout_ms = max((deadline - time.monotonic()) * 1000, 1.0)
         value = page.wait_for_function(
             cls._BOUNDED_READ_JS, arg=MAX_HTML_BYTES,
             timeout=timeout_ms).json_value()
@@ -493,10 +489,6 @@ class CamoufoxFetcher:
                 f"rendered page exceeds {MAX_HTML_BYTES} characters cap")
         document_uri, _, html = value.partition("\n")
         return document_uri, html
-
-    @classmethod
-    def _read_capped(cls, page, deadline: float | None = None) -> str:  # type: ignore[no-untyped-def]
-        return cls._read_document(page, deadline)[1]
 
     @classmethod
     def _settled_content(cls, page, status: int, deadline: float) -> tuple[str, str]:  # type: ignore[no-untyped-def]

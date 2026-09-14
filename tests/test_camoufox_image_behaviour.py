@@ -1,20 +1,5 @@
-"""CamoufoxFetcher against a REAL Firefox: capped read, settle-loop budget,
-final-document check, liveness and memory footprint (carte 5438dd0b, lot
-T4-B).
-
-The mocked suite in test_camoufox.py drives a fake Page whose
-wait_for_function() IGNORES the JS expression it receives and re-implements
-the cap in Python (see its own docstring): it proves the adapter's handling
-of the read's return value, never the truth of _CAPPED_HTML_JS itself. Every test below
-either drives _read_capped/_settled_content/_check_final_document against a
-real, unproxied Camoufox Firefox page (CappedRead*, SettledContent*,
-FinalDocumentUrlCheck*), or drives the full guarded CamoufoxFetcher.fetch()
-pipeline through a real launch (Liveness*, RealFetchMemoryFootprint*).
-Runs for real only inside the autonomous image; everywhere else it skips
-(hard-fails instead under KERDOOS_REQUIRE_IMAGE_TESTS=1, same discipline as
-tests/test_uc.py's UcPinExecutionTest and tests/test_browser.py's
-RealBrowserFreezeTest).
-"""
+"""CamoufoxFetcher against a real Camoufox Firefox, inside the autonomous image
+only: skipped elsewhere, failed instead under KERDOOS_REQUIRE_IMAGE_TESTS=1."""
 
 from __future__ import annotations
 
@@ -89,8 +74,7 @@ class _RealCamoufoxTestCase(unittest.TestCase):
 
 
 class CappedReadRealFirefoxTest(_RealCamoufoxTestCase):
-    """_read_capped drives cls._CAPPED_HTML_JS through page.evaluate() on a
-    real Firefox DOM: the mocked suite cannot exercise the JS string at all."""
+    """_read_document runs _BOUNDED_READ_JS against a real Firefox DOM."""
 
     def test_dom_over_cap_raises_fetch_error(self) -> None:
         page = self._new_page()
@@ -99,33 +83,28 @@ class CappedReadRealFirefoxTest(_RealCamoufoxTestCase):
         page.evaluate("s => { document.body.textContent = s; }", "y" * 5000)
         with mock.patch.object(cfx, "MAX_HTML_BYTES", 200):
             with self.assertRaises(FetchError):
-                cfx.CamoufoxFetcher._read_capped(page)
+                cfx.CamoufoxFetcher._read_document(
+                    page, time.monotonic() + 10.0)
 
     def test_dom_under_cap_returns_full_rendered_document(self) -> None:
         page = self._new_page()
         page.goto("data:text/html,<html><body>hello</body></html>",
                   wait_until="load", timeout=10_000)
         with mock.patch.object(cfx, "MAX_HTML_BYTES", 10_000):
-            html = cfx.CamoufoxFetcher._read_capped(page)
+            _, html = cfx.CamoufoxFetcher._read_document(
+                page, time.monotonic() + 10.0)
         full = page.evaluate("() => document.documentElement.outerHTML")
         self.assertEqual(
             html, full,
-            "under the cap, _read_capped must return the exact rendered "
+            "under the cap, _read_document must return the exact rendered "
             "document, not a truncated or reconstructed copy")
         self.assertIn("hello", html)
 
-class EvaluateResponsePayloadSizeTest(unittest.TestCase):
-    """Proof 1(b): the actual bytes Playwright's own transport carries back
-    for cls._CAPPED_HTML_JS's Runtime.callFunction response. Runs the
-    launch+evaluate cycle in a DEDICATED CHILD PROCESS with
-    DEBUG=pw:protocol set from that process's start: an in-process raw
-    file-descriptor redirect around the SAME process running pytest was
-    tried first and silently lost the driver's debug output (log bytes=0)
-    -- pytest's own stdout/stderr capture intercepts at a layer a bare
-    os.dup2 in the test body does not control. The child writes the
-    driver's protocol trace to its own stderr and one JSON status line to
-    its own stdout; the parent only parses stdout and correlates the
-    ###MARK lines it wrote to stderr right after each evaluate() call."""
+
+class BoundedReadWirePayloadTest(unittest.TestCase):
+    """_BOUNDED_READ_JS answers an over-cap DOM with one flat -1 frame on the
+    wire. The protocol trace is only visible from a child process started
+    with DEBUG=pw:protocol: pytest's capture swallows it in-process."""
 
     _CHILD_SCRIPT = """
 import sys
@@ -150,8 +129,10 @@ with camoufox_cls(**kwargs) as browser:
               wait_until="load", timeout=10_000)
     for size in (200_000, 4_000_000):
         page.evaluate("s => { document.body.textContent = s; }", "z" * size)
-        result = page.evaluate(cfx.CamoufoxFetcher._CAPPED_HTML_JS, 100)
-        assert result is None, f"{size}-byte DOM was not over the cap"
+        result = page.wait_for_function(
+            cfx.CamoufoxFetcher._BOUNDED_READ_JS, arg=100,
+            timeout=10_000).json_value()
+        assert result == -1, f"{size}-byte DOM was not over the cap: {result!r}"
         sys.stderr.write(f"###MARK size={size}\\n")
         sys.stderr.flush()
     context.close()
@@ -190,20 +171,18 @@ print("###RESULT ok")
             f"expected 2 ###MARK lines (one per DOM size), got {len(marks)}")
         sizes_on_wire = []
         for mark_index in marks:
-            null_result = next(
+            over_cap_frame = next(
                 (ln for ln in reversed(lines[:mark_index])
-                 if b'"result":{"result":{"value":{"v":"null"}}}}' in ln),
+                 if b'"result":{"result":{"value":-1}}}' in ln),
                 None)
             self.assertIsNotNone(
-                null_result,
-                "no pw:protocol RECV frame carrying the null cap-check "
-                f"result found before mark {mark_index}")
-            sizes_on_wire.append(len(null_result))
+                over_cap_frame,
+                "no pw:protocol RECV frame carrying the -1 over-cap answer "
+                f"found before mark {mark_index}")
+            sizes_on_wire.append(len(over_cap_frame))
         self.assertLess(
             max(sizes_on_wire), 1000,
-            f"the evaluate() response for the cap-check call is "
-            f"{sizes_on_wire} bytes on the wire -- expected it to stay "
-            "well under 1000 bytes regardless of DOM size")
+            f"the over-cap read answer is {sizes_on_wire} bytes on the wire")
         self.assertEqual(
             sizes_on_wire[0], sizes_on_wire[1],
             f"the response frame grew with DOM size ({sizes_on_wire}) -- "
@@ -212,13 +191,7 @@ print("###RESULT ok")
 
 
 class SettledContentNavigationBudgetTest(_RealCamoufoxTestCase):
-    """Card 5438dd0b measurement: _settled_content's own page.evaluate() call
-    inside the poll loop cannot be interrupted once issued -- if the page's
-    main thread is busy when that call is made, the call blocks for as long
-    as the main thread stays busy, past the nav deadline it is meant to
-    respect. Reproduced locally (data: URL, no network) with a load-then-
-    setTimeout busy loop so the block starts AFTER goto() returns, inside the
-    poll loop itself."""
+    """A busy page main thread cannot hold _settled_content past its budget."""
 
     def test_busy_main_thread_bounds_settle_within_nav_deadline(self) -> None:
         page = self._new_page()
@@ -242,17 +215,11 @@ class SettledContentNavigationBudgetTest(_RealCamoufoxTestCase):
         self.assertLess(
             elapsed, budget_seconds + 1.0,
             f"_settled_content took {elapsed:.1f}s against a "
-            f"{budget_seconds:.0f}s nav budget -- its own page.evaluate() "
-            "call inside the poll loop is not bounded by the deadline once "
-            "the page main thread is busy")
+            f"{budget_seconds:.0f}s nav budget")
 
 
 def _start_local_success_server():
-    """A loopback-only HTTP server answering 200 on every path. Used as the
-    FIRST, successful leg of the FinalDocumentUrlCheckTest scenario so the
-    whole test stays hermetic (127.0.0.1 only, never real internet egress,
-    never through PinningProxy -- _check_final_document is a staticmethod
-    tested in isolation, not the guarded fetch() pipeline)."""
+    """A loopback-only HTTP server answering 200 on every path."""
     import http.server
     import socketserver
 
@@ -277,44 +244,34 @@ def _start_local_success_server():
 
 
 class FinalDocumentUrlCheckTest(_RealCamoufoxTestCase):
-    """Card 5438dd0b measurement: a client-side (JS) navigation issued AFTER
-    the tracked page.goto() returned is invisible to _render's own Response
-    object, so the `status` variable used for the final FetchResult still
-    holds the FIRST navigation's status. _check_final_document's host/scheme
-    check is the only remaining guard against this; on a real Firefox
-    network-error page for a same-host, unreachable target, `page.url` may
-    still report the originally-attempted URL (Firefox keeps the address
-    bar on the attempted address for its own error page), which would make
-    final_host == requested_host and let the check pass. Both legs stay on
-    127.0.0.1 (a local server for the success leg, an unbound port for the
-    failure leg) so the test needs no real network egress and does not go
-    through PinningProxy (_check_final_document is tested here in
-    isolation, as a staticmethod, not the guarded fetch() pipeline)."""
+    """A Firefox error page on the requested host AND port is refused through
+    its documentURI alone."""
 
-    def test_js_redirect_to_unreachable_same_host_is_caught(self) -> None:
+    def test_error_page_on_the_requested_host_and_port_is_refused(self) -> None:
         httpd, thread = _start_local_success_server()
-        self.addCleanup(httpd.shutdown)
-        self.addCleanup(thread.join, 2.0)
-        port_ok = httpd.server_address[1]
-        requested_url = f"http://127.0.0.1:{port_ok}/"
+        self.addCleanup(httpd.server_close)
+        requested_url = f"http://127.0.0.1:{httpd.server_address[1]}/"
 
         page = self._new_page()
         response = page.goto(
             requested_url, wait_until="load", timeout=10_000)
-        self.assertIsNotNone(response, "no response from the first, real "
-                              "local navigation -- cannot set up the scenario")
         self.assertEqual(response.status, 200)
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(2.0)
         page.evaluate(
-            "() => { setTimeout(() => {"
-            " window.location.href = 'http://127.0.0.1:1/'; }, 0); }")
-        page.wait_for_timeout(4000)
-        with self.assertRaises(
-                FetchError,
-                msg=f"page.url is {page.url!r} after a same-host JS "
-                "navigation to an unreachable port (127.0.0.1:1) produced "
-                "a Firefox error page -- _check_final_document did not "
-                "detect it"):
-            cfx.CamoufoxFetcher._check_final_document(page.url, requested_url)
+            "() => { setTimeout(() => { window.location.href = "
+            f"'{requested_url}gone'; }}, 0); }}")
+        page.wait_for_timeout(3000)
+
+        uri, _ = cfx.CamoufoxFetcher._read_document(
+            page, time.monotonic() + 10.0)
+        self.assertTrue(uri.startswith("about:neterror"),
+                        f"documentURI is {uri!r}, page.url is {page.url!r}")
+        cfx.CamoufoxFetcher._check_final_document(page.url, requested_url)
+        with self.assertRaises(FetchError):
+            cfx.CamoufoxFetcher._check_final_document(
+                page.url, requested_url, uri)
 
 
 class LivenessSigstopTest(unittest.TestCase):
