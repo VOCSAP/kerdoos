@@ -19,15 +19,14 @@ Kasada) that inspect TLS fingerprints, browser automation signals, and
 behavioural signatures. The same URL might return a clean `200` one minute and
 a challenge page or `429` the next.
 
-Handling this well means owning a messy ladder of tools: try a cheap HTTP
-call, fall back to TLS impersonation, then to a real (undetected) browser, and
-only as a last resort to a full undetected browser driver. Each rung is more
-capable but slower, heavier, and more expensive. Doing this inline, in every
-project that needs a page, spreads that complexity everywhere and makes it
-easy to leak requests to internal addresses (SSRF) or to confuse a transient
-block with a real result.
+Handling this well means owning several tools of varying cost and capability:
+a cheap HTTP call, a TLS impersonation layer, one or more real (undetected)
+browsers. Doing this inline, in every project that needs a page, spreads that
+complexity everywhere and makes it easy to leak requests to internal addresses
+(SSRF) or to confuse a transient block with a real result.
 
-`autolycos` packages that ladder once, correctly, behind a clean boundary.
+`autolycos` packages that set of tools once, correctly, behind a clean
+boundary.
 
 ## What it does
 
@@ -39,10 +38,11 @@ It exposes a ladder of fetcher tiers, ordered by increasing cost:
    filters.
 3. `browser` -- undetected headless Chromium (`patchright` +
    `playwright-stealth`).
-4. `uc` -- undetected Chrome driver (`seleniumbase`), for the hardest
-   protectors.
-5. `camoufox` -- undetected headless Firefox (`camoufox`), an alternative
+4. `camoufox` -- undetected headless Firefox (`camoufox`), an alternative
    fingerprint to the Chromium-based tiers above.
+5. `uc` -- undetected Chrome driver (`seleniumbase`), **(deprecated)**, kept
+   for a re-evaluation should upstream progress on the one protector it was
+   built for.
 
 A caller asks the `Router` for a named tier and gets back a `Fetcher`; each
 call to `fetch(url)` returns a `FetchResult`. The router itself does not
@@ -60,12 +60,13 @@ which tool actually rendered the page.
   `FetchResult` / `Router`. Swapping, adding, or removing a tool is an adapter
   change, not a rewrite of your call sites.
 - **Fail-closed SSRF safety by construction.** A single shared predicate
-  (`check_scheme_and_domain`) guards both the config-mutation path and the
-  fetch path, so the two gates can never drift apart. Rejections raise
+  (`check_scheme_and_domain`) guards the fetch path across every tier so
+  the checks can never drift apart between adapters. Rejections raise
   `SSRFError`, never a silent pass. Scheme allowlist closes `javascript:` /
-  `file:` / internal targets. The browser-class tiers additionally route all
-  traffic through a loopback egress proxy that pins the resolved IP once and
-  refuses any re-resolution.
+  `file:` / internal targets. The `browser` and `camoufox` tiers additionally
+  route all traffic through a loopback egress proxy that pins the resolved
+  IP once and refuses any re-resolution; `uc` pins at the DNS layer instead,
+  through a Chromium host-resolver rule.
 - **Domain-agnostic and reusable.** No hardcoded site list. The caller injects
   a `DomainPolicy`, so the same library serves a price monitor, a content
   archiver, or any tool that needs resilient fetching.
@@ -85,10 +86,11 @@ which tool actually rendered the page.
 - `autolycos.ports`: `Fetcher`, `FetchResult`, `Router`
 - `autolycos.safety`: `DomainPolicy`, `check_scheme_and_domain`
 - `autolycos.errors`: `SSRFError`, `FetchError`
-- `autolycos.router`: `StaticRouter`
+- `autolycos.router`: `StaticRouter`, `known_tiers`, `UnknownFetcherError`
+- `autolycos.browser_gate`: `BrowserGate`
 
-Everything else (`adapters/*`, `challenge`, `egress_proxy`, `browser_gate`) is
-internal and reached only through a `Router` / `DomainPolicy` you construct.
+Everything else (`adapters/*`, `challenge`, `egress_proxy`) is internal and
+reached only through a `Router` / `DomainPolicy` you construct.
 
 ## Install
 
@@ -100,8 +102,13 @@ pip install "autolycos[uc]"           # + undetected Chrome driver
 pip install "autolycos[camoufox]"     # + undetected Firefox
 ```
 
-Extras are additive: install only the tiers you actually need. The heavier
-`browser`, `uc` and `camoufox` tiers pull in browser-class dependencies.
+Extras are additive: install only the tiers you actually need. None of the
+three heavier extras ships a working browser binary on `pip install` alone:
+`browser` needs `patchright install chromium` run once after install;
+`uc` needs a `seleniumbase`-managed `uc_driver` matching the installed
+Chromium's major version; `camoufox` never downloads a binary at fetch time
+by design (the adapter always passes an explicit path and version), so the
+matching Camoufox release must be provisioned separately before first use.
 
 ## Name
 
@@ -110,4 +117,4 @@ library wears the same trick: it changes its fingerprint to pass unnoticed.
 
 ## License
 
-Apache-2.0. See [LICENSE](./LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/VOCSAP/autolycos/blob/main/LICENSE).
