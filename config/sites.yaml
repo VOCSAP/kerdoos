@@ -19,9 +19,12 @@ sites:
       # anchors are fixed in the adapter, so no locators are authored here.
       kind: amazon
   mercadolivre:
-    fetcher: browser           # camoufox also gets a wall here, unflagged; browser's 403 is
-                               # flagged (retried) and costs half the RAM (ADR 0004 Decision 1)
+    fetcher: camoufox          # no tier rendered the product page when last measured; camoufox
+                               # is kept by operator decision (ADR 0004 Decision 1 amendment)
     domain: mercadolivre.com.br
+    # Source URLs must use www.mercadolivre.com.br: mercadolivre.com.br and
+    # produto.mercadolivre.com.br redirect there, and the camoufox tier refuses
+    # a page whose final host differs.
     # Render-critical CDN: ML is a full client-side render whose price and
     # availability are injected by the http2.mlstatic.com JS bundle. Allow it as
     # a browser SUB-RESOURCE only (never a navigation target) so the page can

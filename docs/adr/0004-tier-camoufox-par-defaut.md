@@ -44,8 +44,8 @@ Faits mesures pendant le spike 5e84a704 et la mesure de RAM qui l'a suivi :
   (Chromium : 2), meme cause que la carte d8b7b8fd. Cette cause est levee depuis :
   tini est en PID 1 dans l'image (carte d8b7b8fd, merge 761bf17).
 - **MercadoLivre, deuxieme site candidat** (mesure sur **un seul echantillon**, une
-  requete sur la meme fiche produit, infirme en T4 : amendement du 2026-09-14 sous la
-  Decision 1) : le tier `browser` actuel
+  requete sur la meme fiche produit, non confirme en T4 et conserve par decision
+  operateur : amendement du 2026-09-14 sous la Decision 1) : le tier `browser` actuel
   (patchright, Chromium complet, user-agent sans "Headless") recoit un 200 mais sur un
   mur de verification de compte (40802 octets, aucune donnee produit) ; Camoufox (image
   du spike) recoit la vraie fiche (1055964 octets, etat pre-charge de la page, JSON-LD
@@ -127,8 +127,9 @@ Force decisive : le tier est deja une propriete du site, et l'invariant 6 est te
 catalogue (le tier le moins couteux qui passe). Pour Magalu en conteneur, `uc` ne passe
 pas (mesure), donc le moins couteux qui passe est `camoufox`.
 
-- Le catalogue livre declare `fetcher: camoufox` pour **Magalu** (MercadoLivre y
-  figurait jusqu'a l'amendement du 2026-09-14 ci-dessous). Nom du
+- Le catalogue livre declare `fetcher: camoufox` pour **Magalu et MercadoLivre**
+  (MercadoLivre conserve par decision operateur malgre T4, amendement du 2026-09-14
+  ci-dessous). Nom du
   tier et valeur de `FetchResult.method` : `camoufox`. Aucun utilisateur n'existe
   (decision operateur), donc il n'y a ni bascule ni migration d'un `config.db` deja
   peuple a prevoir.
@@ -136,10 +137,11 @@ pas (mesure), donc le moins couteux qui passe est `camoufox`.
   le catalogue en T3 et confirme sur plusieurs echantillons en T4 ; si T4 ne confirme
   pas, MercadoLivre revient a `browser`.
 
-  > **Amendement du 2026-09-14 (T4, carte 5438dd0b)** : T4 n'a pas confirme Camoufox ;
-  > MercadoLivre revient a `browser` dans le catalogue livre, Magalu reste sur
-  > `camoufox`. Mesures sur l'image `kerdoos-t4:6835df6`, fiches MLB35045987 et
-  > MLB35158445 :
+  > **Amendement du 2026-09-14 (T4, carte 5438dd0b)** : T4 n'a pas confirme Camoufox,
+  > et **aucun tier ne rend la fiche**. **Decision operateur (2026-09-14, 09:18 UTC)** :
+  > MercadoLivre reste sur `camoufox` dans le catalogue livre, en attendant la prochaine
+  > mesure ; la clause de retour a `browser` ci-dessus n'est pas appliquee. Mesures sur
+  > l'image `kerdoos-t4:6835df6`, fiches MLB35045987 et MLB35158445 :
   >
   > - `camoufox` : **0 fiche sur 7 essais** entre 07:35 et 08:25 UTC. Cinq murs
   >   `captcha-wall-index` de 39 Ko servis en 200 et non signales par
@@ -149,8 +151,9 @@ pas (mesure), donc le moins couteux qui passe est `camoufox`.
   >   le mur de 40802 octets du Contexte.
   > - Le seul echantillon positif de Camoufox reste celui du 2026-09-11.
   >
-  > A resultat egal (INDETERMINATE), `browser` echoue de facon signalee au lieu d'un mur
-  > muet et consomme environ 1,9 fois moins de RAM au pic (Contexte). **Reserve, supposee
+  > A resultat egal (INDETERMINATE), `browser` echouerait de facon signalee au lieu d'un
+  > mur muet et consommerait environ 1,9 fois moins de RAM au pic (Contexte) ; ce gain ne
+  > rend pas la fiche et l'operateur ne l'a pas retenu. **Reserve, supposee
   > et non mesuree** : la reputation de l'IP de sortie, apres 13 requetes MercadoLivre en
   > 50 minutes, peut peser sur les deux tiers ; ils recevaient pourtant des pages
   > differentes a la meme minute. Le mur non signale releve de la carte dc122802 et ne
@@ -710,7 +713,7 @@ mise a jour le rende "meilleure" que Camoufox. »
   `KERDOOS_BROWSER_MAX_CONCURRENT` ; l'etat a trois valeurs (un echec Camoufox donne
   INDETERMINATE, un tier absent ignore la source sans ScrapeRecord) ; l'absence
   d'escalade automatique entre tiers ; le tier de MercadoLivre, candidat non confirme
-  en T4, qui reste `browser`.
+  en T4, qui reste `camoufox` par decision operateur.
 - **Ce qui n'est pas fait et ne le sera pas** : aucune migration ni bascule d'un
   `config.db` existant. Il n'y a aucun utilisateur de Kerdoos (decision operateur) : le
   catalogue livre suffit, et ecrire un plan de migration pour une base qui n'existe
@@ -729,8 +732,10 @@ decision operateur requise :
 2. **Cohabitation de Playwright (dependance de Camoufox) et de patchright** dans la
    meme image : presumee sans conflit (noms de module distincts), a verifier par la
    resolution de `uv.lock` en T1 et par les tests en image en T4.
-3. **Routage de MercadoLivre** : **fermee le 2026-09-14**, T4 n'a pas confirme
-   Camoufox, MercadoLivre revient a `browser` (amendement sous la Decision 1).
+3. **Routage de MercadoLivre** : **rouverte le 2026-09-14**. T4 n'a pas confirme
+   Camoufox (0 fiche sur 7) et `browser` ne passe pas non plus (6 sur 6 en 403) ;
+   l'operateur conserve `camoufox`. Question : Camoufox rend-il la fiche de facon
+   repetable lors d'une prochaine mesure ? (amendement sous la Decision 1)
 4. **Taille reelle de l'image** : **fermee en T2**, mesuree a 4,62 Go contre 2,42 Go
    (+2,20 Go, dont 1,29 Go pour la couche du binaire).
 5. **T4-11-browser** : la garde de contexte du tier `browser` n'a jamais ete mesuree ;
@@ -832,3 +837,7 @@ decision operateur requise :
   Decision 5. Divergence constatee : le tier `browser` lit encore `page.content()`
   sans timeout, ne controle pas le document final et garde le status du `goto` ; la
   parite est portee par la carte 30333254, a coupler avec T4-11-browser.
+- **2026-09-14 -- decision operateur : MercadoLivre reste sur `camoufox`**. Annule le
+  retour a `browser` de l'entree "T4 MercadoLivre non confirme". Les mesures T4 sont
+  conservees (aucun tier ne rend la fiche) ; catalogue livre et test de cablage remis a
+  `camoufox`, amendement sous la Decision 1 reformule, question ouverte 3 rouverte.
