@@ -44,11 +44,11 @@ docs/adr/            architecture decision records (authoritative)
   docker build --target autonomous -t kerdoos:autonomous .
   docker run --rm -e KERDOOS_REQUIRE_IMAGE_TESTS=1 \
     -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
-    sh -c "cd /tmp && python3 -m pytest tests/test_uc.py -k UcPinExecution"
+    sh -c "cd /tmp && python3 -m pytest tests/image/test_uc_image.py -k UcPinExecution"
   ```
   `KERDOOS_REQUIRE_IMAGE_TESTS=1` turns the skip into a hard failure if the
   image lacks a real Chromium -- a silent skip must never read as a pass.
-- Camoufox tier image proofs (`tests/test_camoufox_image.py`) need TWO
+- Camoufox tier image proofs (`tests/image/test_camoufox_image.py`) need TWO
   separate invocations, since a test cannot drop its own container's
   network from inside itself:
   ```bash
@@ -56,7 +56,7 @@ docs/adr/            architecture decision records (authoritative)
   docker build --target autonomous -t kerdoos:autonomous .
   docker run --rm -e KERDOOS_REQUIRE_IMAGE_TESTS=1 \
     -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
-    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py"
+    sh -c "cd /tmp && python3 -m pytest tests/image/test_camoufox_image.py"
 
   # --network none invocation: the zero-download-under-no-network proof
   # only runs (hard-fails otherwise) when KERDOOS_IMAGE_NETWORK_NONE=1 is
@@ -66,7 +66,7 @@ docs/adr/            architecture decision records (authoritative)
   docker run --rm --network none \
     -e KERDOOS_REQUIRE_IMAGE_TESTS=1 -e KERDOOS_IMAGE_NETWORK_NONE=1 \
     -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
-    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py::CamoufoxNoNetworkZeroDownloadTest"
+    sh -c "cd /tmp && python3 -m pytest tests/image/test_camoufox_image.py::CamoufoxNoNetworkZeroDownloadTest"
   ```
   The strace-based proofs in the same file (network syscall audit) need a
   separate TEST-only image (`autonomous-test` target, `strace` installed)
@@ -77,14 +77,14 @@ docs/adr/            architecture decision records (authoritative)
   docker run --rm --cap-add SYS_PTRACE \
     -e KERDOOS_REQUIRE_IMAGE_TESTS=1 -e KERDOOS_IMAGE_STRACE=1 \
     -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous-test \
-    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py -k StraceNetworkAudit"
+    sh -c "cd /tmp && python3 -m pytest tests/image/test_camoufox_image.py -k StraceNetworkAudit"
   ```
   A few proofs need real outbound network to github.com (binary provenance
   check), separate from the browser's own SSRF-pinned proxy:
   ```bash
   docker run --rm -e KERDOOS_REQUIRE_IMAGE_TESTS=1 -e KERDOOS_IMAGE_ONLINE=1 \
     -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
-    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py -k BinaryProvenance"
+    sh -c "cd /tmp && python3 -m pytest tests/image/test_camoufox_image.py -k BinaryProvenance"
   ```
   Each `KERDOOS_IMAGE_*` marker is the caller's promise that the matching
   precondition holds; set with `KERDOOS_REQUIRE_IMAGE_TESTS=1` and the

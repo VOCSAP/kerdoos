@@ -2,4 +2,5 @@
 members = ["packages/*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "packages/autolycos/tests"]
+addopts = ["--import-mode=importlib"]
