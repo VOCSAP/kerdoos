@@ -25,14 +25,14 @@ import uuid
 import warnings
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urldefrag, urlsplit
 
 from ..browser_gate import BrowserGate, default_browser_gate
 from ..challenge import looks_challenged
 from ..egress_proxy import PinningProxy
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import DomainPolicy, validate_target
+from ..safety import _DEFAULT_PORT, DomainPolicy, validate_target
 from .browser import _is_hostname_shaped
 
 logger = logging.getLogger(__name__)
@@ -406,6 +406,15 @@ def _kill_launch(marker: str, pids_before: frozenset[int] | None) -> bool:
     return _kill_processes(_launch_process_tree(marker, pids_before))
 
 
+def _effective_port(parts: SplitResult) -> int | None:
+    """The URL's port, its scheme's default when absent, None when invalid."""
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    return port if port is not None else _DEFAULT_PORT.get(parts.scheme)
+
+
 class CamoufoxFetcher:
     """Fetcher port implementation backed by Camoufox (headless Firefox).
 
@@ -454,47 +463,91 @@ class CamoufoxFetcher:
         "cap => { const h = document.documentElement.outerHTML;"
         " return h.length > cap ? null : h; }")
 
-    @classmethod
-    def _read_capped(cls, page) -> str:  # type: ignore[no-untyped-def]
-        html = page.evaluate(cls._CAPPED_HTML_JS, MAX_HTML_BYTES)
-        if html is None:
-            raise FetchError(
-                f"rendered page exceeds {MAX_HTML_BYTES} characters cap")
-        return html
+    # page.evaluate has no timeout and waits for the page's main thread, which
+    # a busy page holds. wait_for_function's timeout is enforced by the driver
+    # even then, and a primitive result comes back without another round trip
+    # to the page. The predicate is always truthy: -1 stands for over the cap.
+    # documentURI travels in the same read, ahead of the first newline (a URL
+    # never holds one): Firefox leaves page.url on the attempted address of
+    # its own error page, and only documentURI names that page.
+    _BOUNDED_READ_JS = (
+        "cap => { const h = (" + _CAPPED_HTML_JS + ")(cap);"
+        " return h === null ? -1"
+        " : document.documentURI + String.fromCharCode(10) + h; }")
 
     @classmethod
-    def _settled_content(cls, page, status: int, deadline: float) -> str:  # type: ignore[no-untyped-def]
-        """Akamai answers the first navigation with a 200 JS interstitial
-        that replaces itself with the real page after the load event has
-        already fired. Polls until it is gone, and starts no poll once less
-        than one interval of budget is left; any non-200 answer is returned
-        as is. A read in progress cannot be interrupted from here: a page
-        whose main thread stays busy holds it, and only the fetch's total
-        deadline bounds that."""
-        html = cls._read_capped(page)
+    def _read_document(cls, page, deadline: float) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+        """(documentURI, rendered DOM). A read still unanswered at `deadline`
+        (time.monotonic()) raises the Playwright TimeoutError."""
+        # Playwright reads a timeout of 0 as no timeout at all.
+        timeout_ms = max((deadline - time.monotonic()) * 1000, 1.0)
+        value = page.wait_for_function(
+            cls._BOUNDED_READ_JS, arg=MAX_HTML_BYTES,
+            timeout=timeout_ms).json_value()
+        if not isinstance(value, str):
+            raise FetchError(
+                f"rendered page exceeds {MAX_HTML_BYTES} characters cap")
+        document_uri, _, html = value.partition("\n")
+        return document_uri, html
+
+    @classmethod
+    def _settled_content(cls, page, status: int, deadline: float) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+        """(documentURI, DOM) once settled. Akamai answers the first
+        navigation with a 200 JS interstitial that replaces itself with the
+        real page after the load event has already fired. Polls until it is
+        gone, and starts no poll once less than one interval of budget is
+        left; any non-200 answer is returned as is. Every read is bounded by
+        `deadline`: a first read past it raises FetchError, a poll read past
+        it returns the interstitial already read."""
+        try:
+            document = cls._read_document(page, deadline)
+        except Exception as exc:  # noqa: BLE001 -- narrowed just below
+            if _is_playwright_timeout(exc):
+                raise FetchError(
+                    "rendered page could not be read within the navigation "
+                    "budget") from exc
+            raise
         interval = _SETTLE_POLL_MS / 1000
-        while (status == 200 and looks_challenged(status, html)
+        while (status == 200 and looks_challenged(status, document[1])
                and deadline - time.monotonic() >= interval):
             page.wait_for_timeout(_SETTLE_POLL_MS)
             try:
-                html = cls._read_capped(page)
+                document = cls._read_document(page, deadline)
             except FetchError:
                 raise
-            except Exception:  # noqa: BLE001 -- the page is mid-navigation
+            except Exception:  # noqa: BLE001 -- mid-navigation or past the deadline
                 continue
-        return html
+        return document
 
     @staticmethod
-    def _check_final_document(final_url: str, requested_url: str) -> None:
+    def _check_final_document(final_url: str, requested_url: str,
+                              document_uri: str | None = None) -> None:
         """A Firefox error page, or a script navigation to another allowed
-        host, would otherwise be returned as the requested site's answer."""
-        final = urlsplit(final_url or "")
-        final_host = (final.hostname or "").rstrip(".")
-        requested_host = (urlsplit(requested_url).hostname or "").rstrip(".")
-        if final.scheme not in ("http", "https") or final_host != requested_host:
-            raise FetchError(
-                f"final document is {final.scheme}://{final_host}, not the "
-                f"requested host {requested_host}")
+        host or to another port, would otherwise be returned as the
+        requested site's answer. The port may only change to the default of
+        the final scheme, so http may still upgrade to https; https never
+        falls back to http."""
+        requested = urlsplit(requested_url)
+        requested_host = (requested.hostname or "").rstrip(".")
+        requested_port = _effective_port(requested)
+        for url in (final_url or "", document_uri):
+            if url is None:
+                continue
+            final = urlsplit(url)
+            final_host = (final.hostname or "").rstrip(".")
+            if final.scheme not in _DEFAULT_PORT or final_host != requested_host:
+                raise FetchError(
+                    f"final document is {final.scheme}://{final_host}, not "
+                    f"the requested host {requested_host}")
+            if requested.scheme == "https" and final.scheme != "https":
+                raise FetchError(
+                    f"final document fell back to {final.scheme} from a "
+                    "requested https URL")
+            final_port = _effective_port(final)
+            if final_port not in (requested_port, _DEFAULT_PORT[final.scheme]):
+                raise FetchError(
+                    f"final document is on port {final_port}, not the "
+                    f"requested port {requested_port}")
 
     def _render(self, browser, url: str) -> FetchResult:  # type: ignore[no-untyped-def]
         context = browser.new_context(service_workers="block")
@@ -504,15 +557,35 @@ class CamoufoxFetcher:
             # page opening many channels timed out with it, returned without
             # it). Egress rests on the proxy's CONNECT check and the frozen prefs.
             page = context.new_page()
+            # A script navigation after goto commits a document with its own
+            # status; goto's response only describes the first one. A status
+            # is matched to the document read by URL, not by arrival order,
+            # so a response landing during the read cannot label it.
+            navigation_responses: list[tuple[str, int]] = []
+
+            def _record_navigation_response(nav_response) -> None:  # type: ignore[no-untyped-def]
+                if (nav_response.request.is_navigation_request()
+                        and nav_response.frame.parent_frame is None):
+                    navigation_responses.append(
+                        (nav_response.url, nav_response.status))
+
+            page.on("response", _record_navigation_response)
             nav_deadline = time.monotonic() + self._nav_timeout_seconds
             response = page.goto(
                 url, wait_until=_WAIT_UNTIL,
                 timeout=self._nav_timeout_seconds * 1000)
             if response is None:
                 raise FetchError("no response from navigation")
-            status = response.status
-            html = self._settled_content(page, status, nav_deadline)
-            self._check_final_document(page.url, url)
+            document_uri, html = self._settled_content(
+                page, response.status, nav_deadline)
+            # Response.url never carries the fragment documentURI may hold.
+            document_url = urldefrag(document_uri).url
+            status = next(
+                (response_status for response_url, response_status
+                 in reversed(navigation_responses)
+                 if response_url == document_url),
+                response.status)
+            self._check_final_document(page.url, url, document_uri)
             if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
                 raise FetchError(
                     f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
