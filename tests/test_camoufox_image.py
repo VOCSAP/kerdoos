@@ -1,29 +1,17 @@
 """Camoufox tier (card 5438dd0b) T4 image security proofs.
 
-Ports the ad-hoc probe campaigns run against the autonomous image (Kleos
-#17455/#17456) into a versioned suite. Every proof drives a REAL Camoufox
-Firefox process inside the autonomous image, gated by
-KERDOOS_REQUIRE_IMAGE_TESTS=1 on the model of tests/test_uc.py's
-UcPinExecutionTest -- a skip must never silently read as a pass, and a
-builder-side-only assertion (a flag is present in launch kwargs) must never
-substitute for a runtime one: that exact gap silently broke the uc tier's
---host-resolver-rules pin in production.
+Every proof drives a REAL Camoufox Firefox process inside the autonomous
+image, gated by KERDOOS_REQUIRE_IMAGE_TESTS=1: a skip must never silently
+read as a pass, and a flag present in launch kwargs never substitutes
+for a runtime assertion.
 
-Probes reuse CamoufoxFetcher's own real fetch() pipeline (validate_target,
-the addon-exclusion guard, the marker/gate/deadline machinery, PinningProxy,
-FROZEN_FIREFOX_PREFS) via a subclass that only swaps _render -- never a
-hand-rolled second launch path that would duplicate, and could silently
-diverge from, the code under test.
+Probes reuse CamoufoxFetcher's real fetch() pipeline via a subclass that
+only swaps _render, never a hand-rolled second launch path that could
+diverge from the code under test.
 
 An inline <script> tag injected via page.set_content() never executes on
-this Camoufox/Firefox build (MEASURED: page.evaluate("() => window.__x")
-reads back None after such a tag ran "() => { window.__x = true }"), unlike
-the documented Playwright contract. Every probe below drives its JS through
-page.evaluate() directly instead, never through an embedded <script> tag.
-
-Every test that concludes on a zero-hit measurement carries a positive
-control (Kleos lesson: a zero only means something if the instrument could
-have registered a non-zero result).
+this build (MEASURED); every probe drives its JS through page.evaluate()
+directly instead. Every zero-hit measurement carries a positive control.
 """
 
 from __future__ import annotations
@@ -71,8 +59,7 @@ class _RecordingPinningProxy(PinningProxy):
     """dials proves a target was DIALED; heads proves a target was
     CONSULTED at all, whether or not a dial followed -- a domain-refused
     or IP-refused request never reaches the dialer, so `dials` alone
-    cannot distinguish "the proxy refused this" from "the proxy was never
-    asked" (gate finding B4)."""
+    cannot distinguish "refused" from "never asked"."""
 
     dials: list[tuple[str, int]]
     heads: list[str]
@@ -121,19 +108,11 @@ class _ProbeCamoufoxFetcher(camoufox.CamoufoxFetcher):
 def _run_probe(domain_policy, probe, *, url="https://example.com/",
                 proxy_cls=_RecordingPinningProxy,
                 neutralize_validate_target=False,
-                subresource_domains=(), out=None, **fetcher_kwargs):
-    """`out`, when given, is populated with the constructed PinningProxy
-    even if fetch() raises -- a `proxy = _run_probe(...)` assignment never
-    completes on the raising path (the exception fires before the return
-    value would be bound), so a caller expecting fetch() to raise must
-    read the proxy back through `out["proxy"]` instead."""
+                subresource_domains=(), **fetcher_kwargs):
     holder: dict = {}
 
-    def _capturing_probe(page) -> None:  # noqa: ANN001
-        probe(page)
-
     fetcher = _ProbeCamoufoxFetcher(
-        domain_policy, subresource_domains, probe=_capturing_probe,
+        domain_policy, subresource_domains, probe=probe,
         nav_timeout_seconds=fetcher_kwargs.pop("nav_timeout_seconds", 10),
         fetch_timeout_seconds=fetcher_kwargs.pop("fetch_timeout_seconds", 25),
         **fetcher_kwargs)
@@ -155,8 +134,6 @@ def _run_probe(domain_policy, probe, *, url="https://example.com/",
         camoufox.PinningProxy = orig_proxy_cls
         if neutralize_validate_target:
             camoufox.validate_target = orig_validate
-        if out is not None and "proxy" in holder:
-            out["proxy"] = holder["proxy"]
     return holder["proxy"]
 
 
@@ -239,10 +216,7 @@ class _NoTrafficDialPinningProxy(_RecordingPinningProxy):
 
 
 class CamoufoxPositivePinPathTest(_ImageGatedCase):
-    """Gate finding F6: proofs 1 and 3 both stop at ip_is_safe refusing a
-    non-global pin -- neither exercises the path where the domain IS
-    allowed, resolution succeeds, and a dial actually happens. Proves
-    "resolve once and pin" concretely: getaddrinfo answers 104.18.0.1 on
+    """Proves "resolve once and pin": getaddrinfo answers 104.18.0.1 on
     its FIRST call and 127.0.0.1 (a rebind) on any later call, and the
     real dial is still to the FIRST answer -- a re-resolution bug would
     show up as a dial to 127.0.0.1 instead."""
@@ -309,15 +283,11 @@ def _run_traced(script: str, timeout: float) -> tuple[str, str]:
         return proc.stdout + proc.stderr, log_text
 
 
-# strace 6.13 (MEASURED, gate finding): IPv4 is sin_addr=inet_addr("x"),
-# never the bare quoted form the previous regex assumed -- that bug made
-# the destination set silently empty for ANY IPv4 connection. Scans
-# connect/sendto/sendmsg/sendmmsg uniformly (a UDP resolver often issues
-# sendmmsg with no separate connect()) rather than connect() alone.
+# strace 6.13 writes IPv4 as sin_addr=inet_addr("x"). Scans
+# connect/sendto/sendmsg/sendmmsg uniformly since a UDP resolver often
+# issues sendmmsg with no separate connect().
 _EGRESS_SYSCALL_RE = re.compile(r'\b(?:connect|sendto|sendmsg|sendmmsg)\(')
-# IPv6 form MEASURED via diag_ipv6.py on this same strace 6.13: the real
-# line is `inet_pton(AF_INET6, "x", &sin6_addr)`, with NO "sin6_addr="
-# prefix before the call -- the earlier assumed form never matched either.
+# IPv6 is inet_pton(AF_INET6, "x", &sin6_addr), with no "sin6_addr=" prefix.
 _ADDR_RE = re.compile(
     r'sin_addr=inet_addr\("([0-9.]+)"\)'
     r'|inet_pton\(AF_INET6,\s*"([0-9a-fA-F:]+)"')
@@ -326,19 +296,24 @@ _ADDR_RE = re.compile(
 # argument on that line at all), so port 53 evidence often sits on the
 # connect() line instead.
 _PORT53_RE = re.compile(r'sin_port=htons\(53\)')
-# MEASURED (re-gate 3, diag_test1_repro.py): glibc's getaddrinfo runs RFC
-# 6724 source-address selection, which queries the kernel's routing table
-# over an AF_NETLINK socket (RTM_GETROUTE) for each DNS candidate -- that
-# sendmsg() carries the candidate address as NESTED ATTRIBUTE PAYLOAD, not
-# as the socket's own destination, and never sends a single byte over the
-# network. Without this exclusion, this pure local IPC was being counted
-# as real egress to whatever IP the OS happened to consider routing to.
-_AF_NETLINK_RE = re.compile(r'\bAF_NETLINK\b')
+# glibc's RFC 6724 source-address selection queries the routing table
+# over AF_NETLINK (RTM_GETROUTE), carrying the candidate address as a
+# nested attribute rather than as the socket's own destination -- never
+# real egress. Anchored on the sockaddr field, not a bare word match, so
+# a truncated (-s N) string payload containing "AF_NETLINK" is not
+# wrongly excluded.
+_AF_NETLINK_RE = re.compile(r'sa_family=AF_NETLINK')
 
 
-def _non_loopback_egress_ips(log_text: str) -> set[str]:
+def _non_loopback_egress_ips(log_text: str, pids: set[str] | None = None) -> set[str]:
+    """pids=None scans the whole trace; a PID/TID set restricts to lines
+    attributed to it (e.g. Firefox's own process tree)."""
     ips: set[str] = set()
     for line in log_text.splitlines():
+        if pids is not None:
+            pid_match = re.match(r'^(\d+)\s', line)
+            if not pid_match or pid_match.group(1) not in pids:
+                continue
         if not _EGRESS_SYSCALL_RE.search(line) or _AF_NETLINK_RE.search(line):
             continue
         for match in _ADDR_RE.finditer(line):
@@ -352,24 +327,22 @@ def _non_loopback_egress_ips(log_text: str) -> set[str]:
     return ips
 
 
-# MEASURED (diag_baseline_strace.py, this gate-fix pass): a genuine
-# connect() to example.com's real resolved IP shows up on the traced
-# python3 PID itself, not on camoufox-bin -- because PinningProxy runs
-# IN-PROCESS (a thread of the SAME python process, not inside Firefox) and
-# its _dialer legitimately dials the resolved target on every accepted
-# CONNECT. That dial is the intended mechanism, not a leak; the actual
-# "did Firefox fall back to a direct connection" question can only be
-# answered by attributing egress to Firefox's OWN process tree.
+# PinningProxy runs IN-PROCESS (a thread of the traced python, not
+# inside Firefox), so its own legitimate dial to a resolved target shows
+# up on the python PID, not on camoufox-bin -- "did Firefox fall back to
+# direct" can only be answered by attributing egress to Firefox's OWN
+# process tree, not the whole trace.
 _EXECVE_RE = re.compile(r'^(\d+)\s+execve\("([^"]+)"', re.MULTILINE)
-# strace -f attributes syscalls by TID, and CLONE_THREAD children (e.g.
-# Firefox's own Socket Thread, which does the actual network I/O) get a
-# TID distinct from the PID that execve'd camoufox-bin, even though
-# ps/getpid() would call it "the same process" (gate finding, re-gate 2).
-# MEASURED (diag_kill.py under -e trace=clone,clone3,fork,vfork): each
-# spawn syscall ends the line with "= <child pid/tid>", the same shape for
-# clone(), the (unsupported here) clone3() attempt, fork() and vfork().
+# strace -f attributes by TID: a CLONE_THREAD child (Firefox's Socket
+# Thread, which does the real network I/O) gets its own TID, distinct
+# from the PID that execve'd camoufox-bin. Under concurrent load strace
+# also splits one spawn syscall across two lines (<unfinished ...> then
+# <... clone resumed>); both carry the SAME parent PID prefix, only the
+# resumed line carries the child id.
 _SPAWN_RE = re.compile(
-    r'^(\d+)\s+(?:clone3?|v?fork)\(.*=\s*(\d+)\s*$', re.MULTILINE)
+    r'^(\d+)\s+(?:clone3?|v?fork)\(.*=\s*(\d+)\s*$'
+    r'|^(\d+)\s+<\.\.\. (?:clone3?|v?fork) resumed>.*=\s*(\d+)\s*$',
+    re.MULTILINE)
 
 
 def _firefox_pids(log_text: str) -> set[str]:
@@ -380,16 +353,13 @@ def _firefox_pids(log_text: str) -> set[str]:
 
 
 def _firefox_process_tree_ids(log_text: str) -> set[str]:
-    """Every PID/TID descending from a camoufox-bin execve, transitively
-    through clone/clone3/fork/vfork -- covers Firefox's own threads (the
-    Socket Thread among them), not just the PIDs that themselves execve'd
-    the binary."""
     seeds = _firefox_pids(log_text)
     if not seeds:
         return set()
     children: dict[str, list[str]] = {}
     for m in _SPAWN_RE.finditer(log_text):
-        children.setdefault(m.group(1), []).append(m.group(2))
+        parent, child = (m.group(1) or m.group(3), m.group(2) or m.group(4))
+        children.setdefault(parent, []).append(child)
     tree = set(seeds)
     frontier = list(seeds)
     while frontier:
@@ -401,33 +371,42 @@ def _firefox_process_tree_ids(log_text: str) -> set[str]:
     return tree
 
 
+# AF_UNIX IPC (e.g. dbus) would satisfy a bare "any network syscall"
+# check without proving the tree's real network activity is attributed.
+_REAL_CONNECT_RE = re.compile(r'\bconnect\(\d+,\s*\{sa_family=AF_INET6?,')
+
+
 def _has_any_egress_for_pids(log_text: str, pids: set[str]) -> bool:
     for line in log_text.splitlines():
         pid_match = re.match(r'^(\d+)\s', line)
         if pid_match and pid_match.group(1) in pids \
-                and _EGRESS_SYSCALL_RE.search(line) \
-                and not _AF_NETLINK_RE.search(line):
+                and _REAL_CONNECT_RE.search(line):
             return True
     return False
 
 
-def _non_loopback_egress_ips_for_pids(log_text: str, pids: set[str]) -> set[str]:
-    ips: set[str] = set()
-    for line in log_text.splitlines():
-        pid_match = re.match(r'^(\d+)\s', line)
-        if not pid_match or pid_match.group(1) not in pids:
-            continue
-        if not _EGRESS_SYSCALL_RE.search(line) or _AF_NETLINK_RE.search(line):
-            continue
-        for match in _ADDR_RE.finditer(line):
-            raw = match.group(1) or match.group(2)
-            try:
-                addr = ipaddress.ip_address(raw)
-            except ValueError:
-                continue
-            if not addr.is_loopback:
-                ips.add(raw)
-    return ips
+# The seed PID (23, the one that execve'd camoufox-bin) reaches its own
+# child ONLY through the unfinished/resumed split -- a regex missing that
+# alternative would never see PID 37 at all. Runs without the image, no
+# strace or camoufox needed.
+_SPLIT_SPAWN_STRACE_EXCERPT = """\
+23    execve("/opt/camoufox/camoufox-bin", ["camoufox-bin"], 0x0 /* 1 vars */) = 0
+23    clone(child_stack=0x1, flags=CLONE_VM|CLONE_THREAD <unfinished ...>
+23    <... clone resumed>)              = 37
+37    connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("192.0.2.1")}, 16) = -1 ENETUNREACH
+"""
+
+
+class SplitSpawnAttributionTest(unittest.TestCase):
+    def test_resumed_line_child_is_attributed_to_the_tree(self) -> None:
+        tree = _firefox_process_tree_ids(_SPLIT_SPAWN_STRACE_EXCERPT)
+        self.assertIn(
+            "37", tree,
+            f"a clone() split across unfinished/resumed lines was not "
+            f"attributed to the process tree: {tree}")
+        self.assertTrue(
+            _has_any_egress_for_pids(_SPLIT_SPAWN_STRACE_EXCERPT, tree),
+            "the attributed tree's own connect() was not detected")
 
 
 # Positive control for every strace-based proof below: deliberate,
@@ -461,14 +440,19 @@ _STRACE_POSITIVE_CONTROL = (
 )
 
 
-@unittest.skipUnless(_STRACE, "strace not installed in this image -- run the "
-                      "TEST container (never the shipped one) with strace "
-                      "installed and CAP_SYS_PTRACE to exercise this proof")
 class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
     def setUp(self) -> None:
         super().setUp()
-        if _STRACE is None:
-            self.skipTest("strace not installed")
+        if _STRACE is not None:
+            return
+        if os.environ.get("KERDOOS_IMAGE_STRACE") == "1":
+            self.fail(
+                "KERDOOS_IMAGE_STRACE=1 but strace is not installed -- "
+                "run the autonomous-test image with CAP_SYS_PTRACE")
+        self.skipTest(
+            "strace not installed (KERDOOS_IMAGE_STRACE=1 not set) -- "
+            "run the TEST container (never the shipped one) with strace "
+            "installed and CAP_SYS_PTRACE to exercise this proof")
 
     def test_pinned_target_never_leaves_the_loopback_proxy(self) -> None:
         # 192.0.2.1 (TEST-NET-1) is non-global -- MEASURED: ip_is_safe
@@ -628,7 +612,7 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             "no network syscall at all was attributed to Firefox's own "
             "process tree -- the PID/TID attribution is not capturing "
             "real Firefox activity, so the zero below proves nothing")
-        firefox_egress = _non_loopback_egress_ips_for_pids(log_text, firefox_pids)
+        firefox_egress = _non_loopback_egress_ips(log_text, firefox_pids)
         self.assertEqual(
             firefox_egress, set(),
             f"the Firefox process itself made a non-loopback connection "
@@ -705,16 +689,17 @@ class _HitCounter:
 
 
 class _Listener:
-    def __init__(self, family: int, kind: int, host: str, port: int,
+    """TCP only -- no channel this suite drives can reach a raw UDP
+    listener (RTCPeerConnection/WebTransport are undefined)."""
+
+    def __init__(self, family: int, host: str, port: int,
                  counter: _HitCounter) -> None:
-        self._srv = socket.socket(family, kind)
+        self._srv = socket.socket(family, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._srv.bind((host, port))
         self._counter = counter
         self._stop = threading.Event()
-        self._is_stream = kind == socket.SOCK_STREAM
-        if self._is_stream:
-            self._srv.listen(128)
+        self._srv.listen(128)
         self._srv.settimeout(0.2)
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
@@ -722,19 +707,15 @@ class _Listener:
     def _serve(self) -> None:
         while not self._stop.is_set():
             try:
-                if self._is_stream:
-                    conn, _ = self._srv.accept()
-                    self._counter.inc()
-                    try:
-                        conn.sendall(
-                            b"HTTP/1.1 204 No Content\r\n"
-                            b"Content-Length: 0\r\n\r\n")
-                    except OSError:
-                        pass
-                    conn.close()
-                else:
-                    self._srv.recvfrom(65536)
-                    self._counter.inc()
+                conn, _ = self._srv.accept()
+                self._counter.inc()
+                try:
+                    conn.sendall(
+                        b"HTTP/1.1 204 No Content\r\n"
+                        b"Content-Length: 0\r\n\r\n")
+                except OSError:
+                    pass
+                conn.close()
             except socket.timeout:
                 continue
             except OSError:
@@ -747,31 +728,20 @@ class _Listener:
 
     def probe_from_python(self) -> None:
         addr = self._srv.getsockname()
-        if self._is_stream:
-            with socket.socket(self._srv.family, socket.SOCK_STREAM) as s:
-                s.settimeout(2.0)
-                s.connect(addr[:2] if self._srv.family == socket.AF_INET6
-                          else addr)
-                s.sendall(b"GET / HTTP/1.1\r\n\r\n")
-        else:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.sendto(b"probe", addr)
+        with socket.socket(self._srv.family, socket.SOCK_STREAM) as s:
+            s.settimeout(2.0)
+            s.connect(addr[:2] if self._srv.family == socket.AF_INET6
+                      else addr)
+            s.sendall(b"GET / HTTP/1.1\r\n\r\n")
 
 
-# Driven via page.evaluate() directly (see module docstring): a <script>
-# tag embedded in page.set_content()'s HTML never runs on this build. All
-# targets are https:// since PinningProxy._handle only parses CONNECT --
-# a plain http:// proxied GET bypasses the domain/IP checks entirely.
-# Attempts are reported via console.log, captured by a page-level
-# listener attached in Python BEFORE this runs (MEASURED: form.submit()
-# to a same-tick-created named iframe target, and window.open(), can
-# still navigate the TOP-level context on this build, destroying the
-# execution context page.evaluate() needs to return its value -- a
-# page-level console listener survives that, a JS return value does not).
-# No UDP stimulus: RTCPeerConnection/WebTransport are undefined on this
-# build, so no JS API can open a raw UDP channel at all -- the UDP
-# listener below was REMOVED rather than kept as a permanently-untested
-# zero (gate finding F7).
+# All targets are https:// since PinningProxy._handle only parses
+# CONNECT -- a plain http:// GET bypasses the domain/IP checks. Attempts
+# are reported via console.log: a page-level listener survives the
+# top-level navigation form.submit()/window.open() can still trigger on
+# this build, unlike page.evaluate()'s own return value. No UDP
+# stimulus: RTCPeerConnection/WebTransport are undefined here, so no JS
+# API can open a raw UDP channel.
 _HOSTILE_PROBE_JS = """
 async () => {
   const t80 = 'https://127.0.0.1:80/';
@@ -870,15 +840,13 @@ class CamoufoxLoopbackChannelsTest(_ImageGatedCase):
     def test_zero_hits_with_a_positive_control(self) -> None:
         counter = _HitCounter()
         listeners = [
-            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 80, counter),
-            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 443, counter),
-            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8765, counter),
-            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8766, counter),
-            _Listener(socket.AF_INET6, socket.SOCK_STREAM, "::1", 8765, counter),
-            # No UDP listener (gate finding F7): RTCPeerConnection and
-            # WebTransport are both undefined on this build, so no JS API
-            # exists that could ever drive a stimulus toward one -- kept
-            # would have been a permanently-untested zero.
+            _Listener(socket.AF_INET, "127.0.0.1", 80, counter),
+            _Listener(socket.AF_INET, "127.0.0.1", 443, counter),
+            _Listener(socket.AF_INET, "127.0.0.1", 8765, counter),
+            _Listener(socket.AF_INET, "127.0.0.1", 8766, counter),
+            _Listener(socket.AF_INET6, "::1", 8765, counter),
+            # No UDP listener: no JS API can drive a stimulus toward one
+            # (RTCPeerConnection/WebTransport are undefined here).
         ]
         seen: dict = {"attempted": []}
         try:
@@ -947,14 +915,10 @@ class CamoufoxLoopbackChannelsTest(_ImageGatedCase):
                 listener.stop()
 
 
-# Driven SEQUENTIALLY, one target at a time (gate finding F7): running
-# these alongside the 12-channel hostile page above MEASURABLY starved
-# them of a connection within the test's time budget (Firefox's own
-# per-destination connection-pool limits), which read as "never reached
-# the proxy" for a reason unrelated to any security control -- confirmed
-# by the SAME fetches succeeding in isolation (diag_isolated_localhost_
-# via_runprobe.py). A dedicated, uncontended probe is what actually
-# measures the refusal.
+# Driven SEQUENTIALLY, one target at a time: running these alongside the
+# hostile page above starved them of a connection within the test's time
+# budget (Firefox's own per-destination connection-pool limit), which
+# read as "never reached the proxy" for a reason unrelated to security.
 _SPECIAL_TARGETS_PROBE_JS = """
 async () => {
   const targets = [
@@ -989,8 +953,8 @@ class CamoufoxSpecialAddressTargetsTest(_ImageGatedCase):
     def test_special_address_targets_are_refused(self) -> None:
         counter = _HitCounter()
         listeners = [
-            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8765, counter),
-            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8766, counter),
+            _Listener(socket.AF_INET, "127.0.0.1", 8765, counter),
+            _Listener(socket.AF_INET, "127.0.0.1", 8766, counter),
         ]
         seen: dict = {"attempted": []}
         try:
@@ -1065,16 +1029,12 @@ class CamoufoxDisabledBrowserApisTest(_ImageGatedCase):
 
 
 class CamoufoxAllowedVsDisallowedChannelTest(_ImageGatedCase):
-    """Gate finding B4: the previous version used a literal IP
-    (127.0.0.1:9999, refused by _is_hostname_shaped before any dial --
-    dials can NEVER contain a literal-IP authority regardless of allow or
-    deny), a default-mode fetch() inside the Worker (CORS rejection and a
-    proxy refusal are indistinguishable as a plain "threw"), and no
-    listener behind the disallowed target (its own zero is not
-    attributable to the proxy). Fixed: a real hostname outside the
-    policy, no-cors throughout, and the domain-refused WARNING plus
-    proxy.heads prove the proxy was actually consulted and refused it,
-    rather than merely never being reached."""
+    """A literal IP (e.g. 127.0.0.1:9999) is refused by _is_hostname_shaped
+    before any dial, so it can never appear in `dials` regardless of
+    allow/deny -- uses a real hostname outside the policy instead,
+    no-cors throughout (a default-mode fetch makes a CORS rejection and a
+    proxy refusal indistinguishable), with the domain-refused WARNING and
+    proxy.heads proving the proxy was actually consulted."""
 
     _POLICY = DomainPolicy(frozenset({"example.com"}))
 
@@ -1146,17 +1106,12 @@ def _network_is_reachable() -> bool:
 
 
 class CamoufoxNoNetworkZeroDownloadTest(_ImageGatedCase):
-    """Gate finding B2: the previous version set os.environ["HOME"] on the
-    ALREADY-RUNNING test process -- too late, the camoufox package's own
-    pkgman module freezes its install directory from $HOME at IMPORT time
-    (possibly already imported by an earlier test in the same process),
-    and validate_target resolves the primary host and raises before any
-    launch is even attempted under a real --network none (swallowed by a
-    bare assertRaises(Exception), measured 1 passed in 0.23s with zero
-    real exec). Fixed: HOME is set on a FRESH subprocess's environment
-    before the interpreter starts, validate_target is neutralized the
-    same way the in-process probes do it, and the proof requires a
-    page.evaluate() result as evidence Firefox actually ran."""
+    """camoufox's pkgman module freezes its install directory from $HOME
+    at IMPORT time, so HOME must be set on a FRESH subprocess's
+    environment before the interpreter starts, not on the already-running
+    test process. validate_target is neutralized the same way the
+    in-process probes do it, and the proof requires a page.evaluate()
+    result as evidence Firefox actually ran under --network none."""
 
     def test_launch_needs_zero_network_download(self) -> None:
         # A test cannot drop its OWN container's network from inside
@@ -1229,6 +1184,11 @@ class CamoufoxNoNetworkZeroDownloadTest(_ImageGatedCase):
                 f"--network none: {stdout}")
 
 
+class _AllContentProcessesAreRoot(AssertionError):
+    """Raised only for the uid==0 finding itself, so xfail(raises=...)
+    cannot mistake a broken process search for that specific finding."""
+
+
 class CamoufoxProcessHardeningTest(_ImageGatedCase):
     def setUp(self) -> None:
         super().setUp()
@@ -1247,20 +1207,37 @@ class CamoufoxProcessHardeningTest(_ImageGatedCase):
                 return line.split(":", 1)[1].strip()
         return None
 
-    def test_content_process_sandbox_is_active(self) -> None:
-        """Gate finding B3: the previous version read /proc AFTER
-        _run_probe returned, when the browser (and its -contentproc
-        children) was already torn down -- guaranteed to read None/dead
-        PIDs regardless of reality. MEASURED live, with a page still open
-        (security-auditor, --runxfail): a -contentproc child carries MORE
-        Seccomp filters than this Python process's own baseline (the
-        Docker-imposed default filter both share), even running as root
-        -- so this must be read from INSIDE the probe callback, before
-        the context closes, and compared to a baseline, not to a bare
-        nonzero Seccomp field (which Docker's own default filter would
-        satisfy for any process, sandboxed or not)."""
+    @staticmethod
+    def _find_tab_content_process_pids(pids_before: frozenset,
+                                        deadline_seconds: float = 8.0) -> list:
+        """-contentproc alone is not enough: Firefox also launches
+        "socket"/"rdd"/"forkserver" -contentproc processes with their
+        own unrelated properties. The actual web content process has
+        "tab" as the last element of its argv."""
         import psutil
 
+        me = psutil.Process(os.getpid())
+        candidates: list = []
+        deadline = time.monotonic() + deadline_seconds
+        while not candidates and time.monotonic() < deadline:
+            for p in me.children(recursive=True):
+                if p.pid in pids_before:
+                    continue
+                try:
+                    cmdline = p.cmdline()
+                except psutil.Error:
+                    continue
+                if cmdline and cmdline[-1] == "tab":
+                    candidates.append(p.pid)
+            time.sleep(0.2)
+        return candidates
+
+    def test_content_process_sandbox_is_active(self) -> None:
+        """Reads Seccomp_filters from INSIDE the probe callback, before
+        the context closes, since the process is dead by the time
+        _run_probe returns. Compared to this Python process's own
+        baseline, not to a bare nonzero field, since Docker's own default
+        filter would satisfy that for any process, sandboxed or not."""
         pids_before = camoufox._snapshot_descendant_pids()
         baseline_raw = self._read_status_field(os.getpid(), "Seccomp_filters")
         baseline = int(baseline_raw) if baseline_raw else 0
@@ -1268,30 +1245,10 @@ class CamoufoxProcessHardeningTest(_ImageGatedCase):
 
         def _probe(page) -> None:  # noqa: ANN001
             page.evaluate("() => 1")
-            me = psutil.Process(os.getpid())
-            candidates: list = []
-            deadline = time.monotonic() + 8.0
-            while not candidates and time.monotonic() < deadline:
-                for p in me.children(recursive=True):
-                    if p.pid in pids_before:
-                        continue
-                    try:
-                        cmdline = p.cmdline()
-                    except psutil.Error:
-                        continue
-                    # -contentproc alone is not enough (re-gate finding):
-                    # Firefox also launches "socket", "rdd", "forkserver"
-                    # -contentproc processes with their OWN unrelated
-                    # seccomp filter counts, which can mask a disabled
-                    # CONTENT (web page) sandbox behind an any() match.
-                    # MEASURED (diag_contentproc_argv.py): the actual web
-                    # content process is the one whose LAST argv is "tab".
-                    if cmdline and cmdline[-1] == "tab":
-                        candidates.append(p.pid)
-                time.sleep(0.2)
             # Read Seccomp_filters HERE, while the page (and its content
-            # process) is still alive -- the parent test method's own
-            # context has not closed yet at this point.
+            # process) is still alive -- it is dead by the time _run_probe
+            # returns.
+            candidates = self._find_tab_content_process_pids(pids_before)
             seen["candidates"] = candidates
             seen["readings"] = [
                 (pid, self._read_status_field(pid, "Seccomp_filters"))
@@ -1316,33 +1273,15 @@ class CamoufoxProcessHardeningTest(_ImageGatedCase):
             f"this test process's own baseline ({baseline}): {readings}")
 
     @pytest.mark.xfail(
-        strict=True,
-        reason="card 371ecc59: autonomous runs the browser as root -- "
-        "MEASURED 2026-09-14 on kerdoos-t4:6835df6. Remove this xfail the "
-        "day 371ecc59 lands (strict=True turns an unexpected pass into a "
-        "failure so it cannot go unnoticed)")
+        raises=_AllContentProcessesAreRoot, strict=True,
+        reason="card 371ecc59: autonomous runs the browser as root")
     def test_content_process_runs_non_root(self) -> None:
-        import psutil
-
         pids_before = camoufox._snapshot_descendant_pids()
         seen: dict = {}
 
         def _probe(page) -> None:  # noqa: ANN001
             page.evaluate("() => 1")
-            me = psutil.Process(os.getpid())
-            candidates: list = []
-            deadline = time.monotonic() + 8.0
-            while not candidates and time.monotonic() < deadline:
-                for p in me.children(recursive=True):
-                    if p.pid in pids_before:
-                        continue
-                    try:
-                        cmdline = p.cmdline()
-                    except psutil.Error:
-                        continue
-                    if any("-contentproc" in arg for arg in cmdline):
-                        candidates.append(p.pid)
-                time.sleep(0.2)
+            candidates = self._find_tab_content_process_pids(pids_before)
             seen["readings"] = [
                 (pid, self._read_status_field(pid, "Uid"))
                 for pid in candidates
@@ -1352,23 +1291,31 @@ class CamoufoxProcessHardeningTest(_ImageGatedCase):
                    fetch_timeout_seconds=20)
 
         readings = seen.get("readings", [])
-        self.assertTrue(readings, "no Firefox content process was found")
+        if not readings:
+            self.fail("no Firefox 'tab' content process was found -- "
+                       "the search itself is broken, distinct from the "
+                       "uid==0 finding this xfail tracks")
         found_nonroot = any(
             uid_line and uid_line.split()[0] != "0"
             for _pid, uid_line in readings)
-        self.assertTrue(
-            found_nonroot,
-            f"every content process ran as uid 0: {readings}")
+        if not found_nonroot:
+            raise _AllContentProcessesAreRoot(
+                f"every content process ran as uid 0: {readings}")
 
 
 class CamoufoxBinaryProvenanceTest(_ImageGatedCase):
     def setUp(self) -> None:
         super().setUp()
-        if not _network_is_reachable():
-            self.skipTest(
-                "no network reachable from the test harness -- this proof "
-                "needs real egress to github.com, separate from the "
-                "browser's own SSRF-pinned proxy")
+        if _network_is_reachable():
+            return
+        if os.environ.get("KERDOOS_IMAGE_ONLINE") == "1":
+            self.fail(
+                "KERDOOS_IMAGE_ONLINE=1 but no network is reachable from "
+                "the test harness")
+        self.skipTest(
+            "no network reachable (KERDOOS_IMAGE_ONLINE=1 not set) -- "
+            "this proof needs real egress to github.com, separate from "
+            "the browser's own SSRF-pinned proxy")
 
     @staticmethod
     def _sha256_of_zip_member(data: bytes, member_name: str) -> str:
@@ -1415,7 +1362,10 @@ class CamoufoxBinaryProvenanceTest(_ImageGatedCase):
         try:
             with urlopen(api_url, timeout=30) as resp:
                 release = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001 -- best-effort cross-check
+        except Exception as exc:  # noqa: BLE001 -- network-dependent step
+            if os.environ.get("KERDOOS_IMAGE_ONLINE") == "1":
+                self.fail(f"KERDOOS_IMAGE_ONLINE=1 but the GitHub release "
+                          f"API is unreachable: {exc}")
             self.skipTest(f"GitHub release API unreachable: {exc}")
         asset = next(
             (a for a in release.get("assets", [])
@@ -1436,9 +1386,8 @@ class CamoufoxBinaryProvenanceTest(_ImageGatedCase):
 
 
 class DockerfileDefaultTargetTest(unittest.TestCase):
-    """Gate finding F5: appending a new stage at the end of the file makes
-    it the implicit default for a flagless `docker build .` (buildx picks
-    the LAST stage when none is named) -- runs on the host, needs no real
+    """buildx picks the LAST stage in the file as the implicit default
+    for a flagless `docker build .` -- runs on the host, needs no real
     Camoufox, so it is not gated by _ImageGatedCase."""
 
     _DOCKER = shutil.which("docker")
@@ -1446,8 +1395,12 @@ class DockerfileDefaultTargetTest(unittest.TestCase):
     def setUp(self) -> None:
         if self._DOCKER is None:
             self.skipTest("docker CLI not available")
+        info = subprocess.run([self._DOCKER, "info"], capture_output=True,
+                               text=True, timeout=10)
+        if info.returncode != 0:
+            self.skipTest(f"docker daemon not reachable: {info.stderr}")
 
-    def test_default_target_is_not_the_strace_test_stage(self) -> None:
+    def test_default_target_is_release_not_the_strace_test_stage(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         proc = subprocess.run(
             [self._DOCKER, "buildx", "build", "--call=targets", str(repo_root)],
@@ -1458,7 +1411,40 @@ class DockerfileDefaultTargetTest(unittest.TestCase):
             None)
         self.assertIsNotNone(
             default_line, f"no stage was annotated (default): {output}")
+        self.assertIn(
+            "release", default_line,
+            f"the default stage is not 'release': {default_line}")
         self.assertNotIn(
             "autonomous-test", default_line,
             f"a flagless docker build would use the strace-enabled "
             f"TEST-only stage: {default_line}")
+
+
+class DockerfileLastStageTest(unittest.TestCase):
+    """Docker-free structural check: the LAST FROM line in the file must
+    be exactly `FROM autonomous AS release`, with no instruction after
+    it (only comments/blank lines allowed) -- this is what actually
+    makes `release` the buildx default, independent of a running daemon."""
+
+    def setUp(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        self._dockerfile = repo_root / "Dockerfile"
+        if not self._dockerfile.is_file():
+            self.skipTest(
+                "Dockerfile not reachable from this test's own directory -- "
+                "only the tests/ tree is mounted when run inside the image")
+
+    def test_last_from_line_is_release_with_nothing_after(self) -> None:
+        lines = self._dockerfile.read_text(encoding="utf-8").splitlines()
+        from_indexes = [i for i, line in enumerate(lines)
+                        if line.strip().upper().startswith("FROM ")]
+        self.assertTrue(from_indexes, "no FROM instruction found")
+        last_from = lines[from_indexes[-1]].strip()
+        self.assertEqual(
+            last_from, "FROM autonomous AS release",
+            f"the last FROM line is not 'FROM autonomous AS release': "
+            f"{last_from!r}")
+        trailing = [line.strip() for line in lines[from_indexes[-1] + 1:]]
+        self.assertTrue(
+            all(not line or line.startswith("#") for line in trailing),
+            f"an instruction follows the last FROM line: {trailing}")

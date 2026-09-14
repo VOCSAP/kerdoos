@@ -69,9 +69,26 @@ docs/adr/            architecture decision records (authoritative)
     sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py::CamoufoxNoNetworkZeroDownloadTest"
   ```
   The strace-based proofs in the same file (network syscall audit) need a
-  separate TEST-only image with `strace` installed and
-  `--cap-add SYS_PTRACE` at `docker run` -- never added to the shipped
-  image. They skip cleanly (not a hard failure) when `strace` is absent.
+  separate TEST-only image (`autonomous-test` target, `strace` installed)
+  and `--cap-add SYS_PTRACE` at `docker run` -- never added to the shipped
+  image:
+  ```bash
+  docker build --target autonomous-test -t kerdoos:autonomous-test .
+  docker run --rm --cap-add SYS_PTRACE \
+    -e KERDOOS_REQUIRE_IMAGE_TESTS=1 -e KERDOOS_IMAGE_STRACE=1 \
+    -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous-test \
+    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py -k StraceNetworkAudit"
+  ```
+  A few proofs need real outbound network to github.com (binary provenance
+  check), separate from the browser's own SSRF-pinned proxy:
+  ```bash
+  docker run --rm -e KERDOOS_REQUIRE_IMAGE_TESTS=1 -e KERDOOS_IMAGE_ONLINE=1 \
+    -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
+    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py -k BinaryProvenance"
+  ```
+  Each `KERDOOS_IMAGE_*` marker is the caller's promise that the matching
+  precondition holds; set with `KERDOOS_REQUIRE_IMAGE_TESTS=1` and the
+  precondition still missing, the proof hard-fails instead of skipping.
 
 ## Invariants (do not violate)
 

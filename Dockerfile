@@ -302,20 +302,15 @@ RUN set -eu; \
     echo "OK: camoufox $PIN at $EXE, camoufox_ready() True against the real install"
 
 # --- autonomous-test: TEST-ONLY, never published -- adds strace for the
-# network-syscall-audit proof suite. Never in the shipped image: the
-# capability strace needs (CAP_SYS_PTRACE) is granted at `docker run` time
-# only for a container built FROM this stage, on the operator's own test
-# invocation. Every real build command here passes --target explicitly, but
-# `docker buildx build --call=targets` still reports the LAST stage in the
-# file as the implicit default for a flagless build -- the `release` stage
-# below exists only to keep that default identical to `autonomous` (no
-# strace, no test-only surface) rather than to this one.
+# network-syscall-audit proof suite. CAP_SYS_PTRACE is granted at
+# `docker run` time only, never baked into the shipped image.
 FROM autonomous AS autonomous-test
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends strace \
     && rm -rf /var/lib/apt/lists/*
 
-# --- release: identical to `autonomous`, LAST in the file on purpose --
-# see the comment above autonomous-test for why this exists at all.
+# --- release: identical to `autonomous`, kept LAST so a flagless
+# `docker build .` (implicit default = last stage) never picks the
+# strace-enabled test stage above instead.
 FROM autonomous AS release
