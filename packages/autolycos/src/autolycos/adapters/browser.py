@@ -1,9 +1,8 @@
 """Browser Fetcher adapter (patchright/Chromium, MVP tier `browser`).
 
-Escalation tier for SPA sites whose price is injected by client-side JS
-(MercadoLivre today; the SAME adapter is reused by Terabyte/Pichau, only the DOM
-parser differs). A headless Chromium renders the page so the DOM the parser sees
-matches what a real browser produces.
+Tier for sites whose content is injected by client-side JS. Which sites use it
+is the catalogue's decision, not this adapter's. A headless Chromium renders the
+page so the DOM the parser sees matches what a real browser produces.
 
 Undetected launch (Phase 2b): the browser is LAUNCHED by patchright -- a
 drop-in fork of playwright whose deep launch-time patches make Chromium
@@ -280,7 +279,7 @@ class BrowserFetcher:
     """Fetcher port implementation backed by Playwright (headless Chromium).
 
     `subresource_domains` is a per-site allowlist of RENDER-critical CDN hosts
-    (e.g. MercadoLivre's http2.mlstatic.com bundle) loadable IN ADDITION to the
+    (e.g. a site's JS bundle host) loadable IN ADDITION to the
     navigation allowlist, so a full client-side render can hydrate. It is
     deliberately SEPARATE from the injected DomainPolicy, which alone gates the
     PRIMARY target: validate_target runs against the DomainPolicy only, so a
