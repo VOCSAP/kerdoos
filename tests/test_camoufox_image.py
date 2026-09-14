@@ -208,6 +208,10 @@ class CamoufoxPinnedConnectTest(_ImageGatedCase):
             f"fetch to the non-routable pin unexpectedly succeeded: "
             f"{result['outcome']}")
         self.assertEqual(
+            proxy.heads, ["CONNECT example.com:443"],
+            f"expected the CONNECT to actually reach the proxy (proving "
+            f"the domain check passed), got {proxy.heads}")
+        self.assertEqual(
             proxy.dials, [],
             f"the proxy dialed {proxy.dials} despite the pin resolving to "
             "a non-global address")
@@ -297,7 +301,8 @@ def _run_traced(script: str, timeout: float) -> tuple[str, str]:
         log_path = Path(tmp_dir) / "trace.log"
         script_path.write_text(script, encoding="utf-8")
         proc = subprocess.run(
-            [_STRACE, "-f", "-qq", "-e", "trace=execve,network",
+            [_STRACE, "-f", "-qq", "-e",
+             "trace=execve,clone,clone3,fork,vfork,network",
              "-o", str(log_path), sys.executable, str(script_path)],
             capture_output=True, text=True, timeout=timeout)
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -310,20 +315,31 @@ def _run_traced(script: str, timeout: float) -> tuple[str, str]:
 # connect/sendto/sendmsg/sendmmsg uniformly (a UDP resolver often issues
 # sendmmsg with no separate connect()) rather than connect() alone.
 _EGRESS_SYSCALL_RE = re.compile(r'\b(?:connect|sendto|sendmsg|sendmmsg)\(')
+# IPv6 form MEASURED via diag_ipv6.py on this same strace 6.13: the real
+# line is `inet_pton(AF_INET6, "x", &sin6_addr)`, with NO "sin6_addr="
+# prefix before the call -- the earlier assumed form never matched either.
 _ADDR_RE = re.compile(
     r'sin_addr=inet_addr\("([0-9.]+)"\)'
-    r'|sin6_addr=inet_pton\(AF_INET6,\s*"([0-9a-fA-F:]+)"')
+    r'|inet_pton\(AF_INET6,\s*"([0-9a-fA-F:]+)"')
 # Not anchored to sendto/sendmsg/sendmmsg alone: glibc's stub resolver can
 # issue connect() on a UDP socket then plain send() (no destination
 # argument on that line at all), so port 53 evidence often sits on the
 # connect() line instead.
 _PORT53_RE = re.compile(r'sin_port=htons\(53\)')
+# MEASURED (re-gate 3, diag_test1_repro.py): glibc's getaddrinfo runs RFC
+# 6724 source-address selection, which queries the kernel's routing table
+# over an AF_NETLINK socket (RTM_GETROUTE) for each DNS candidate -- that
+# sendmsg() carries the candidate address as NESTED ATTRIBUTE PAYLOAD, not
+# as the socket's own destination, and never sends a single byte over the
+# network. Without this exclusion, this pure local IPC was being counted
+# as real egress to whatever IP the OS happened to consider routing to.
+_AF_NETLINK_RE = re.compile(r'\bAF_NETLINK\b')
 
 
 def _non_loopback_egress_ips(log_text: str) -> set[str]:
     ips: set[str] = set()
     for line in log_text.splitlines():
-        if not _EGRESS_SYSCALL_RE.search(line):
+        if not _EGRESS_SYSCALL_RE.search(line) or _AF_NETLINK_RE.search(line):
             continue
         for match in _ADDR_RE.finditer(line):
             raw = match.group(1) or match.group(2)
@@ -345,6 +361,15 @@ def _non_loopback_egress_ips(log_text: str) -> set[str]:
 # "did Firefox fall back to a direct connection" question can only be
 # answered by attributing egress to Firefox's OWN process tree.
 _EXECVE_RE = re.compile(r'^(\d+)\s+execve\("([^"]+)"', re.MULTILINE)
+# strace -f attributes syscalls by TID, and CLONE_THREAD children (e.g.
+# Firefox's own Socket Thread, which does the actual network I/O) get a
+# TID distinct from the PID that execve'd camoufox-bin, even though
+# ps/getpid() would call it "the same process" (gate finding, re-gate 2).
+# MEASURED (diag_kill.py under -e trace=clone,clone3,fork,vfork): each
+# spawn syscall ends the line with "= <child pid/tid>", the same shape for
+# clone(), the (unsupported here) clone3() attempt, fork() and vfork().
+_SPAWN_RE = re.compile(
+    r'^(\d+)\s+(?:clone3?|v?fork)\(.*=\s*(\d+)\s*$', re.MULTILINE)
 
 
 def _firefox_pids(log_text: str) -> set[str]:
@@ -354,13 +379,45 @@ def _firefox_pids(log_text: str) -> set[str]:
     }
 
 
+def _firefox_process_tree_ids(log_text: str) -> set[str]:
+    """Every PID/TID descending from a camoufox-bin execve, transitively
+    through clone/clone3/fork/vfork -- covers Firefox's own threads (the
+    Socket Thread among them), not just the PIDs that themselves execve'd
+    the binary."""
+    seeds = _firefox_pids(log_text)
+    if not seeds:
+        return set()
+    children: dict[str, list[str]] = {}
+    for m in _SPAWN_RE.finditer(log_text):
+        children.setdefault(m.group(1), []).append(m.group(2))
+    tree = set(seeds)
+    frontier = list(seeds)
+    while frontier:
+        pid = frontier.pop()
+        for child in children.get(pid, []):
+            if child not in tree:
+                tree.add(child)
+                frontier.append(child)
+    return tree
+
+
+def _has_any_egress_for_pids(log_text: str, pids: set[str]) -> bool:
+    for line in log_text.splitlines():
+        pid_match = re.match(r'^(\d+)\s', line)
+        if pid_match and pid_match.group(1) in pids \
+                and _EGRESS_SYSCALL_RE.search(line) \
+                and not _AF_NETLINK_RE.search(line):
+            return True
+    return False
+
+
 def _non_loopback_egress_ips_for_pids(log_text: str, pids: set[str]) -> set[str]:
     ips: set[str] = set()
     for line in log_text.splitlines():
         pid_match = re.match(r'^(\d+)\s', line)
         if not pid_match or pid_match.group(1) not in pids:
             continue
-        if not _EGRESS_SYSCALL_RE.search(line):
+        if not _EGRESS_SYSCALL_RE.search(line) or _AF_NETLINK_RE.search(line):
             continue
         for match in _ADDR_RE.finditer(line):
             raw = match.group(1) or match.group(2)
@@ -373,12 +430,16 @@ def _non_loopback_egress_ips_for_pids(log_text: str, pids: set[str]) -> set[str]
     return ips
 
 
-# Positive control for every strace-based proof below: a deliberate,
-# clearly-artificial connect() the traced child always makes, so a test
+# Positive control for every strace-based proof below: deliberate,
+# clearly-artificial connect()s the traced child always makes, so a test
 # can tell "the instrument saw nothing" from "there was nothing to see" --
-# TEST-NET-3, distinct from the 192.0.2.1 (TEST-NET-1) pin used elsewhere
-# so the two are never confused in the parsed destination set.
+# TEST-NET-3 (IPv4) and 2001:db8::/32 (IPv6 documentation range), distinct
+# from the 192.0.2.1 (TEST-NET-1) pin used elsewhere so none are confused
+# in the parsed destination set. Both address families are controlled for
+# separately: the IPv4 and IPv6 extraction paths in _ADDR_RE are two
+# independent regex alternatives that can (and did) break independently.
 _STRACE_CONTROL_IP = "203.0.113.77"
+_STRACE_CONTROL_IPV6 = "2001:db8::77"
 _STRACE_POSITIVE_CONTROL = (
     "import socket as _ctrl_socket\n"
     "_ctrl = _ctrl_socket.socket(_ctrl_socket.AF_INET, _ctrl_socket.SOCK_STREAM)\n"
@@ -389,6 +450,14 @@ _STRACE_POSITIVE_CONTROL = (
     "    pass\n"
     "finally:\n"
     "    _ctrl.close()\n"
+    "_ctrl6 = _ctrl_socket.socket(_ctrl_socket.AF_INET6, _ctrl_socket.SOCK_STREAM)\n"
+    "_ctrl6.settimeout(0.2)\n"
+    "try:\n"
+    f"    _ctrl6.connect(('{_STRACE_CONTROL_IPV6}', 443))\n"
+    "except OSError:\n"
+    "    pass\n"
+    "finally:\n"
+    "    _ctrl6.close()\n"
 )
 
 
@@ -437,7 +506,11 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             "positive control failed -- the instrument never saw the "
             "deliberate IPv4 connect() to the control address, so a zero "
             "elsewhere is not trustworthy")
-        destinations = all_ips - {_STRACE_CONTROL_IP}
+        self.assertIn(
+            _STRACE_CONTROL_IPV6, all_ips,
+            "positive control failed -- the instrument never saw the "
+            "deliberate IPv6 connect() to the control address")
+        destinations = all_ips - {_STRACE_CONTROL_IP, _STRACE_CONTROL_IPV6}
         self.assertEqual(
             destinations, set(),
             f"a non-loopback egress was observed beyond the positive "
@@ -465,7 +538,11 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             _STRACE_CONTROL_IP, all_ips,
             "positive control failed -- the instrument never saw the "
             "deliberate IPv4 connect() to the control address")
-        destinations = all_ips - {_STRACE_CONTROL_IP}
+        self.assertIn(
+            _STRACE_CONTROL_IPV6, all_ips,
+            "positive control failed -- the instrument never saw the "
+            "deliberate IPv6 connect() to the control address")
+        destinations = all_ips - {_STRACE_CONTROL_IP, _STRACE_CONTROL_IPV6}
         self.assertEqual(
             destinations, set(),
             f"expected zero egress beyond the positive control, saw: "
@@ -527,11 +604,30 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             _STRACE_CONTROL_IP, all_ips,
             "positive control failed -- the instrument never saw the "
             "deliberate IPv4 connect() to the control address")
-        firefox_pids = _firefox_pids(log_text)
+        self.assertIn(
+            _STRACE_CONTROL_IPV6, all_ips,
+            "positive control failed -- the instrument never saw the "
+            "deliberate IPv6 connect() to the control address")
+        # execve alone only names the PID that ran camoufox-bin, missing
+        # its OWN cloned threads (Firefox's Socket Thread, which does the
+        # real network I/O, gets a distinct TID via CLONE_THREAD) -- the
+        # transitive clone/fork tree is what "Firefox's own process tree"
+        # actually means.
+        firefox_pids = _firefox_process_tree_ids(log_text)
         self.assertTrue(
             firefox_pids,
             "no camoufox-bin process was ever launched (execve not "
             "observed) -- cannot attribute egress to Firefox at all")
+        # Positive control for the ATTRIBUTED set itself: Firefox is
+        # configured to use the loopback proxy for everything, so it MUST
+        # make at least one connect() attributed to this exact PID/TID
+        # set (to the proxy's own loopback port) -- if none shows up, the
+        # attribution mechanism is blind, not the fetch actually silent.
+        self.assertTrue(
+            _has_any_egress_for_pids(log_text, firefox_pids),
+            "no network syscall at all was attributed to Firefox's own "
+            "process tree -- the PID/TID attribution is not capturing "
+            "real Firefox activity, so the zero below proves nothing")
         firefox_egress = _non_loopback_egress_ips_for_pids(log_text, firefox_pids)
         self.assertEqual(
             firefox_egress, set(),
@@ -783,8 +879,8 @@ class CamoufoxLoopbackChannelsTest(_ImageGatedCase):
                     # evaluate() itself survived to return.
                     seen["evaluate_error"] = str(exc)
 
-            _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=8,
-                       fetch_timeout_seconds=30)
+            proxy = _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=8,
+                               fetch_timeout_seconds=30)
 
             _EXPECTED_CHANNELS = {
                 "img", "fetch", "sendBeacon", "websocket", "eventsource",
@@ -798,6 +894,21 @@ class CamoufoxLoopbackChannelsTest(_ImageGatedCase):
                 f"channel, only {attempted} (evaluate_error="
                 f"{seen.get('evaluate_error')!r}) -- a zero-hit "
                 "measurement means nothing for a channel that never fired")
+
+            # heads proves the CONNECTs actually reached the proxy (and
+            # were refused there), not that the browser silently never
+            # tried -- zero hits on the listener alone does not carry
+            # that distinction on its own.
+            _EXPECTED_HEADS = {
+                "CONNECT 127.0.0.1:80", "CONNECT 127.0.0.1:443",
+                "CONNECT 127.0.0.1:8765", "CONNECT 127.0.0.1:8766",
+                "CONNECT [::1]:8765",
+            }
+            missing_heads = _EXPECTED_HEADS - set(proxy.heads)
+            self.assertFalse(
+                missing_heads,
+                f"expected CONNECTs never reached the proxy: "
+                f"{missing_heads}, got heads={proxy.heads}")
 
             self.assertEqual(
                 counter.count, 0,
@@ -1052,7 +1163,14 @@ class CamoufoxProcessHardeningTest(_ImageGatedCase):
                         cmdline = p.cmdline()
                     except psutil.Error:
                         continue
-                    if any("-contentproc" in arg for arg in cmdline):
+                    # -contentproc alone is not enough (re-gate finding):
+                    # Firefox also launches "socket", "rdd", "forkserver"
+                    # -contentproc processes with their OWN unrelated
+                    # seccomp filter counts, which can mask a disabled
+                    # CONTENT (web page) sandbox behind an any() match.
+                    # MEASURED (diag_contentproc_argv.py): the actual web
+                    # content process is the one whose LAST argv is "tab".
+                    if cmdline and cmdline[-1] == "tab":
                         candidates.append(p.pid)
                 time.sleep(0.2)
             # Read Seccomp_filters HERE, while the page (and its content
@@ -1070,8 +1188,8 @@ class CamoufoxProcessHardeningTest(_ImageGatedCase):
         candidates = seen.get("candidates", [])
         self.assertTrue(
             candidates,
-            "no Firefox content process (-contentproc argv) was found "
-            "while the browser was open")
+            "no Firefox 'tab' content process was found while the "
+            "browser was open")
         readings = seen.get("readings", [])
         found_sandboxed = any(
             filters is not None and int(filters) > baseline
