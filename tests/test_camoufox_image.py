@@ -371,9 +371,11 @@ def _firefox_process_tree_ids(log_text: str) -> set[str]:
     return tree
 
 
-# AF_UNIX IPC (e.g. dbus) would satisfy a bare "any network syscall"
-# check without proving the tree's real network activity is attributed.
-_REAL_CONNECT_RE = re.compile(r'\bconnect\(\d+,\s*\{sa_family=AF_INET6?,')
+# Anchored on the proxy's own loopback-only IPv4 bind address (see
+# egress_proxy.py PinningProxy.__init__ default host): a bare AF_INET
+# match would also accept a real bypass connect to a public destination.
+_REAL_CONNECT_RE = re.compile(
+    r'\bconnect\(\d+,\s*\{sa_family=AF_INET,[^}]*sin_addr=inet_addr\("127\.0\.0\.1"\)')
 
 
 def _has_any_egress_for_pids(log_text: str, pids: set[str]) -> bool:
@@ -393,7 +395,7 @@ _SPLIT_SPAWN_STRACE_EXCERPT = """\
 23    execve("/opt/camoufox/camoufox-bin", ["camoufox-bin"], 0x0 /* 1 vars */) = 0
 23    clone(child_stack=0x1, flags=CLONE_VM|CLONE_THREAD <unfinished ...>
 23    <... clone resumed>)              = 37
-37    connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("192.0.2.1")}, 16) = -1 ENETUNREACH
+37    connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("127.0.0.1")}, 16) = 0
 """
 
 
@@ -545,6 +547,7 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             "from autolycos.errors import FetchError\n"
             "class _KillingProxy(PinningProxy):\n"
             "    def _splice(self, a, b):\n"
+            "        print('KILLED', flush=True)\n"
             "        self.stop()\n"
             "        def _sever():\n"
             "            time.sleep(0.05)\n"
@@ -571,9 +574,19 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             "    print('RESULT:other:' + type(exc).__name__ + ':' + str(exc))\n"
         )
         stdout, log_text = _run_traced(script, timeout=90.0)
+        self.assertIn(
+            "KILLED", stdout,
+            f"the deliberate kill was never invoked -- the fetch failed "
+            f"(or succeeded) before ever reaching _splice, proving nothing "
+            f"about a live proxy death: {stdout}")
         self.assertIn("RESULT:FetchError", stdout, stdout)
+        # "total timeout" is CamoufoxFetcher's own outer-ceiling wording
+        # (fetch_timeout_seconds); Playwright's OWN nav-timeout message
+        # ("Timeout Nms exceeded") is the EXPECTED shape of this failure
+        # once the proxy is dead -- it also contains the word "exceeded",
+        # so that word alone cannot be the discriminant.
         self.assertNotIn(
-            "exceeded", stdout,
+            "total timeout", stdout,
             f"the fetch hit its own outer abandonment ceiling instead of "
             f"the deliberate kill -- inconclusive, not a pass: {stdout}")
         # PinningProxy runs IN-PROCESS (a thread of this same traced
