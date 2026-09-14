@@ -25,7 +25,7 @@ import uuid
 import warnings
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, urldefrag, urlsplit
 
 from ..browser_gate import BrowserGate, default_browser_gate
 from ..challenge import looks_challenged
@@ -558,15 +558,18 @@ class CamoufoxFetcher:
             # it). Egress rests on the proxy's CONNECT check and the frozen prefs.
             page = context.new_page()
             # A script navigation after goto commits a document with its own
-            # status; goto's response only describes the first one.
-            document_statuses: list[int] = []
+            # status; goto's response only describes the first one. A status
+            # is matched to the document read by URL, not by arrival order,
+            # so a response landing during the read cannot label it.
+            navigation_responses: list[tuple[str, int]] = []
 
-            def _record_document_status(nav_response) -> None:  # type: ignore[no-untyped-def]
+            def _record_navigation_response(nav_response) -> None:  # type: ignore[no-untyped-def]
                 if (nav_response.request.is_navigation_request()
                         and nav_response.frame.parent_frame is None):
-                    document_statuses.append(nav_response.status)
+                    navigation_responses.append(
+                        (nav_response.url, nav_response.status))
 
-            page.on("response", _record_document_status)
+            page.on("response", _record_navigation_response)
             nav_deadline = time.monotonic() + self._nav_timeout_seconds
             response = page.goto(
                 url, wait_until=_WAIT_UNTIL,
@@ -575,7 +578,13 @@ class CamoufoxFetcher:
                 raise FetchError("no response from navigation")
             document_uri, html = self._settled_content(
                 page, response.status, nav_deadline)
-            status = document_statuses[-1] if document_statuses else response.status
+            # Response.url never carries the fragment documentURI may hold.
+            document_url = urldefrag(document_uri).url
+            status = next(
+                (response_status for response_url, response_status
+                 in reversed(navigation_responses)
+                 if response_url == document_url),
+                response.status)
             self._check_final_document(page.url, url, document_uri)
             if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
                 raise FetchError(

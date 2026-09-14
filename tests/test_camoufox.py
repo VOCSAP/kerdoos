@@ -64,8 +64,9 @@ class _AddonsWithNewcomer(enum.Enum):
 
 class _Response:
     def __init__(self, status: int, main_frame: bool = True,
-                 navigation: bool = True) -> None:
+                 navigation: bool = True, url: str = _URL) -> None:
         self.status = status
+        self.url = url
         self.request = mock.Mock(
             **{"is_navigation_request.return_value": navigation})
         self.frame = mock.Mock(
@@ -129,7 +130,7 @@ class _Page:
         self.goto_args = (url, wait_until, timeout)
         if self._status is None:
             return None
-        response = _Response(self._status)
+        response = _Response(self._status, url=url)
         self._emit(response)
         return response
 
@@ -870,11 +871,17 @@ class FinalDocumentTest(_WiringBase):
                 "http://www.magazineluiza.com.br/p/bab5438g3h/", _URL)
 
     def test_status_is_the_last_main_frame_navigation_response(self) -> None:
-        browser = _Browser(later_responses=[
+        browser = _Browser(document_uri=_URL + "#reviews", later_responses=[
             _Response(404), _Response(500, main_frame=False),
             _Response(503, navigation=False)])
         _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
         self.assertEqual(result.status, 404)
+
+    def test_late_response_for_another_url_does_not_label_the_document_read(
+            self) -> None:
+        browser = _Browser(later_responses=[_Response(404, url=_URL + "next")])
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
+        self.assertEqual(result.status, 200)
 
     def test_playwright_navigation_error_is_a_fetch_error(self) -> None:
         class _ProxyForbidden(Exception):

@@ -218,15 +218,18 @@ class SettledContentNavigationBudgetTest(_RealCamoufoxTestCase):
             f"{budget_seconds:.0f}s nav budget")
 
 
-def _start_local_success_server():
-    """A loopback-only HTTP server answering 200 on every path."""
+def _start_local_success_server(
+        routes: dict[str, tuple[int, bytes]] | None = None):
+    """A loopback-only HTTP server: `routes` maps a path to (status, body),
+    every other path answers 200."""
     import http.server
     import socketserver
 
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            body = b"<html><body>ok</body></html>"
-            self.send_response(200)
+            status, body = (routes or {}).get(
+                self.path, (200, b"<html><body>ok</body></html>"))
+            self.send_response(status)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -272,6 +275,29 @@ class FinalDocumentUrlCheckTest(_RealCamoufoxTestCase):
         with self.assertRaises(FetchError):
             cfx.CamoufoxFetcher._check_final_document(
                 page.url, requested_url, uri)
+
+
+class ScriptNavigatedDocumentStatusTest(_RealCamoufoxTestCase):
+    """_render reports the status of the document a script navigation committed."""
+
+    def test_status_of_a_script_navigated_404_is_reported(self) -> None:
+        interstitial = (
+            b"<html><body><div class='sec-if-cpt-container'>wait</div>"
+            b"<script>setTimeout(() => { location.href = '/missing'; }, 800);"
+            b"</script></body></html>")
+        missing = b"<html><body>" + b"gone " * 400 + b"</body></html>"
+        httpd, _thread = _start_local_success_server({
+            "/interstitial": (200, interstitial), "/missing": (404, missing)})
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        fetcher = cfx.CamoufoxFetcher(_NEUTRAL_POLICY, nav_timeout_seconds=15.0)
+
+        result = fetcher._render(
+            self.browser,
+            f"http://127.0.0.1:{httpd.server_address[1]}/interstitial")
+
+        self.assertIn("gone", result.html)
+        self.assertEqual(result.status, 404)
 
 
 class LivenessSigstopTest(unittest.TestCase):
