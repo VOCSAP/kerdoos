@@ -32,7 +32,6 @@ from autolycos.safety import DomainPolicy
 
 _POLICY = DomainPolicy(frozenset({"magazineluiza.com.br"}))
 _URL = "https://www.magazineluiza.com.br/p/bab5438g3h/"
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 _PAGE = "<html>" + "x" * 5000 + "</html>"
 _INTERSTITIAL = ("<html><div class='sec-if-cpt-container'>"
                  + "y" * 2000 + "</div></html>")
@@ -274,7 +273,7 @@ class ImportWithoutExtraTest(unittest.TestCase):
         """)
         proc = subprocess.run(
             [sys.executable, "-c", script], capture_output=True, text=True,
-            timeout=60, cwd=str(_REPO_ROOT))
+            timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("SSRF-FIRST", proc.stdout)
 

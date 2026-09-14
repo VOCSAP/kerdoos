@@ -1,9 +1,7 @@
 """BrowserFetcher: real-Chromium liveness proofs, gated on the autonomous
 image (KERDOOS_REQUIRE_IMAGE_TESTS).
 
-Extracted from packages/autolycos/tests/test_browser.py (carte 18bdfd9f):
-the rest of that file drives a FAKE sync_playwright and needs no image; these
-two classes launch a real patchright Chromium and must run inside the
+These classes launch a real patchright Chromium and must run inside the
 autonomous Docker image (or hard-fail loudly if that image lacks patchright,
 per KERDOOS_REQUIRE_IMAGE_TESTS=1 -- a silent skip must never read as a pass).
 """

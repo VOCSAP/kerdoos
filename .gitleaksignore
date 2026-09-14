@@ -38,7 +38,7 @@ tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:83
 tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:110
 tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:116
 
-# Carte 18bdfd9f: the same 11 reviewed false positives above, duplicated
+# Carte 18bdfd9f: the same 10 reviewed false positives above, duplicated
 # because packages/autolycos/tests/fixtures/ holds a byte-identical COPY of
 # these 9 dumps (autolycos's own test suite needs them ahead of a future
 # `git subtree split`; kerdoos keeps its originals under tests/fixtures/).

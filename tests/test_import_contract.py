@@ -6,12 +6,9 @@
     tool transitively).
 
 autolycos's own source is located via the RESOLVED, installed package
-(importlib.util.find_spec) rather than a ROOT-relative path: carte 18bdfd9f
-moves autolycos's tests into packages/autolycos/tests/ ahead of a future
-`git subtree split`, and a hardcoded ROOT/packages/autolycos path would break
-the moment autolycos stops being a workspace member at that fixed location.
-autolycos checks its OWN invariants independently, from its own test file
-(packages/autolycos/tests/test_import_contract.py).
+(importlib.util.find_spec) rather than a ROOT-relative path, so this check
+keeps working regardless of where autolycos is installed from. autolycos
+checks its OWN invariants independently, from its own test file.
 """
 
 from __future__ import annotations

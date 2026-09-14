@@ -1,12 +1,10 @@
 """UcFetcher: real-Chromium acceptance tests, gated on the autonomous image
 (KERDOOS_REQUIRE_IMAGE_TESTS).
 
-Extracted from packages/autolycos/tests/test_uc.py (carte 18bdfd9f): the rest
-of that file drives a FAKE Driver and needs no image; these four classes
-launch a real patchright Chromium via SeleniumBase and must run inside the
-autonomous Docker image (or hard-fail loudly if that image lacks a real
-Chromium, per KERDOOS_REQUIRE_IMAGE_TESTS=1 -- a silent skip must never read
-as a pass).
+These four classes launch a real patchright Chromium via SeleniumBase and
+must run inside the autonomous Docker image (or hard-fail loudly if that
+image lacks a real Chromium, per KERDOOS_REQUIRE_IMAGE_TESTS=1 -- a silent
+skip must never read as a pass).
 """
 
 from __future__ import annotations

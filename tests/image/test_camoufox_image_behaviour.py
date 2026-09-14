@@ -306,7 +306,7 @@ class LivenessSigstopTest(unittest.TestCase):
     of them raise FetchError within fetch_timeout_seconds, release the
     browser gate promptly, and leave zero survivors 5s after -- the exact
     guarantee _kill_after_deadline exists to provide. Mirrors
-    tests/test_browser.py's RealBrowserFreezeTest for the patchright tier."""
+    RealBrowserFreezeTest for the patchright tier."""
 
     def setUp(self) -> None:
         if _HAS_REAL_CAMOUFOX and _HAS_SIGSTOP:

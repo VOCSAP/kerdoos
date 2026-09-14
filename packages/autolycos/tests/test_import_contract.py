@@ -9,7 +9,7 @@
     transitively through them.
 
 Kerdoos checks the mirror invariants (core imports no tool, MCP never
-imports autolycos) from its own test file (tests/test_import_contract.py).
+imports autolycos) independently, from its own test file.
 """
 
 from __future__ import annotations
