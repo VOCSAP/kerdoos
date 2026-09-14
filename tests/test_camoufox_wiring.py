@@ -233,9 +233,9 @@ class ShippedCatalogueTest(unittest.TestCase):
             with self.subTest(site=name):
                 self.assertIn(site.fetcher, known_tiers())
 
-    def test_magalu_and_mercadolivre_use_the_camoufox_tier(self) -> None:
+    def test_magalu_uses_camoufox_and_mercadolivre_uses_browser(self) -> None:
         self.assertEqual(self.sites["magalu"].fetcher, "camoufox")
-        self.assertEqual(self.sites["mercadolivre"].fetcher, "camoufox")
+        self.assertEqual(self.sites["mercadolivre"].fetcher, "browser")
 
 
 if __name__ == "__main__":

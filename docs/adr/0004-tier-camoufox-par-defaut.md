@@ -44,7 +44,8 @@ Faits mesures pendant le spike 5e84a704 et la mesure de RAM qui l'a suivi :
   (Chromium : 2), meme cause que la carte d8b7b8fd. Cette cause est levee depuis :
   tini est en PID 1 dans l'image (carte d8b7b8fd, merge 761bf17).
 - **MercadoLivre, deuxieme site candidat** (mesure sur **un seul echantillon**, une
-  requete sur la meme fiche produit, a confirmer en T4) : le tier `browser` actuel
+  requete sur la meme fiche produit, infirme en T4 : amendement du 2026-09-14 sous la
+  Decision 1) : le tier `browser` actuel
   (patchright, Chromium complet, user-agent sans "Headless") recoit un 200 mais sur un
   mur de verification de compte (40802 octets, aucune donnee produit) ; Camoufox (image
   du spike) recoit la vraie fiche (1055964 octets, etat pre-charge de la page, JSON-LD
@@ -126,13 +127,34 @@ Force decisive : le tier est deja une propriete du site, et l'invariant 6 est te
 catalogue (le tier le moins couteux qui passe). Pour Magalu en conteneur, `uc` ne passe
 pas (mesure), donc le moins couteux qui passe est `camoufox`.
 
-- Le catalogue livre declare `fetcher: camoufox` pour **Magalu et MercadoLivre**. Nom du
+- Le catalogue livre declare `fetcher: camoufox` pour **Magalu** (MercadoLivre y
+  figurait jusqu'a l'amendement du 2026-09-14 ci-dessous). Nom du
   tier et valeur de `FetchResult.method` : `camoufox`. Aucun utilisateur n'existe
   (decision operateur), donc il n'y a ni bascule ni migration d'un `config.db` deja
   peuple a prevoir.
 - Le routage de MercadoLivre repose sur une mesure unique (Contexte) : il est pose dans
   le catalogue en T3 et confirme sur plusieurs echantillons en T4 ; si T4 ne confirme
   pas, MercadoLivre revient a `browser`.
+
+  > **Amendement du 2026-09-14 (T4, carte 5438dd0b)** : T4 n'a pas confirme Camoufox ;
+  > MercadoLivre revient a `browser` dans le catalogue livre, Magalu reste sur
+  > `camoufox`. Mesures sur l'image `kerdoos-t4:6835df6`, fiches MLB35045987 et
+  > MLB35158445 :
+  >
+  > - `camoufox` : **0 fiche sur 7 essais** entre 07:35 et 08:25 UTC. Cinq murs
+  >   `captcha-wall-index` de 39 Ko servis en 200 et non signales par
+  >   `looks_challenged`, un mur `account-verification` de 72 Ko signale, un HTTP 503.
+  > - `browser` : **6 essais sur 6 en HTTP 403** entre 08:13 et 08:25 UTC, page
+  >   `ui-empty-state` de 2582 octets, signalee (retry puis INDETERMINATE). Ce n'est plus
+  >   le mur de 40802 octets du Contexte.
+  > - Le seul echantillon positif de Camoufox reste celui du 2026-09-11.
+  >
+  > A resultat egal (INDETERMINATE), `browser` echoue de facon signalee au lieu d'un mur
+  > muet et consomme environ 1,9 fois moins de RAM au pic (Contexte). **Reserve, supposee
+  > et non mesuree** : la reputation de l'IP de sortie, apres 13 requetes MercadoLivre en
+  > 50 minutes, peut peser sur les deux tiers ; ils recevaient pourtant des pages
+  > differentes a la meme minute. Le mur non signale releve de la carte dc122802 et ne
+  > change pas cet ADR.
 - **Sur l'image `slim`**, le tier est indisponible et suit le patron 3aeb8a19 :
   log au demarrage, ajout de source refuse, source ignoree au scrape sans ScrapeRecord.
   C'est le seul deploiement sans Camoufox.
@@ -672,7 +694,7 @@ mise a jour le rende "meilleure" que Camoufox. »
 
 - **Positives** : Magalu redevient accessible sur l'image `autonomous` standard, sans
   qu'aucun operateur n'ait a choisir une variante ni a connaitre l'existence du tier ;
-  MercadoLivre gagne un chemin d'acces mesure (a confirmer en T4) ; le nouveau tier
+  MercadoLivre, candidat non confirme en T4, reste sur `browser` ; le nouveau tier
   herite des protections deja mesurees (porte unique, liveness) ; l'allowlist de
   domaines dans le proxy ferme un trou preexistant du tier `browser` ; l'image
   `autonomous` passe non-root, ce qu'elle aurait du etre de toute facon.
@@ -706,8 +728,8 @@ decision operateur requise :
 2. **Cohabitation de Playwright (dependance de Camoufox) et de patchright** dans la
    meme image : presumee sans conflit (noms de module distincts), a verifier par la
    resolution de `uv.lock` en T1 et par les tests en image en T4.
-3. **Routage de MercadoLivre** : pose sur un seul echantillon, confirme ou infirme en
-   T4 ; retour a `browser` si T4 n'y confirme pas Camoufox.
+3. **Routage de MercadoLivre** : **fermee le 2026-09-14**, T4 n'a pas confirme
+   Camoufox, MercadoLivre revient a `browser` (amendement sous la Decision 1).
 4. **Taille reelle de l'image** : **fermee en T2**, mesuree a 4,62 Go contre 2,42 Go
    (+2,20 Go, dont 1,29 Go pour la couche du binaire).
 5. **T4-11-browser** : la garde de contexte du tier `browser` n'a jamais ete mesuree ;
@@ -776,3 +798,7 @@ decision operateur requise :
   `LeakWarning proxy_without_geoip` est filtre une fois au niveau module (filtres
   globaux au process). Question ouverte 4 fermee, question 5 (T4-11-browser)
   ouverte.
+- **2026-09-14 -- T4 MercadoLivre non confirme, retour a `browser`**. Camoufox 0 fiche
+  sur 7 essais, `browser` 6 sur 6 en 403 signale ; decision du team-lead en application
+  de la clause de la Decision 1. Catalogue livre et test de cablage alignes, question
+  ouverte 3 fermee. Detail et reserve sur l'IP de sortie : amendement sous la Decision 1.
