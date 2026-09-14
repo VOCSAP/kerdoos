@@ -6,6 +6,13 @@ and proves the SECOND net of invariant #3: a blocked page fails closed to
 ParseError (INDETERMINATE), never a false OutOfStock. Effective prices are
 volatile (invariant #4); this capture: pix (bestPrice.totalAmount) and card
 (price) are both 9433 reais -> 943300 cents.
+
+`magalu_bab5438g3h_camoufox.html` and `magalu_238968700_camoufox.html` are
+camoufox-tier renders whose request identifiers (x-forwarded-for, cookie,
+rua.trans, ak.rid, ak.cport) were replaced with fixed placeholders. The first
+carries distinct pix and card prices, so a swapped or misdirected path cannot
+pass. The second is an unavailable item: its offer has no bestPrice, and its
+JSON-LD still claims InStock at the list price, which the parser must ignore.
 """
 
 from __future__ import annotations
@@ -43,6 +50,47 @@ class MagaluRealDumpTest(unittest.TestCase):
     def test_availability_in_stock(self) -> None:
         self.assertEqual(_parser().extract(self.html).availability,
                          Availability.IN_STOCK)
+
+
+class MagaluCamoufoxInStockDumpTest(unittest.TestCase):
+    def setUp(self) -> None:
+        html = (_FIXTURES / "magalu_bab5438g3h_camoufox.html").read_text(
+            encoding="utf-8")
+        self.extract = _parser().extract(html)
+
+    def test_pix_is_best_price_total(self) -> None:
+        self.assertEqual(self.extract.price_pix_cents, 807405)
+
+    def test_card_is_offer_price(self) -> None:
+        self.assertEqual(self.extract.price_card_cents, 849900)
+        self.assertEqual(self.extract.currency, "BRL")
+
+    def test_list_price_and_installment_are_never_read(self) -> None:
+        # listPrice 9434 -> 943400, installmentAmount 849.9 -> 84990.
+        for cents in (self.extract.price_pix_cents,
+                      self.extract.price_card_cents):
+            self.assertNotIn(cents, (943400, 84990))
+
+    def test_availability_in_stock(self) -> None:
+        self.assertEqual(self.extract.availability, Availability.IN_STOCK)
+
+
+class MagaluCamoufoxOutOfStockDumpTest(unittest.TestCase):
+    def setUp(self) -> None:
+        html = (_FIXTURES / "magalu_238968700_camoufox.html").read_text(
+            encoding="utf-8")
+        self.extract = _parser().extract(html)
+
+    def test_unavailable_item_is_out_of_stock(self) -> None:
+        self.assertEqual(self.extract.availability,
+                         Availability.OUT_OF_STOCK)
+
+    def test_offer_without_best_price_leaves_pix_empty(self) -> None:
+        self.assertIsNone(self.extract.price_pix_cents)
+        self.assertEqual(self.extract.price_card_cents, 87900)
+
+    def test_json_ld_list_price_is_never_read(self) -> None:
+        self.assertNotEqual(self.extract.price_card_cents, 119900)
 
 
 class MagaluFailCloseTest(unittest.TestCase):

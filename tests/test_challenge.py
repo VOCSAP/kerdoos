@@ -29,6 +29,8 @@ _HEALTHY_FIXTURES = (
     "pichau_cv700b.html",
     # Magalu RESOLVED (post-Akamai UC render): no challenge DOM, must be healthy.
     "magalu_uc.html",
+    "magalu_bab5438g3h_camoufox.html",
+    "magalu_238968700_camoufox.html",
 )
 
 

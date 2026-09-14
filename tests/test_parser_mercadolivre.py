@@ -16,6 +16,11 @@ type="application/ld+json"> schema.org/Product node (offers.price). Session/
 device identifiers (d2id, csrf token, request/correlation/tracking ids) were
 replaced with fixed placeholders before committing; the product data (sku,
 price, reviews) is untouched.
+
+`mercadolivre_captcha_wall_camoufox.html` is the captcha wall the camoufox tier
+received at HTTP 200 instead of the listing; looks_challenged does not flag it,
+so the parser is the only net and must fail closed. Its tracking id was
+replaced with a fixed placeholder.
 """
 
 from __future__ import annotations
@@ -31,6 +36,9 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "mercadolivre_mlb35045987.html"
 _JSONLD_FIXTURE = (
     Path(__file__).parent / "fixtures"
     / "mercadolivre_mlb35045987_camoufox.html")
+_WALL_FIXTURE = (
+    Path(__file__).parent / "fixtures"
+    / "mercadolivre_captcha_wall_camoufox.html")
 
 
 def _parser() -> MercadoLivreParser:
@@ -62,6 +70,13 @@ class MercadoLivreRealDumpTest(unittest.TestCase):
     def test_availability_in_stock(self) -> None:
         self.assertEqual(_parser().extract(self.html).availability,
                          Availability.IN_STOCK)
+
+
+class MercadoLivreCamoufoxWallTest(unittest.TestCase):
+    def test_real_captcha_wall_fails_closed(self) -> None:
+        html = _WALL_FIXTURE.read_text(encoding="utf-8")
+        with self.assertRaises(ParseError):
+            _parser().extract(html)
 
 
 class MercadoLivreSyntheticTest(unittest.TestCase):

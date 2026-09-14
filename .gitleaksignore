@@ -27,3 +27,13 @@ tests/fixtures/terabyte_40561.html:generic-api-key:3825
 tests/fixtures/magalu_uc.html:generic-api-key:83
 tests/fixtures/magalu_uc.html:generic-api-key:110
 tests/fixtures/magalu_uc.html:generic-api-key:162
+
+# Reviewed false positives (Magalu camoufox fixtures). The same PUBLIC
+# client-side tokens as above: Datadog RUM clientToken (line 83), Akamai mPulse
+# Boomerang API key and a QuestionPro survey widget key (line 110), a RUM (spdt)
+# config key (line 116). Literal tokens are intentionally not quoted here.
+tests/fixtures/magalu_bab5438g3h_camoufox.html:generic-api-key:83
+tests/fixtures/magalu_bab5438g3h_camoufox.html:generic-api-key:110
+tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:83
+tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:110
+tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:116
