@@ -48,6 +48,10 @@ docs/adr/            architecture decision records (authoritative)
   ```
   `KERDOOS_REQUIRE_IMAGE_TESTS=1` turns the skip into a hard failure if the
   image lacks a real Chromium -- a silent skip must never read as a pass.
+- Every image invocation below proves something only on an image built from
+  the SHA under test: an older image runs the older installed package. To
+  iterate without rebuilding, mount the source read-only over it instead:
+  `-v "$(pwd)/packages/autolycos/src/autolycos:/app/packages/autolycos/src/autolycos:ro"`.
 - Camoufox tier image proofs (`tests/image/test_camoufox_image.py`) need TWO
   separate invocations, since a test cannot drop its own container's
   network from inside itself:

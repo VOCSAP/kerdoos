@@ -85,12 +85,19 @@ which tool actually rendered the page.
 
 - `autolycos.ports`: `Fetcher`, `FetchResult`, `Router`
 - `autolycos.safety`: `DomainPolicy`, `check_scheme_and_domain`
-- `autolycos.errors`: `SSRFError`, `FetchError`
-- `autolycos.router`: `StaticRouter`, `known_tiers`, `UnknownFetcherError`
+- `autolycos.errors`: `SSRFError`, `FetchError`, `UnknownFetcherError`
+- `autolycos.router`: `StaticRouter`, `known_tiers` (and `UnknownFetcherError`,
+  re-exported from `autolycos.errors`)
 - `autolycos.browser_gate`: `BrowserGate`
+- `autolycos.tiers`: the defaults of the browser-backed tiers (`BROWSER`,
+  `UC`, `CAMOUFOX`) and their budget checks, which report an out-of-order
+  setting as data (`NavigationWarning`, `GateWarning`, `BudgetTerm`) for you
+  to word; plus the install probes an image build runs (`chromium_executable`,
+  `camoufox_ready`, `CAMOUFOX_BROWSER_VERSION`, `CAMOUFOX_EXECUTABLE_PATH`)
 
-Everything else (`adapters/*`, `challenge`, `egress_proxy`) is internal and
-reached only through a `Router` / `DomainPolicy` you construct.
+Everything else (`adapters/*`, `challenge`, `egress_proxy`) is internal: the
+tiers are reached through a `Router` and `DomainPolicy` you construct, and
+their defaults and install probes through `autolycos.tiers`.
 
 ## Install
 

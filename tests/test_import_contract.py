@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,6 +29,13 @@ TOOLS = {"requests", "curl_cffi", "playwright", "patchright",
 # Concrete adapter / wiring module suffixes that core must never import.
 CONCRETE_SUFFIXES = ("adapters", "router", "factory",
                      "sqlite_store", "yaml_store")
+
+# The consumer-facing contract listed in autolycos's README.
+AUTOLYCOS_CONTRACT_MODULES = frozenset({
+    "autolycos.ports", "autolycos.safety", "autolycos.errors",
+    "autolycos.router", "autolycos.browser_gate", "autolycos.tiers",
+})
+DOCKERFILE = ROOT / "Dockerfile"
 
 
 def _autolycos_src() -> pathlib.Path:
@@ -54,6 +62,27 @@ def _imports(path: pathlib.Path) -> set[str]:
 
 def _py_files(base: pathlib.Path) -> list[pathlib.Path]:
     return sorted(base.rglob("*.py"))
+
+
+def _autolycos_imports(source: str) -> list[tuple[str, str]]:
+    """(module, imported name) for every autolycos import, read from the AST
+    so a parenthesised multi-line import is seen whole. A plain
+    `import autolycos.x` yields the module as its own name."""
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.extend((alias.name, alias.name) for alias in node.names
+                         if alias.name.split(".")[0] == "autolycos")
+        elif (isinstance(node, ast.ImportFrom) and node.level == 0
+              and node.module and node.module.split(".")[0] == "autolycos"):
+            found.extend((node.module, alias.name) for alias in node.names)
+    return found
+
+
+def _dockerfile_autolycos_imports(text: str) -> list[tuple[str, str]]:
+    snippets = re.findall(r'python3 -c\s*\\?\s*"([^"]*)"', text)
+    return [found for snippet in snippets
+            for found in _autolycos_imports(snippet)]
 
 
 class ImportContractTest(unittest.TestCase):
@@ -125,6 +154,49 @@ class ImportContractTest(unittest.TestCase):
                     name.split(".")[0], TOOLS,
                     f"{f.name} (a core dependency) imports {name!r}",
                 )
+
+    def _assert_contract_import(self, where: str, module: str,
+                                name: str) -> None:
+        self.assertIn(
+            module, AUTOLYCOS_CONTRACT_MODULES,
+            f"{where} imports {module!r}, outside autolycos's contract")
+        self.assertFalse(
+            name.split(".")[-1].startswith("_"),
+            f"{where} imports the private name {name!r} from {module!r}")
+
+    def test_kerdoos_imports_only_the_autolycos_contract(self) -> None:
+        for f in _py_files(KERDOOS_SRC):
+            where = str(f.relative_to(ROOT))
+            for module, name in _autolycos_imports(
+                    f.read_text(encoding="utf-8")):
+                self._assert_contract_import(where, module, name)
+
+    def test_dockerfile_imports_only_the_autolycos_contract(self) -> None:
+        imports = _dockerfile_autolycos_imports(
+            DOCKERFILE.read_text(encoding="utf-8"))
+        self.assertTrue(imports, "no autolycos import found in the Dockerfile")
+        for module, name in imports:
+            self._assert_contract_import("Dockerfile", module, name)
+
+    def test_contract_scanners_see_every_import_form(self) -> None:
+        source = "\n".join([
+            "from autolycos.tiers import UC",
+            "from autolycos.adapters.browser import (",
+            "    NAV_TIMEOUT_MS,",
+            ")",
+            "import autolycos.adapters.uc",
+        ])
+        self.assertEqual(_autolycos_imports(source), [
+            ("autolycos.tiers", "UC"),
+            ("autolycos.adapters.browser", "NAV_TIMEOUT_MS"),
+            ("autolycos.adapters.uc", "autolycos.adapters.uc"),
+        ])
+        dockerfile = "\n".join([
+            "RUN X=$(python3 -c \\",
+            '      "from autolycos.adapters.uc import _find as f; print(f())")',
+        ])
+        self.assertEqual(_dockerfile_autolycos_imports(dockerfile),
+                         [("autolycos.adapters.uc", "_find")])
 
 
 if __name__ == "__main__":

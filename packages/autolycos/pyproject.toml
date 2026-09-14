@@ -55,7 +55,11 @@ camoufox = ["camoufox==0.5.6", "psutil>=5.9"]
 # behind the "uc" extra (which the autonomous image installs for the actual
 # browser launch). psutil is needed alongside it for the launch-deadline
 # unit tests, which use a fake (non-Chrome) Driver and so also run locally.
-dev = ["seleniumbase>=4.24", "psutil>=5.9"]
+dev = ["pytest>=8.0", "seleniumbase>=4.24", "psutil>=5.9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
 
 [build-system]
 requires = ["hatchling"]

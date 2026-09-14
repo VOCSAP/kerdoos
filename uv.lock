@@ -144,6 +144,7 @@ uc = [
 [package.dev-dependencies]
 dev = [
     { name = "psutil" },
+    { name = "pytest" },
     { name = "seleniumbase" },
 ]
 
@@ -164,6 +165,7 @@ provides-extras = ["browser", "tls", "uc", "camoufox"]
 [package.metadata.requires-dev]
 dev = [
     { name = "psutil", specifier = ">=5.9" },
+    { name = "pytest", specifier = ">=8.0" },
     { name = "seleniumbase", specifier = ">=4.24" },
 ]
 

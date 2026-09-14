@@ -38,12 +38,7 @@ tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:83
 tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:110
 tests/fixtures/magalu_238968700_camoufox.html:generic-api-key:116
 
-# Carte 18bdfd9f: the same 10 reviewed false positives above, duplicated
-# because packages/autolycos/tests/fixtures/ holds a byte-identical COPY of
-# these 9 dumps (autolycos's own test suite needs them ahead of a future
-# `git subtree split`; kerdoos keeps its originals under tests/fixtures/).
-# Same fingerprints, same secrets, new path -- gitleaks fingerprints the
-# path, so each copy needs its own entry.
+# Byte-identical copies of the fixtures above; gitleaks fingerprints by path.
 packages/autolycos/tests/fixtures/kabum_aw3225qf.html:generic-api-key:97
 packages/autolycos/tests/fixtures/terabyte_40561.html:generic-api-key:3825
 packages/autolycos/tests/fixtures/magalu_uc.html:generic-api-key:83
