@@ -2,7 +2,20 @@
 name = "autolycos"
 version = "0.1.0"
 description = "Anti-bot fetching subsystem: Fetcher tiers of increasing cost (http/tls/browser/uc/camoufox) behind a stable port, with fail-closed SSRF guards. Domain-agnostic: the caller injects a DomainPolicy."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "VOCSAP" }]
 requires-python = ">=3.11"
+keywords = ["anti-bot", "fetcher", "scraping", "ssrf", "playwright", "camoufox", "curl-cffi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Internet :: WWW/HTTP",
+]
 dependencies = [
     # Floor is 2.34 (matches the tested 2.34.2), NOT 2.31: the http tier's IP
     # pin (adapters/http._PinnedHTTPAdapter) overrides
@@ -11,6 +24,11 @@ dependencies = [
     # calls the override, and the SSRF IP pin would silently vanish (CWE-918).
     "requests>=2.34",
 ]
+
+[project.urls]
+Homepage = "https://github.com/VOCSAP/autolycos"
+Repository = "https://github.com/VOCSAP/autolycos"
+Issues = "https://github.com/VOCSAP/autolycos/issues"
 
 [project.optional-dependencies]
 # patchright (drop-in playwright fork) launches an undetected Chromium (deep
