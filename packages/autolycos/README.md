@@ -38,11 +38,11 @@ It exposes a ladder of fetcher tiers, ordered by increasing cost:
    filters.
 3. `browser` -- undetected headless Chromium (`patchright` +
    `playwright-stealth`).
-4. `camoufox` -- undetected headless Firefox (`camoufox`), an alternative
-   fingerprint to the Chromium-based tiers above.
-5. `uc` -- undetected Chrome driver (`seleniumbase`), **(deprecated)**, kept
+4. `uc` -- undetected Chrome driver (`seleniumbase`), **(deprecated)**, kept
    for a re-evaluation should upstream progress on the one protector it was
    built for.
+5. `camoufox` -- undetected headless Firefox (`camoufox`), an alternative
+   fingerprint to the Chromium-based tiers above.
 
 A caller asks the `Router` for a named tier and gets back a `Fetcher`; each
 call to `fetch(url)` returns a `FetchResult`. The router itself does not
