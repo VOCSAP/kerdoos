@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable, Mapping
 
 from .adapters.http import HttpFetcher
 from .browser_gate import BrowserGate, default_browser_gate
+from .errors import UnknownFetcherError
 from .ports import Fetcher
 from .safety import DomainPolicy
 
@@ -169,10 +170,6 @@ def known_tiers() -> frozenset[str]:
     """Every fetcher tier name select() can ever resolve, regardless of
     whether its optional dependency is installed (mirrors _FACTORIES)."""
     return frozenset(_TIER_MODULES)
-
-
-class UnknownFetcherError(KeyError):
-    """The site config references a fetcher tier with no adapter wired."""
 
 
 class StaticRouter:

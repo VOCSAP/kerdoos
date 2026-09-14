@@ -9,3 +9,7 @@ class FetchError(Exception):
 
 class SSRFError(FetchError):
     """A fetch was refused by the anti-SSRF guard (blocked target)."""
+
+
+class UnknownFetcherError(KeyError):
+    """The site config references a fetcher tier with no adapter wired."""

@@ -242,9 +242,9 @@ RUN uv sync --frozen --no-dev --extra web --extra tls --extra browser --extra uc
 ARG UC_DRIVER_SHA256
 RUN set -eu; \
     CHROME_BIN=$(python3 -c \
-      "from autolycos.adapters.uc import _find_patchright_chromium as f; print(f() or '')"); \
+      "from autolycos.tiers import chromium_executable as f; print(f() or '')"); \
     if [ -z "$CHROME_BIN" ]; then \
-      echo "BUILD FAIL: _find_patchright_chromium() found no Chromium under \$HOME/.cache/ms-playwright" >&2; \
+      echo "BUILD FAIL: chromium_executable() found no Chromium under \$HOME/.cache/ms-playwright" >&2; \
       exit 1; \
     fi; \
     CHROME_VER=$("$CHROME_BIN" --version --no-sandbox | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'); \
@@ -282,19 +282,19 @@ RUN set -eu; \
 ARG CAMOUFOX_VERSION
 RUN set -eu; \
     PIN=$(python3 -c \
-      "from autolycos.adapters.camoufox import CAMOUFOX_BROWSER_VERSION as v; print(v)"); \
+      "from autolycos.tiers import CAMOUFOX_BROWSER_VERSION as v; print(v)"); \
     if [ "$PIN" != "${CAMOUFOX_VERSION}" ]; then \
       echo "BUILD FAIL: adapter CAMOUFOX_BROWSER_VERSION $PIN != Dockerfile CAMOUFOX_VERSION ${CAMOUFOX_VERSION} -- re-pin both, plus CAMOUFOX_SHA256 and CAMOUFOX_ASSET_URL (ADR 0004 Decision 2)." >&2; \
       exit 1; \
     fi; \
     EXE=$(python3 -c \
-      "from autolycos.adapters.camoufox import CAMOUFOX_EXECUTABLE_PATH as p; print(p)"); \
+      "from autolycos.tiers import CAMOUFOX_EXECUTABLE_PATH as p; print(p)"); \
     if [ ! -x "$EXE" ]; then \
       echo "BUILD FAIL: no executable at the adapter's CAMOUFOX_EXECUTABLE_PATH $EXE -- the archive layout changed." >&2; \
       exit 1; \
     fi; \
     READY=$(python3 -c \
-      "from autolycos.adapters.camoufox import camoufox_ready; print(camoufox_ready())"); \
+      "from autolycos.tiers import camoufox_ready; print(camoufox_ready())"); \
     if [ "$READY" != "True" ]; then \
       echo "BUILD FAIL: camoufox_ready() is False on the real installation -- the browser build floor read from the camoufox package's private layout no longer holds (ADR 0004 Decision 2)." >&2; \
       exit 1; \
