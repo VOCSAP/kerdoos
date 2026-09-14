@@ -48,6 +48,30 @@ docs/adr/            architecture decision records (authoritative)
   ```
   `KERDOOS_REQUIRE_IMAGE_TESTS=1` turns the skip into a hard failure if the
   image lacks a real Chromium -- a silent skip must never read as a pass.
+- Camoufox tier image proofs (`tests/test_camoufox_image.py`) need TWO
+  separate invocations, since a test cannot drop its own container's
+  network from inside itself:
+  ```bash
+  # Normal invocation: everything except the --network none proof.
+  docker build --target autonomous -t kerdoos:autonomous .
+  docker run --rm -e KERDOOS_REQUIRE_IMAGE_TESTS=1 \
+    -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
+    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py"
+
+  # --network none invocation: the zero-download-under-no-network proof
+  # only runs (hard-fails otherwise) when KERDOOS_IMAGE_NETWORK_NONE=1 is
+  # also set -- the marker is the caller's explicit promise that this
+  # process really was started under --network none; without it the test
+  # skips rather than infer network state from a reachability probe alone.
+  docker run --rm --network none \
+    -e KERDOOS_REQUIRE_IMAGE_TESTS=1 -e KERDOOS_IMAGE_NETWORK_NONE=1 \
+    -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
+    sh -c "cd /tmp && python3 -m pytest tests/test_camoufox_image.py::CamoufoxNoNetworkZeroDownloadTest"
+  ```
+  The strace-based proofs in the same file (network syscall audit) need a
+  separate TEST-only image with `strace` installed and
+  `--cap-add SYS_PTRACE` at `docker run` -- never added to the shipped
+  image. They skip cleanly (not a hard failure) when `strace` is absent.
 
 ## Invariants (do not violate)
 
