@@ -598,7 +598,7 @@ exigees ici des la tranche T1 :
 | T1 | Adaptateur autolycos : extra, import paresseux, zero telechargement (C5 cote code), preferences imposees (C2), garde de contexte (C3), liveness de la Decision 5, registre du routeur, disponibilite paquet + binaire + version, tests unitaires avec un faux Camoufox ; mesure des durees de lancement et de navigation pour fixer les defauts | T0, T0.5 (API du proxy) |
 | T2 | Dockerfile, **stage `autonomous` existant, aucune nouvelle cible** : bibliotheques systeme de Firefox, telechargement deterministe epingle (C4), assertion de version au build (C5), durcissement de la Decision 8 (non-root, `HOME` inscriptible, propriete de `/data`), `NOTICE` MPL-2.0 embarque ; compose : durcissement du service `kerdoos-autonomous` deja present, aucun nouveau profil ; `env.example` (variables du tier, note de RAM) ; taille d'image mesuree | T0, T1 (l'extra existe dans `uv.lock`) |
 | T3 | Cablage kerdoos : variables dans `get_settings`, WARNING d'ordre, injection par la racine de composition (WebUI et CLI), tests de cablage par racine, indicateur WebUI (barreau `camoufox` dans `_TIER_LADDER`, nombre de pastilles de la macro `tier()`, tuple d'options du `select` d'ajout de site), catalogue Magalu et MercadoLivre -> `camoufox`, documentation d'exploitation (invariant 6 de `CLAUDE.md`, echelle du `README.md`, `AGENTS.md`) | T1 ; en parallele de T2 |
-| T4 | Tests en image : preuves SSRF de la Decision 4 (dont T4-1 a T4-6, la preuve anti-rebinding comprise), zero telechargement T4-7, durcissement T4-8, reproductibilite T4-9, liveness de la Decision 5, RAM re-mesuree sur l'image reelle, `MagaluParser` sur une vraie page Camoufox (fixture issue du spike), MercadoLivre confirme sur plusieurs echantillons avec son parser (sinon retour a `browser`) | T2, T3 |
+| T4 | Tests en image : preuves SSRF de la Decision 4 (dont T4-1 a T4-6, la preuve anti-rebinding comprise), zero telechargement T4-7, durcissement T4-8, reproductibilite T4-9, liveness de la Decision 5, RAM re-mesuree sur l'image reelle, `MagaluParser` sur une vraie page Camoufox (fixture Camoufox reelle, image T4), MercadoLivre confirme sur plusieurs echantillons avec son parser (sinon retour a `browser`) | T2, T3 |
 
 Chaque tranche passe le gate a trois lentilles (architecte, reviewer, securite).
 
@@ -694,7 +694,7 @@ mise a jour le rende "meilleure" que Camoufox. »
 
 - **Positives** : Magalu redevient accessible sur l'image `autonomous` standard, sans
   qu'aucun operateur n'ait a choisir une variante ni a connaitre l'existence du tier ;
-  MercadoLivre, candidat non confirme en T4, reste sur `browser` ; le nouveau tier
+  le nouveau tier
   herite des protections deja mesurees (porte unique, liveness) ; l'allowlist de
   domaines dans le proxy ferme un trou preexistant du tier `browser` ; l'image
   `autonomous` passe non-root, ce qu'elle aurait du etre de toute facon.
@@ -709,7 +709,8 @@ mise a jour le rende "meilleure" que Camoufox. »
   deux) ; la commande de demarrage ; l'image `kerdoos:slim` ; la semantique de
   `KERDOOS_BROWSER_MAX_CONCURRENT` ; l'etat a trois valeurs (un echec Camoufox donne
   INDETERMINATE, un tier absent ignore la source sans ScrapeRecord) ; l'absence
-  d'escalade automatique entre tiers.
+  d'escalade automatique entre tiers ; le tier de MercadoLivre, candidat non confirme
+  en T4, qui reste `browser`.
 - **Ce qui n'est pas fait et ne le sera pas** : aucune migration ni bascule d'un
   `config.db` existant. Il n'y a aucun utilisateur de Kerdoos (decision operateur) : le
   catalogue livre suffit, et ecrire un plan de migration pour une base qui n'existe

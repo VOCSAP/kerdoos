@@ -22,8 +22,6 @@ sites:
     fetcher: browser           # camoufox also gets a wall here, unflagged; browser's 403 is
                                # flagged (retried) and costs half the RAM (ADR 0004 Decision 1)
     domain: mercadolivre.com.br
-    # Source URLs must use www.mercadolivre.com.br: mercadolivre.com.br and
-    # produto.mercadolivre.com.br redirect there.
     # Render-critical CDN: ML is a full client-side render whose price and
     # availability are injected by the http2.mlstatic.com JS bundle. Allow it as
     # a browser SUB-RESOURCE only (never a navigation target) so the page can
