@@ -96,8 +96,9 @@ class _RecordingPinningProxy(PinningProxy):
         head, leftover = super()._read_head(sock)
         if head:
             request_line = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            method_and_authority = " ".join(request_line.split()[:2])
             with self._heads_lock:
-                self.heads.append(request_line)
+                self.heads.append(method_and_authority)
         return head, leftover
 
 
@@ -210,6 +211,82 @@ class CamoufoxPinnedConnectTest(_ImageGatedCase):
             proxy.dials, [],
             f"the proxy dialed {proxy.dials} despite the pin resolving to "
             "a non-global address")
+
+
+class _NoTrafficDialPinningProxy(_RecordingPinningProxy):
+    """Records dials and heads like its parent, but the dial itself
+    returns one end of a local socketpair -- no byte ever reaches the
+    real target -- so the positive path (domain allowed, resolved,
+    pinned, dialed) can be proven with a real Firefox fetch without
+    actually contacting a live IP."""
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self._pairs: list[tuple[socket.socket, socket.socket]] = []
+
+        def _no_traffic_dial(ip: str, port: int) -> socket.socket:
+            with self._dials_lock:
+                self.dials.append((ip, port))
+            a, b = socket.socketpair()
+            self._pairs.append((a, b))
+            return a
+
+        self._dialer = _no_traffic_dial
+
+
+class CamoufoxPositivePinPathTest(_ImageGatedCase):
+    """Gate finding F6: proofs 1 and 3 both stop at ip_is_safe refusing a
+    non-global pin -- neither exercises the path where the domain IS
+    allowed, resolution succeeds, and a dial actually happens. Proves
+    "resolve once and pin" concretely: getaddrinfo answers 104.18.0.1 on
+    its FIRST call and 127.0.0.1 (a rebind) on any later call, and the
+    real dial is still to the FIRST answer -- a re-resolution bug would
+    show up as a dial to 127.0.0.1 instead."""
+
+    def test_domain_allowed_resolves_pins_and_dials_the_first_answer(
+            self) -> None:
+        real_getaddrinfo = socket.getaddrinfo
+        call_count = {"n": 0}
+
+        def _fake_getaddrinfo(host, *args, **kwargs):  # noqa: ANN001, ANN002
+            if host == "example.com":
+                call_count["n"] += 1
+                ip = "104.18.0.1" if call_count["n"] == 1 else "127.0.0.1"
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))]
+            return real_getaddrinfo(host, *args, **kwargs)
+
+        def _probe(page) -> None:  # noqa: ANN001
+            # Bounded independently of the proxy/browser's own timeouts:
+            # the socketpair end is never read, so an unbounded fetch
+            # would hang until Firefox's own navigation ceiling instead.
+            page.evaluate(
+                "() => { const c = new AbortController();"
+                " setTimeout(() => c.abort(), 3000);"
+                " return fetch('https://example.com/', "
+                "{mode: 'no-cors', signal: c.signal})"
+                ".then(() => 'ok').catch(e => 'threw:' + e.message); }")
+
+        import unittest.mock as mock
+        # validate_target neutralized: otherwise ITS OWN resolution
+        # consumes the mock's first (104.18.0.1) answer before the proxy
+        # ever resolves anything, leaving the proxy to see the rebind
+        # answer on what would then be ITS first call -- confounding the
+        # very "resolve once" property this test measures.
+        with mock.patch.object(socket, "getaddrinfo", side_effect=_fake_getaddrinfo):
+            proxy = _run_probe(
+                _NEUTRAL_POLICY, _probe,
+                proxy_cls=_NoTrafficDialPinningProxy,
+                neutralize_validate_target=True,
+                nav_timeout_seconds=8, fetch_timeout_seconds=15)
+        self.assertEqual(
+            proxy.heads, ["CONNECT example.com:443"],
+            f"expected exactly one CONNECT for the allowed domain, got "
+            f"{proxy.heads}")
+        self.assertEqual(
+            proxy.dials, [("104.18.0.1", 443)],
+            f"expected a single dial to the FIRST resolved IP, got "
+            f"{proxy.dials} -- a dial to 127.0.0.1 would mean the proxy "
+            "re-resolved instead of pinning its first answer")
 
 
 def _run_traced(script: str, timeout: float) -> tuple[str, str]:
