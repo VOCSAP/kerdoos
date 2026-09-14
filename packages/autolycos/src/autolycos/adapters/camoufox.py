@@ -25,14 +25,14 @@ import uuid
 import warnings
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from ..browser_gate import BrowserGate, default_browser_gate
 from ..challenge import looks_challenged
 from ..egress_proxy import PinningProxy
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import DomainPolicy, validate_target
+from ..safety import _DEFAULT_PORT, DomainPolicy, validate_target
 from .browser import _is_hostname_shaped
 
 logger = logging.getLogger(__name__)
@@ -406,16 +406,13 @@ def _kill_launch(marker: str, pids_before: frozenset[int] | None) -> bool:
     return _kill_processes(_launch_process_tree(marker, pids_before))
 
 
-_DEFAULT_PORTS: Mapping[str, int] = MappingProxyType({"http": 80, "https": 443})
-
-
-def _effective_port(parts) -> int | None:  # type: ignore[no-untyped-def]
+def _effective_port(parts: SplitResult) -> int | None:
     """The URL's port, its scheme's default when absent, None when invalid."""
     try:
         port = parts.port
     except ValueError:
         return None
-    return port if port is not None else _DEFAULT_PORTS.get(parts.scheme)
+    return port if port is not None else _DEFAULT_PORT.get(parts.scheme)
 
 
 class CamoufoxFetcher:
@@ -536,7 +533,8 @@ class CamoufoxFetcher:
         """A Firefox error page, or a script navigation to another allowed
         host or to another port, would otherwise be returned as the
         requested site's answer. The port may only change to the default of
-        the final scheme, so http may still upgrade to https."""
+        the final scheme, so http may still upgrade to https; https never
+        falls back to http."""
         requested = urlsplit(requested_url)
         requested_host = (requested.hostname or "").rstrip(".")
         requested_port = _effective_port(requested)
@@ -545,12 +543,16 @@ class CamoufoxFetcher:
                 continue
             final = urlsplit(url)
             final_host = (final.hostname or "").rstrip(".")
-            if final.scheme not in _DEFAULT_PORTS or final_host != requested_host:
+            if final.scheme not in _DEFAULT_PORT or final_host != requested_host:
                 raise FetchError(
                     f"final document is {final.scheme}://{final_host}, not "
                     f"the requested host {requested_host}")
+            if requested.scheme == "https" and final.scheme != "https":
+                raise FetchError(
+                    f"final document fell back to {final.scheme} from a "
+                    "requested https URL")
             final_port = _effective_port(final)
-            if final_port not in (requested_port, _DEFAULT_PORTS[final.scheme]):
+            if final_port not in (requested_port, _DEFAULT_PORT[final.scheme]):
                 raise FetchError(
                     f"final document is on port {final_port}, not the "
                     f"requested port {requested_port}")

@@ -863,6 +863,12 @@ class FinalDocumentTest(_WiringBase):
             "https://www.magazineluiza.com.br/p/x",
             "http://www.magazineluiza.com.br/p/x")
 
+    def test_scheme_downgrade_of_the_requested_host_is_a_fetch_error(
+            self) -> None:
+        with self.assertRaises(FetchError):
+            cfx.CamoufoxFetcher._check_final_document(
+                "http://www.magazineluiza.com.br/p/bab5438g3h/", _URL)
+
     def test_status_is_the_last_main_frame_navigation_response(self) -> None:
         browser = _Browser(later_responses=[
             _Response(404), _Response(500, main_frame=False),
