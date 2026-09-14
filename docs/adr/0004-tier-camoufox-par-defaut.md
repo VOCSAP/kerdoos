@@ -803,3 +803,32 @@ decision operateur requise :
   sur 7 essais, `browser` 6 sur 6 en 403 signale ; decision du team-lead en application
   de la clause de la Decision 1. Catalogue livre et test de cablage alignes, question
   ouverte 3 fermee. Detail et reserve sur l'IP de sortie : amendement sous la Decision 1.
+- **2026-09-14 -- T4-D : contrat de lecture du document et controle du document
+  final**. Deux defauts confirmes par les preuves en image de T4-B (vrai Firefox,
+  image `kerdoos-t4:6835df6`) sont corriges dans l'adaptateur. (1) La lecture du
+  DOM passait par `page.evaluate`, qui n'a pas de timeout et attend le thread
+  principal de la page : une page occupee tenait la lecture au-dela du budget de
+  navigation (6,0 s mesures pour 5 s). La lecture passe par `page.wait_for_function`
+  avec un timeout egal au budget de navigation restant (1 ms au minimum, 0 valant
+  "illimite" pour Playwright), sur une expression qui mesure toujours le plafond
+  dans la page et rend `documentURI` et DOM en une seule primitive. Contrat : une
+  premiere lecture hors budget rend `FetchError` (retry du coeur, invariant 5) ; une
+  lecture de sondage d'interstitiel hors budget rend l'interstitiel deja lu,
+  `challenged=True` (indetermine, invariant 3). La lecture partage le budget de
+  navigation, elle n'en recoit pas un propre. (2) Apres une navigation JS post-load
+  vers une adresse refusee, Firefox garde `page.url` sur l'URL tentee alors que
+  `document.documentURI` vaut `about:neterror`, sans evenement `response` ni
+  `requestfailed` (mesure) : la page d'erreur sortait en 200. Le controle du document
+  final porte desormais sur `page.url` ET sur le `documentURI` lu avec le DOM : schema
+  `http(s)`, egalite d'hote (condition du gate securite T1, sans elargissement a la
+  politique de domaine), port final egal au port demande ou au port par defaut du
+  schema final (`http` peut monter vers `https`), et refus du retour de `https` vers
+  `http` (le proxy n'ouvre que 80 et 443, le refus protege le contenu, pas l'egress).
+  Le status rendu est celui de la derniere reponse de navigation du cadre principal,
+  associee au document par son URL et non par l'ordre d'arrivee, le status du `goto`
+  ne decrivant que le premier document. `page.on("response")` est une observation
+  au service du status, jamais un rempart au sens de C3. Le budget total reste tenu :
+  lancement 20 s + navigation et lectures 45 s + fermeture, sous les 90 s de la
+  Decision 5. Divergence constatee : le tier `browser` lit encore `page.content()`
+  sans timeout, ne controle pas le document final et garde le status du `goto` ; la
+  parite est portee par la carte 30333254, a coupler avec T4-11-browser.
