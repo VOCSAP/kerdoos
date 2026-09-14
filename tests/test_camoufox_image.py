@@ -769,7 +769,9 @@ class _Listener:
 # execution context page.evaluate() needs to return its value -- a
 # page-level console listener survives that, a JS return value does not).
 # No UDP stimulus: RTCPeerConnection/WebTransport are undefined on this
-# build, so no JS API can open a raw UDP channel at all.
+# build, so no JS API can open a raw UDP channel at all -- the UDP
+# listener below was REMOVED rather than kept as a permanently-untested
+# zero (gate finding F7).
 _HOSTILE_PROBE_JS = """
 async () => {
   const t80 = 'https://127.0.0.1:80/';
@@ -833,6 +835,18 @@ async () => {
       a.click();
       setTimeout(r, 1000);
     })],
+    ['fetch-keepalive', () =>
+      fetch(t443, {mode: 'no-cors', keepalive: true}).catch(() => {})],
+    ['css-url', () => new Promise(r => {
+      const style = document.createElement('style');
+      style.textContent = '.kerdoos-probe { background: url(' +
+        t8765 + '?c=css); }';
+      document.head.appendChild(style);
+      const div = document.createElement('div');
+      div.className = 'kerdoos-probe';
+      document.body.appendChild(div);
+      setTimeout(r, 1000);
+    })],
   ];
   for (const [name, start] of channels) {
     try {
@@ -861,7 +875,10 @@ class CamoufoxLoopbackChannelsTest(_ImageGatedCase):
             _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8765, counter),
             _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8766, counter),
             _Listener(socket.AF_INET6, socket.SOCK_STREAM, "::1", 8765, counter),
-            _Listener(socket.AF_INET, socket.SOCK_DGRAM, "127.0.0.1", 8767, counter),
+            # No UDP listener (gate finding F7): RTCPeerConnection and
+            # WebTransport are both undefined on this build, so no JS API
+            # exists that could ever drive a stimulus toward one -- kept
+            # would have been a permanently-untested zero.
         ]
         seen: dict = {"attempted": []}
         try:
@@ -885,6 +902,7 @@ class CamoufoxLoopbackChannelsTest(_ImageGatedCase):
             _EXPECTED_CHANNELS = {
                 "img", "fetch", "sendBeacon", "websocket", "eventsource",
                 "iframe", "link-hints", "form", "window-open", "a-ping",
+                "fetch-keepalive", "css-url",
             }
             attempted = {name.split(":ctor-threw:")[0]
                          for name in seen["attempted"]}
@@ -924,6 +942,104 @@ class CamoufoxLoopbackChannelsTest(_ImageGatedCase):
                 "positive control failed -- some listeners never "
                 "registered a hit even from a direct Python connection, "
                 "so the zero above is not trustworthy")
+        finally:
+            for listener in listeners:
+                listener.stop()
+
+
+# Driven SEQUENTIALLY, one target at a time (gate finding F7): running
+# these alongside the 12-channel hostile page above MEASURABLY starved
+# them of a connection within the test's time budget (Firefox's own
+# per-destination connection-pool limits), which read as "never reached
+# the proxy" for a reason unrelated to any security control -- confirmed
+# by the SAME fetches succeeding in isolation (diag_isolated_localhost_
+# via_runprobe.py). A dedicated, uncontended probe is what actually
+# measures the refusal.
+_SPECIAL_TARGETS_PROBE_JS = """
+async () => {
+  const targets = [
+    ['localhost-fetch', 'https://localhost:8765/'],
+    ['x-localhost-fetch', 'https://x.localhost:8766/'],
+    ['zero-addr-fetch', 'https://0.0.0.0/'],
+    ['v4-mapped-fetch', 'https://[::ffff:127.0.0.1]:8765/'],
+    ['private-ip-fetch', 'https://10.0.0.5/'],
+    ['metadata-ip-fetch', 'https://169.254.169.254/'],
+  ];
+  for (const [name, url] of targets) {
+    console.log('KERDOOS_ATTEMPT:' + name);
+    await Promise.race([
+      fetch(url, {mode: 'no-cors'}).catch(() => {}),
+      new Promise(r => setTimeout(r, 2500)),
+    ]);
+  }
+  return 'done';
+}
+"""
+
+
+class CamoufoxSpecialAddressTargetsTest(_ImageGatedCase):
+    """ADR T4-1 (localhost/x.localhost) and T4-10 (private/metadata IPs,
+    0.0.0.0, an IPv4-mapped IPv6 loopback literal) as channel DESTINATIONS
+    -- distinct from CamoufoxAntiRebindingTest (a hostname that RESOLVES
+    to a bad IP) and CamoufoxLoopbackChannelsTest's plain 127.0.0.1/[::1]
+    targets. localhost/x.localhost are hostname-shaped and reach the
+    domain check; the four literal IPs are refused earlier, by
+    _is_hostname_shaped, before any domain/IP-safety check runs."""
+
+    def test_special_address_targets_are_refused(self) -> None:
+        counter = _HitCounter()
+        listeners = [
+            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8765, counter),
+            _Listener(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1", 8766, counter),
+        ]
+        seen: dict = {"attempted": []}
+        try:
+            def _probe(page) -> None:  # noqa: ANN001
+                page.on("console", lambda msg: seen["attempted"].append(
+                    msg.text[len("KERDOOS_ATTEMPT:"):])
+                    if msg.text.startswith("KERDOOS_ATTEMPT:") else None)
+                page.set_content("<html><body></body></html>")
+                page.evaluate(_SPECIAL_TARGETS_PROBE_JS)
+
+            proxy = _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=20,
+                               fetch_timeout_seconds=30)
+
+            _EXPECTED_TARGETS = {
+                "localhost-fetch", "x-localhost-fetch", "zero-addr-fetch",
+                "v4-mapped-fetch", "private-ip-fetch", "metadata-ip-fetch",
+            }
+            self.assertEqual(
+                set(seen["attempted"]), _EXPECTED_TARGETS,
+                f"not every special-address target was actually "
+                f"attempted, only {seen['attempted']}")
+
+            _EXPECTED_HEADS = {
+                "CONNECT localhost:8765", "CONNECT x.localhost:8766",
+                # Firefox canonicalizes the IPv4-mapped literal to pure
+                # hex (127.0.0.1 = 0x7f000001) before issuing the CONNECT
+                # -- MEASURED, not the dotted form the URL was written in.
+                "CONNECT 0.0.0.0:443", "CONNECT [::ffff:7f00:1]:8765",
+                "CONNECT 10.0.0.5:443", "CONNECT 169.254.169.254:443",
+            }
+            missing_heads = _EXPECTED_HEADS - set(proxy.heads)
+            self.assertFalse(
+                missing_heads,
+                f"expected CONNECTs never reached the proxy: "
+                f"{missing_heads}, got heads={proxy.heads}")
+
+            self.assertEqual(
+                counter.count, 0,
+                "a special-address target reached a real loopback listener")
+
+            for listener in listeners:
+                listener.probe_from_python()
+            deadline = time.monotonic() + 5.0
+            while counter.count < len(listeners) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(
+                counter.count, len(listeners),
+                "positive control failed -- some listeners never "
+                "registered a hit even from a direct Python connection")
         finally:
             for listener in listeners:
                 listener.stop()
