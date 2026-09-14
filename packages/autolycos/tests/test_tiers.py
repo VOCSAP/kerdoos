@@ -10,6 +10,7 @@ from unittest import mock
 
 from autolycos import tiers
 from autolycos.adapters import browser, camoufox, uc
+from autolycos.tiers import BudgetTerm, GateWarning, NavigationWarning
 
 _TOOLS = ("playwright", "patchright", "playwright_stealth", "camoufox",
           "seleniumbase", "curl_cffi", "psutil")
@@ -57,11 +58,13 @@ class DefaultsTest(unittest.TestCase):
              camoufox.MAX_ABANDONED_FETCH_THREADS,
              camoufox.KILL_WAIT_SECONDS, camoufox.LATE_SWEEP_SECONDS))
 
-    def test_budgets_are_frozen(self) -> None:
-        for budget in (tiers.BROWSER, tiers.UC, tiers.CAMOUFOX):
-            with self.subTest(budget=type(budget).__name__):
+    def test_budgets_and_warnings_are_frozen(self) -> None:
+        warning = NavigationWarning(
+            fetch_timeout_seconds=1.0, floor_seconds=2.0, terms=())
+        for frozen in (tiers.BROWSER, tiers.UC, tiers.CAMOUFOX, warning):
+            with self.subTest(frozen=type(frozen).__name__):
                 with self.assertRaises(dataclasses.FrozenInstanceError):
-                    budget.fetch_timeout_seconds = 0.0  # type: ignore[misc]
+                    frozen.fetch_timeout_seconds = 0.0  # type: ignore[misc]
 
     def test_default_budgets_raise_no_warning(self) -> None:
         acquire = 120.0
@@ -99,22 +102,15 @@ class BrowserBudgetCheckTest(unittest.TestCase):
         self.assertEqual(_conditions(self._check(50.0, acquire=50.0)),
                          ["navigation", "gate"])
 
-    def test_messages(self) -> None:
-        (navigation,) = self._check(50.0)
-        self.assertEqual(
-            navigation.message,
-            "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=50.0 is not above the "
-            "browser tier's own launch (40.0s) + navigation (30.0s) budget "
-            "(70.0s) -- a fetch could be abandoned before the launch or "
-            "navigation timeout it wraps ever gets a chance to fire.")
-        (gate,) = self._check(90.0, launch=20.0, acquire=60.0)
-        self.assertEqual(
-            gate.message,
-            "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=90.0 is not below "
-            "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=60.0 -- another caller "
-            "waiting for the browser gate could time out its own wait "
-            "before this fetch ever abandons its stuck launch and frees "
-            "the gate.")
+    def test_warning_fields(self) -> None:
+        self.assertEqual(self._check(50.0), [NavigationWarning(
+            fetch_timeout_seconds=50.0, floor_seconds=70.0,
+            terms=(BudgetTerm("launch_timeout_seconds", 40.0),
+                   BudgetTerm("nav_timeout_seconds", 30.0)))])
+        self.assertEqual(self._check(90.0, launch=20.0, acquire=60.0), [
+            GateWarning(fetch_timeout_seconds=90.0,
+                        acquire_timeout_seconds=60.0, cleanup_seconds=0.0,
+                        held_seconds=90.0, cleanup_terms=())])
 
 
 class UcBudgetCheckTest(unittest.TestCase):
@@ -136,23 +132,19 @@ class UcBudgetCheckTest(unittest.TestCase):
         self.assertEqual(
             _conditions(self._check(85.5, sweep=6.5, acquire=100.0)), ["gate"])
 
-    def test_messages(self) -> None:
-        (navigation,) = self._check(20.0)
-        self.assertEqual(
-            navigation.message,
-            "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=20.0 is not above the uc tier's "
-            "own page-load (40.0s) + reconnect (5.0s) + render (2.0s) "
-            "budget (47.0s) -- a fetch could be abandoned before the "
-            "navigation timeout it wraps ever gets a chance to fire.")
-        (gate,) = self._check(86.0, sweep=6.0, acquire=100.0)
-        self.assertEqual(
-            gate.message,
-            "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=86.0 plus the post-navigation "
-            "cleanup it triggers (14.0s: 2 confirmed-death waits of 4.0s "
-            "plus the late sweep's 6.0s ceiling) would hold the browser gate "
-            "for 100.0s, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS="
-            "100.0 -- another caller waiting for that gate could time out its "
-            "own wait before this one ever frees it.")
+    def test_warning_fields(self) -> None:
+        self.assertEqual(self._check(20.0), [NavigationWarning(
+            fetch_timeout_seconds=20.0, floor_seconds=47.0,
+            terms=(BudgetTerm("page_load_timeout_seconds", 40.0),
+                   BudgetTerm("reconnect_time", 5.0),
+                   BudgetTerm("render_wait", 2.0)))])
+        self.assertEqual(self._check(86.0, sweep=6.0, acquire=100.0), [
+            GateWarning(fetch_timeout_seconds=86.0,
+                        acquire_timeout_seconds=100.0, cleanup_seconds=14.0,
+                        held_seconds=100.0,
+                        cleanup_terms=(
+                            BudgetTerm("kill_wait_seconds", 4.0, count=2),
+                            BudgetTerm("orphan_sweep_delay_seconds", 6.0)))])
 
 
 class CamoufoxBudgetCheckTest(unittest.TestCase):
@@ -174,23 +166,18 @@ class CamoufoxBudgetCheckTest(unittest.TestCase):
             _conditions(self._check(89.0, acquire=100.0)), ["gate"])
         self.assertEqual(self._check(88.5, acquire=100.0), [])
 
-    def test_messages(self) -> None:
-        (navigation,) = self._check(70.0)
-        self.assertEqual(
-            navigation.message,
-            "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=70.0 is not above the "
-            "camoufox tier's launch (30.0s) + navigation (40.0s) budget "
-            "(70.0s) -- a fetch could be abandoned before the timeout it "
-            "wraps ever gets a chance to fire.")
-        (gate,) = self._check(89.0, acquire=100.0)
-        self.assertEqual(
-            gate.message,
-            "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=89.0 plus the cleanup it "
-            "triggers (11.0s: two confirmed-death waits of 4.0s plus the "
-            "late sweep's 3.0s grace) would hold the browser gate for "
-            "100.0s, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=100.0 "
-            "-- another caller waiting for that gate could time out its own "
-            "wait before this one ever frees it.")
+    def test_warning_fields(self) -> None:
+        self.assertEqual(self._check(70.0), [NavigationWarning(
+            fetch_timeout_seconds=70.0, floor_seconds=70.0,
+            terms=(BudgetTerm("launch_timeout_seconds", 30.0),
+                   BudgetTerm("nav_timeout_seconds", 40.0)))])
+        self.assertEqual(self._check(89.0, acquire=100.0), [
+            GateWarning(fetch_timeout_seconds=89.0,
+                        acquire_timeout_seconds=100.0, cleanup_seconds=11.0,
+                        held_seconds=100.0,
+                        cleanup_terms=(
+                            BudgetTerm("kill_wait_seconds", 4.0, count=2),
+                            BudgetTerm("late_sweep_seconds", 3.0)))])
 
 
 class ReExportTest(unittest.TestCase):

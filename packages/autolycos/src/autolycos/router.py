@@ -197,15 +197,8 @@ class StaticRouter:
         # StaticRouters built without an explicit gate still share one door.
         self._browser_gate = (
             browser_gate if browser_gate is not None else default_browser_gate())
-        # None leaves each tier's own default in effect.
-        # KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071),
-        # KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS (roadmap b3213f3c),
-        # KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce),
-        # KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS and
-        # KERDOOS_BROWSER_MAX_ABANDONED_FETCHES (roadmap d8b7b8fd),
-        # KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da) are injected by
-        # the kerdoos composition root -- autolycos itself never reads any
-        # of these env vars (invariant 2).
+        # None leaves each tier's own default in effect. Every tier setting
+        # is injected by the caller: autolycos reads no environment variable.
         self._extra_kwargs: dict[str, dict[str, float | int | str]] = {}
         if uc_launch_timeout_seconds is not None:
             self._extra_kwargs.setdefault("uc", {})[

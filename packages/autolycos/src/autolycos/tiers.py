@@ -1,11 +1,14 @@
 """Public contract of the browser-backed tiers: their defaults, the budget
 checks a consumer runs on its own settings, and the install probes an image
-build runs. Tool-free: the adapters import their tools lazily."""
+build runs. Tool-free: the adapters import their tools lazily.
+
+A check reports what is out of order as data; wording it, and naming the
+consumer's own settings, is left to the consumer."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 from .adapters import browser as _browser
 from .adapters import camoufox as _camoufox
@@ -19,21 +22,69 @@ from .adapters.camoufox import (
 __all__ = [
     "BROWSER", "CAMOUFOX", "CAMOUFOX_BROWSER_VERSION",
     "CAMOUFOX_EXECUTABLE_PATH", "UC", "BrowserBudget", "BudgetCondition",
-    "BudgetWarning", "CamoufoxBudget", "UcBudget", "camoufox_ready",
-    "chromium_executable",
+    "BudgetTerm", "BudgetWarning", "CamoufoxBudget", "GateWarning",
+    "NavigationWarning", "UcBudget", "camoufox_ready", "chromium_executable",
 ]
 
 BudgetCondition = Literal["navigation", "gate"]
 
 
 @dataclass(frozen=True, slots=True)
-class BudgetWarning:
-    """`navigation`: the fetch deadline can fire before the timeout it wraps.
-    `gate`: a stuck fetch can hold the shared browser gate at or past the
-    acquire timeout other callers wait with."""
+class BudgetTerm:
+    """One summand of a budget: `count` times `seconds`. `name` is the budget
+    field or check argument the value comes from."""
 
-    condition: BudgetCondition
-    message: str
+    name: str
+    seconds: float
+    count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationWarning:
+    """fetch_timeout_seconds <= floor_seconds, the sum of `terms`: the fetch
+    deadline can fire before the timeouts it wraps."""
+
+    condition: ClassVar[Literal["navigation"]] = "navigation"
+    fetch_timeout_seconds: float
+    floor_seconds: float
+    terms: tuple[BudgetTerm, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GateWarning:
+    """held_seconds = fetch_timeout_seconds + cleanup_seconds (the sum of
+    `cleanup_terms`) >= acquire_timeout_seconds: a stuck fetch can hold the
+    shared browser gate as long as other callers wait for it."""
+
+    condition: ClassVar[Literal["gate"]] = "gate"
+    fetch_timeout_seconds: float
+    acquire_timeout_seconds: float
+    cleanup_seconds: float
+    held_seconds: float
+    cleanup_terms: tuple[BudgetTerm, ...]
+
+
+BudgetWarning = NavigationWarning | GateWarning
+
+
+def _check(fetch_timeout_seconds: float, acquire_timeout_seconds: float,
+           floor_terms: tuple[BudgetTerm, ...],
+           cleanup_terms: tuple[BudgetTerm, ...]) -> list[BudgetWarning]:
+    warnings: list[BudgetWarning] = []
+    floor_seconds = sum(term.count * term.seconds for term in floor_terms)
+    if fetch_timeout_seconds <= floor_seconds:
+        warnings.append(NavigationWarning(
+            fetch_timeout_seconds=fetch_timeout_seconds,
+            floor_seconds=floor_seconds, terms=floor_terms))
+    cleanup_seconds = sum(term.count * term.seconds for term in cleanup_terms)
+    held_seconds = fetch_timeout_seconds + cleanup_seconds
+    if held_seconds >= acquire_timeout_seconds:
+        warnings.append(GateWarning(
+            fetch_timeout_seconds=fetch_timeout_seconds,
+            acquire_timeout_seconds=acquire_timeout_seconds,
+            cleanup_seconds=cleanup_seconds, held_seconds=held_seconds,
+            cleanup_terms=cleanup_terms))
+    return warnings
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,26 +97,14 @@ class BrowserBudget:
     def check(self, *, fetch_timeout_seconds: float,
               launch_timeout_seconds: float,
               acquire_timeout_seconds: float) -> list[BudgetWarning]:
-        warnings: list[BudgetWarning] = []
-        nav_seconds = self.nav_timeout_ms / 1000
-        min_expected = launch_timeout_seconds + nav_seconds
-        if fetch_timeout_seconds <= min_expected:
-            warnings.append(BudgetWarning("navigation", (
-                "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=%s is not above the "
-                "browser tier's own launch (%.1fs) + navigation (%.1fs) budget "
-                "(%.1fs) -- a fetch could be abandoned before the launch or "
-                "navigation timeout it wraps ever gets a chance to fire.") % (
-                    fetch_timeout_seconds, launch_timeout_seconds,
-                    nav_seconds, min_expected)))
-        if fetch_timeout_seconds >= acquire_timeout_seconds:
-            warnings.append(BudgetWarning("gate", (
-                "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=%s is not below "
-                "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- another caller "
-                "waiting for the browser gate could time out its own wait "
-                "before this fetch ever abandons its stuck launch and frees "
-                "the gate.") % (
-                    fetch_timeout_seconds, acquire_timeout_seconds)))
-        return warnings
+        """Past its deadline the browser tier releases the gate with no
+        cleanup of its own."""
+        return _check(
+            fetch_timeout_seconds, acquire_timeout_seconds,
+            floor_terms=(
+                BudgetTerm("launch_timeout_seconds", launch_timeout_seconds),
+                BudgetTerm("nav_timeout_seconds", self.nav_timeout_ms / 1000)),
+            cleanup_terms=())
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,33 +123,18 @@ class UcBudget:
               acquire_timeout_seconds: float) -> list[BudgetWarning]:
         """`orphan_sweep_delay_seconds` is the delay the tier will actually
         sleep, after any clamping the caller applies."""
-        warnings: list[BudgetWarning] = []
-        min_expected = (self.page_load_timeout_seconds + self.reconnect_time
-                        + self.render_wait)
-        if fetch_timeout_seconds <= min_expected:
-            warnings.append(BudgetWarning("navigation", (
-                "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=%s is not above the uc tier's "
-                "own page-load (%.1fs) + reconnect (%.1fs) + render (%.1fs) "
-                "budget (%.1fs) -- a fetch could be abandoned before the "
-                "navigation timeout it wraps ever gets a chance to fire.") % (
-                    fetch_timeout_seconds, self.page_load_timeout_seconds,
-                    self.reconnect_time, self.render_wait, min_expected)))
-        cleanup_seconds = (self.post_nav_kill_passes * self.kill_wait_seconds
-                           + orphan_sweep_delay_seconds)
-        held = fetch_timeout_seconds + cleanup_seconds
-        if held >= acquire_timeout_seconds:
-            warnings.append(BudgetWarning("gate", (
-                "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=%s plus the post-navigation "
-                "cleanup it triggers (%.1fs: %d confirmed-death waits of %.1fs "
-                "plus the late sweep's %ss ceiling) would hold the browser gate "
-                "for %.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS="
-                "%s -- another caller waiting for that gate could time out its "
-                "own wait before this one ever frees it.") % (
-                    fetch_timeout_seconds, cleanup_seconds,
-                    self.post_nav_kill_passes, self.kill_wait_seconds,
-                    orphan_sweep_delay_seconds, held,
-                    acquire_timeout_seconds)))
-        return warnings
+        return _check(
+            fetch_timeout_seconds, acquire_timeout_seconds,
+            floor_terms=(
+                BudgetTerm("page_load_timeout_seconds",
+                           self.page_load_timeout_seconds),
+                BudgetTerm("reconnect_time", self.reconnect_time),
+                BudgetTerm("render_wait", self.render_wait)),
+            cleanup_terms=(
+                BudgetTerm("kill_wait_seconds", self.kill_wait_seconds,
+                           count=self.post_nav_kill_passes),
+                BudgetTerm("orphan_sweep_delay_seconds",
+                           orphan_sweep_delay_seconds)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,30 +151,15 @@ class CamoufoxBudget:
               acquire_timeout_seconds: float) -> list[BudgetWarning]:
         """Past its deadline a frozen fetch keeps the gate through two
         confirmed-death waits and the late sweep's grace."""
-        warnings: list[BudgetWarning] = []
-        min_expected = launch_timeout_seconds + nav_timeout_seconds
-        if fetch_timeout_seconds <= min_expected:
-            warnings.append(BudgetWarning("navigation", (
-                "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=%s is not above the "
-                "camoufox tier's launch (%.1fs) + navigation (%.1fs) budget "
-                "(%.1fs) -- a fetch could be abandoned before the timeout it "
-                "wraps ever gets a chance to fire.") % (
-                    fetch_timeout_seconds, launch_timeout_seconds,
-                    nav_timeout_seconds, min_expected)))
-        cleanup_seconds = 2 * self.kill_wait_seconds + self.late_sweep_seconds
-        held = fetch_timeout_seconds + cleanup_seconds
-        if held >= acquire_timeout_seconds:
-            warnings.append(BudgetWarning("gate", (
-                "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=%s plus the cleanup it "
-                "triggers (%.1fs: two confirmed-death waits of %.1fs plus the "
-                "late sweep's %.1fs grace) would hold the browser gate for "
-                "%.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s "
-                "-- another caller waiting for that gate could time out its "
-                "own wait before this one ever frees it.") % (
-                    fetch_timeout_seconds, cleanup_seconds,
-                    self.kill_wait_seconds, self.late_sweep_seconds, held,
-                    acquire_timeout_seconds)))
-        return warnings
+        return _check(
+            fetch_timeout_seconds, acquire_timeout_seconds,
+            floor_terms=(
+                BudgetTerm("launch_timeout_seconds", launch_timeout_seconds),
+                BudgetTerm("nav_timeout_seconds", nav_timeout_seconds)),
+            cleanup_terms=(
+                BudgetTerm("kill_wait_seconds", self.kill_wait_seconds,
+                           count=2),
+                BudgetTerm("late_sweep_seconds", self.late_sweep_seconds)))
 
 
 BROWSER = BrowserBudget(

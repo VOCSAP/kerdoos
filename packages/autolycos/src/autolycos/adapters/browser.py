@@ -74,7 +74,7 @@ NAV_TIMEOUT_MS = 30_000
 _WAIT_UNTIL = "networkidle"
 # Roadmap b3213f3c: bounds the Chromium LAUNCH itself (pw.chromium.launch),
 # which patchright otherwise bounds at its own 180s internal default --
-# longer than KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS's default 120s, so a
+# longer than the 120s a caller typically waits to acquire the gate, so a
 # stuck launch would hold the shared BrowserGate past every other caller's
 # own wait deadline. Kept below NAV_TIMEOUT_MS.
 BROWSER_LAUNCH_TIMEOUT_SECONDS = 20.0
@@ -469,7 +469,7 @@ class BrowserFetcher:
         # ca30b736: ADR 0002 Decision 1's single-Chromium OOM-coherence
         # guarantee), released only AFTER the kill below completes -- never
         # while a Chromium from THIS fetch could still be alive, or
-        # KERDOOS_BROWSER_MAX_CONCURRENT's memory bound would be a lie.
+        # the gate's max_concurrent memory bound would be a lie.
         with self._gate.acquire():
             run_thread = threading.Thread(target=_run, daemon=True)
             run_thread.start()

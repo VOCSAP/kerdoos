@@ -93,8 +93,8 @@ UC_LAUNCH_TIMEOUT_SECONDS = 30.0
 # at all can still spawn a process AFTER the deadline's own one-shot kill
 # already ran. A second sweep, run before releasing the browser gate,
 # catches it -- see _launch_with_deadline. Public (no leading underscore,
-# like UC_LAUNCH_TIMEOUT_SECONDS): kerdoos.config imports it as the single
-# source of truth for KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS's own default.
+# like UC_LAUNCH_TIMEOUT_SECONDS): autolycos.tiers exposes it as the uc
+# tier's orphan sweep default.
 ORPHAN_SWEEP_DELAY_SECONDS = 5.0
 # Roadmap f0c236da, MEASURED (autonomous image, real Driver, SIGSTOP on
 # Chrome after navigation): get_page_source(), current_url and quit() all
@@ -113,8 +113,8 @@ UC_FETCH_TIMEOUT_SECONDS = 90.0
 # returned, a window in which a caller releasing the gate right after
 # could hand the slot to a new launch while this one's Chromium is still
 # alive. _kill_identities waits (bounded) for confirmed death instead.
-# Public like the timeouts above: kerdoos.config needs it to state how long
-# a frozen uc fetch can hold the browser gate past its own deadline.
+# Public like the timeouts above: autolycos.tiers counts it in how long a
+# frozen uc fetch can hold the browser gate past its own deadline.
 KILL_WAIT_SECONDS = 5.0
 # Kill passes in _kill_after_fetch_timeout that can each pay the wait above
 # (marker, frozen sibling set, service pid); the late sweep's final pass

@@ -53,7 +53,7 @@ class BrowserGate:
             return
         if fcntl is None:
             logger.warning(
-                "KERDOOS_BROWSER_MAX_CONCURRENT is only enforced WITHIN this "
+                "max_concurrent is only enforced WITHIN this "
                 "process on this platform (fcntl is unavailable, e.g. "
                 "Windows) -- separate processes launching Chromium are NOT "
                 "bounded against each other."

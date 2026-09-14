@@ -70,22 +70,22 @@ reputation for every OTHER tenant. 0 explicitly disables the guard. Same
 floor-with-warning discipline; keyed per owner_id (invariant 10).
 
 KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS (roadmap 65cef071): bounds the
-Chrome LAUNCH itself for the uc tier (autolycos.adapters.uc.UcFetcher's
-launch_timeout_seconds), same floor-with-warning discipline. Read here and
+Chrome LAUNCH itself for the uc tier (default
+autolycos.tiers.UC.launch_timeout_seconds), same floor-with-warning discipline. Read here and
 INJECTED into autolycos.router.StaticRouter at composition-root time --
 autolycos never reads this (or any other KERDOOS_*) env var itself
 (invariant 2).
 
 KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS (roadmap b3213f3c): bounds the
-Chromium LAUNCH itself for the browser tier (autolycos.adapters.browser.
-BrowserFetcher's launch_timeout_seconds), same floor-with-warning discipline
+Chromium LAUNCH itself for the browser tier (default
+autolycos.tiers.BROWSER.launch_timeout_seconds), same floor-with-warning discipline
 and the same StaticRouter injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS
 above.
 
 KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS (roadmap 6521bbce): the delay of the
 uc tier's second orphan-process sweep, which runs SYNCHRONOUSLY, still
 holding the browser gate, on a launch that exceeded uc_launch_timeout_seconds
-(autolycos.adapters.uc.UcFetcher's orphan_sweep_delay_seconds), same
+(default autolycos.tiers.UC.orphan_sweep_delay_seconds), same
 StaticRouter injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. Has
 no upper bound of its own: _safe_uc_orphan_sweep_delay clamps it (with a
 warning) so a single timed-out launch cannot occupy the gate for as long as
@@ -112,8 +112,8 @@ unbounded pile of stuck ones. Same floor-with-warning discipline and
 StaticRouter injection path; each refusal is also logged at ERROR.
 
 KERDOOS_UC_FETCH_TIMEOUT_SECONDS (roadmap f0c236da): total deadline on the
-uc tier's navigate-through-quit cycle (autolycos.adapters.uc.UcFetcher's
-fetch_timeout_seconds), same floor-with-warning discipline and StaticRouter
+uc tier's navigate-through-quit cycle (default
+autolycos.tiers.UC.fetch_timeout_seconds), same floor-with-warning discipline and StaticRouter
 injection path as KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS above. MEASURED: none of
 get_page_source/current_url/quit, nor a client-side Selenium command
 timeout, are bounded on their own when Chrome freezes after navigation.
@@ -153,7 +153,7 @@ from typing import TypeVar
 from autolycos.tiers import BROWSER as _BROWSER_TIER
 from autolycos.tiers import CAMOUFOX as _CAMOUFOX_TIER
 from autolycos.tiers import UC as _UC_TIER
-from autolycos.tiers import BudgetWarning
+from autolycos.tiers import BudgetTerm, BudgetWarning, NavigationWarning
 
 logger = logging.getLogger(__name__)
 
@@ -414,8 +414,85 @@ def _safe_uc_orphan_sweep_delay(
     return clamped
 
 
+def _terms(terms: tuple[BudgetTerm, ...]) -> dict[str, BudgetTerm]:
+    return {term.name: term for term in terms}
+
+
+def _browser_budget_message(warning: BudgetWarning) -> str:
+    if isinstance(warning, NavigationWarning):
+        terms = _terms(warning.terms)
+        return (
+            "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=%s is not above the "
+            "browser tier's own launch (%.1fs) + navigation (%.1fs) budget "
+            "(%.1fs) -- a fetch could be abandoned before the launch or "
+            "navigation timeout it wraps ever gets a chance to fire.") % (
+            warning.fetch_timeout_seconds,
+            terms["launch_timeout_seconds"].seconds,
+            terms["nav_timeout_seconds"].seconds, warning.floor_seconds)
+    return (
+        "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS=%s is not below "
+        "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- another caller "
+        "waiting for the browser gate could time out its own wait "
+        "before this fetch ever abandons its stuck launch and frees "
+        "the gate.") % (
+        warning.fetch_timeout_seconds, warning.acquire_timeout_seconds)
+
+
+def _uc_budget_message(warning: BudgetWarning) -> str:
+    if isinstance(warning, NavigationWarning):
+        terms = _terms(warning.terms)
+        return (
+            "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=%s is not above the uc tier's "
+            "own page-load (%.1fs) + reconnect (%.1fs) + render (%.1fs) "
+            "budget (%.1fs) -- a fetch could be abandoned before the "
+            "navigation timeout it wraps ever gets a chance to fire.") % (
+            warning.fetch_timeout_seconds,
+            terms["page_load_timeout_seconds"].seconds,
+            terms["reconnect_time"].seconds, terms["render_wait"].seconds,
+            warning.floor_seconds)
+    terms = _terms(warning.cleanup_terms)
+    kill_wait = terms["kill_wait_seconds"]
+    return (
+        "KERDOOS_UC_FETCH_TIMEOUT_SECONDS=%s plus the post-navigation "
+        "cleanup it triggers (%.1fs: %d confirmed-death waits of %.1fs "
+        "plus the late sweep's %ss ceiling) would hold the browser gate "
+        "for %.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS="
+        "%s -- another caller waiting for that gate could time out its "
+        "own wait before this one ever frees it.") % (
+        warning.fetch_timeout_seconds, warning.cleanup_seconds,
+        kill_wait.count, kill_wait.seconds,
+        terms["orphan_sweep_delay_seconds"].seconds, warning.held_seconds,
+        warning.acquire_timeout_seconds)
+
+
+def _camoufox_budget_message(warning: BudgetWarning) -> str:
+    if isinstance(warning, NavigationWarning):
+        terms = _terms(warning.terms)
+        return (
+            "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=%s is not above the "
+            "camoufox tier's launch (%.1fs) + navigation (%.1fs) budget "
+            "(%.1fs) -- a fetch could be abandoned before the timeout it "
+            "wraps ever gets a chance to fire.") % (
+            warning.fetch_timeout_seconds,
+            terms["launch_timeout_seconds"].seconds,
+            terms["nav_timeout_seconds"].seconds, warning.floor_seconds)
+    terms = _terms(warning.cleanup_terms)
+    return (
+        "KERDOOS_CAMOUFOX_FETCH_TIMEOUT_SECONDS=%s plus the cleanup it "
+        "triggers (%.1fs: two confirmed-death waits of %.1fs plus the "
+        "late sweep's %.1fs grace) would hold the browser gate for "
+        "%.1fs, at or past KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- "
+        "another caller waiting for that gate could time out its own "
+        "wait before this one ever frees it.") % (
+        warning.fetch_timeout_seconds, warning.cleanup_seconds,
+        terms["kill_wait_seconds"].seconds,
+        terms["late_sweep_seconds"].seconds, warning.held_seconds,
+        warning.acquire_timeout_seconds)
+
+
 def _warn_once_per_condition(
     warnings: list[BudgetWarning], latches: Mapping[str, str],
+    message: Callable[[BudgetWarning], str],
 ) -> None:
     """WARNS, never refuses: a misordered tier budget degrades OTHER callers
     waiting for the shared browser gate, so a misconfigured deployment must
@@ -426,7 +503,7 @@ def _warn_once_per_condition(
     for warning in warnings:
         latch = latches[warning.condition]
         if not module_globals[latch]:
-            logger.warning("%s", warning.message)
+            logger.warning("%s", message(warning))
             module_globals[latch] = True
 
 
@@ -461,7 +538,8 @@ def get_settings() -> Settings:
             launch_timeout_seconds=browser_launch_timeout_seconds,
             acquire_timeout_seconds=browser_acquire_timeout_seconds),
         {"navigation": "_browser_fetch_timeout_below_launch_warned",
-         "gate": "_browser_fetch_timeout_above_acquire_warned"})
+         "gate": "_browser_fetch_timeout_above_acquire_warned"},
+        _browser_budget_message)
     # The CLAMPED delay is what the uc tier actually sleeps on both its
     # sweeps, so it is the value the ordering check below must reason
     # about -- warning on the raw env value would describe a budget the
@@ -480,7 +558,8 @@ def get_settings() -> Settings:
             orphan_sweep_delay_seconds=uc_orphan_sweep_delay_seconds,
             acquire_timeout_seconds=browser_acquire_timeout_seconds),
         {"navigation": "_uc_fetch_timeout_below_navigation_warned",
-         "gate": "_uc_fetch_timeout_above_acquire_warned"})
+         "gate": "_uc_fetch_timeout_above_acquire_warned"},
+        _uc_budget_message)
     camoufox_launch_timeout_seconds = _env_number(
         "KERDOOS_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS",
         DEFAULT_CAMOUFOX_LAUNCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
@@ -497,7 +576,8 @@ def get_settings() -> Settings:
             nav_timeout_seconds=camoufox_nav_timeout_seconds,
             acquire_timeout_seconds=browser_acquire_timeout_seconds),
         {"navigation": "_camoufox_fetch_timeout_below_navigation_warned",
-         "gate": "_camoufox_fetch_timeout_above_acquire_warned"})
+         "gate": "_camoufox_fetch_timeout_above_acquire_warned"},
+        _camoufox_budget_message)
     return Settings(
         session_secret=os.environ.get("KERDOOS_SESSION_SECRET"),
         config_db=os.environ.get("KERDOOS_CONFIG_DB", "config.db"),
