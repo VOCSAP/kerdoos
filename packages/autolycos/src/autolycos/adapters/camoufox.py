@@ -454,10 +454,28 @@ class CamoufoxFetcher:
         "cap => { const h = document.documentElement.outerHTML;"
         " return h.length > cap ? null : h; }")
 
+    # page.evaluate has no timeout and waits for the page's main thread, which
+    # a busy page holds. wait_for_function's timeout is enforced by the driver
+    # even then, and a primitive result comes back without another round trip
+    # to the page. The predicate is always truthy: -1 stands for over the cap.
+    _BOUNDED_READ_JS = (
+        "cap => { const h = (" + _CAPPED_HTML_JS + ")(cap);"
+        " return h === null ? -1 : h; }")
+
     @classmethod
-    def _read_capped(cls, page) -> str:  # type: ignore[no-untyped-def]
-        html = page.evaluate(cls._CAPPED_HTML_JS, MAX_HTML_BYTES)
-        if html is None:
+    def _read_capped(cls, page, deadline: float | None = None) -> str:  # type: ignore[no-untyped-def]
+        """The rendered DOM. With a `deadline` (time.monotonic()), a read
+        still unanswered at it raises the Playwright TimeoutError; without
+        one the read is unbounded."""
+        if deadline is None:
+            timeout_ms = 0.0
+        else:
+            # Playwright reads a timeout of 0 as no timeout at all.
+            timeout_ms = max((deadline - time.monotonic()) * 1000, 1.0)
+        html = page.wait_for_function(
+            cls._BOUNDED_READ_JS, arg=MAX_HTML_BYTES,
+            timeout=timeout_ms).json_value()
+        if not isinstance(html, str):
             raise FetchError(
                 f"rendered page exceeds {MAX_HTML_BYTES} characters cap")
         return html
@@ -468,19 +486,26 @@ class CamoufoxFetcher:
         that replaces itself with the real page after the load event has
         already fired. Polls until it is gone, and starts no poll once less
         than one interval of budget is left; any non-200 answer is returned
-        as is. A read in progress cannot be interrupted from here: a page
-        whose main thread stays busy holds it, and only the fetch's total
-        deadline bounds that."""
-        html = cls._read_capped(page)
+        as is. Every read is bounded by `deadline`: a first read past it
+        raises FetchError, a poll read past it returns the interstitial
+        already read."""
+        try:
+            html = cls._read_capped(page, deadline)
+        except Exception as exc:  # noqa: BLE001 -- narrowed just below
+            if _is_playwright_timeout(exc):
+                raise FetchError(
+                    "rendered page could not be read within the navigation "
+                    "budget") from exc
+            raise
         interval = _SETTLE_POLL_MS / 1000
         while (status == 200 and looks_challenged(status, html)
                and deadline - time.monotonic() >= interval):
             page.wait_for_timeout(_SETTLE_POLL_MS)
             try:
-                html = cls._read_capped(page)
+                html = cls._read_capped(page, deadline)
             except FetchError:
                 raise
-            except Exception:  # noqa: BLE001 -- the page is mid-navigation
+            except Exception:  # noqa: BLE001 -- mid-navigation or past the deadline
                 continue
         return html
 

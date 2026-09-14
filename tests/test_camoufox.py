@@ -67,12 +67,36 @@ class _Response:
         self.status = status
 
 
+class _Busy:
+    """A read the page answers only after `seconds`, like a busy main thread."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+
+
+class _PlaywrightTimeout(Exception):
+    pass
+
+
+def _as_playwright_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, _PlaywrightTimeout)
+
+
+class _Handle:
+    def __init__(self, value) -> None:  # noqa: ANN001
+        self._value = value
+
+    def json_value(self):  # noqa: ANN201
+        return self._value
+
+
 class _Page:
     """`contents` is served one read at a time, its last item repeating; an
-    exception item is raised instead of returned. evaluate() does NOT run
-    the script it receives: it re-implements the cap, so these tests prove
-    the adapter's handling of null and of the byte check, never the script's
-    own semantics. Only a measurement on a real Firefox can prove those."""
+    exception item is raised instead of returned. wait_for_function() does
+    NOT run the script it receives: it re-implements the cap (-1 over it)
+    and the driver-side timeout a _Busy item runs into, so these tests prove
+    the adapter's handling of those answers, never the script's own
+    semantics. Only a measurement on a real Firefox can prove those."""
 
     def __init__(self, contents: list, status: int | None,
                  url: str = _URL) -> None:
@@ -81,6 +105,7 @@ class _Page:
         self.url = url
         self.goto_args: tuple | None = None
         self.waits: list[float] = []
+        self.read_timeouts: list[float] = []
         self.content_reads = 0
 
     def goto(self, url, wait_until, timeout):  # noqa: ANN001, ANN201
@@ -101,9 +126,16 @@ class _Page:
         self.content_reads += 1
         return self._next()
 
-    def evaluate(self, expression: str, arg):  # noqa: ANN001, ANN201
+    def wait_for_function(self, expression: str, arg, timeout):  # noqa: ANN001, ANN201
+        self.read_timeouts.append(timeout)
         item = self._next()
-        return None if len(item) > arg else item
+        if isinstance(item, _Busy):
+            if timeout and timeout / 1000 < item.seconds:
+                time.sleep(timeout / 1000)
+                raise _PlaywrightTimeout(f"Timeout {timeout}ms exceeded")
+            time.sleep(item.seconds)
+            item = _PAGE
+        return _Handle(-1 if len(item) > arg else item)
 
 
 class _Context:
@@ -703,6 +735,41 @@ class InterstitialSettleTest(_WiringBase):
         self.assertTrue(browser.contexts[0].page.waits)
         self.assertGreaterEqual(elapsed, 0.6 - cfx._SETTLE_POLL_MS / 1000)
         self.assertLess(elapsed, 0.6 + 3.0)
+
+    def test_first_read_past_the_budget_is_a_fetch_error_within_it(self) -> None:
+        page = _Page([_Busy(5.0)], 200)
+        with mock.patch.object(cfx, "_is_playwright_timeout",
+                               side_effect=_as_playwright_timeout):
+            t0 = time.monotonic()
+            with self.assertRaises(FetchError):
+                cfx.CamoufoxFetcher._settled_content(page, 200, t0 + 0.5)
+            elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.5 + 1.0)
+
+    def test_poll_read_past_the_budget_returns_the_interstitial_already_read(
+            self) -> None:
+        browser = _Browser([_INTERSTITIAL, _Busy(5.0)])
+        t0 = time.monotonic()
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser),
+                                nav_timeout_seconds=0.8)
+        elapsed = time.monotonic() - t0
+        self.assertTrue(result.challenged)
+        self.assertEqual(result.html, _INTERSTITIAL)
+        self.assertLess(elapsed, 0.8 + 1.0)
+
+    def test_every_read_is_bounded_by_the_remaining_navigation_budget(
+            self) -> None:
+        browser = _Browser([_INTERSTITIAL, _INTERSTITIAL, _PAGE])
+        self._fetch(_FakeCamoufox(lambda kwargs: browser),
+                    nav_timeout_seconds=9.0)
+        timeouts = browser.contexts[0].page.read_timeouts
+        self.assertEqual(len(timeouts), 3)
+        for timeout in timeouts:
+            self.assertGreater(
+                timeout, 0, "Playwright reads a timeout of 0 as unbounded")
+            self.assertLessEqual(timeout, 9000)
+        self.assertGreater(timeouts[0], timeouts[-1],
+                           "a fixed timeout ignores the budget already spent")
 
 
 class PageReadBoundsTest(_WiringBase):

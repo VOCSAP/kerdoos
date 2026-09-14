@@ -2,10 +2,10 @@
 final-document check, liveness and memory footprint (carte 5438dd0b, lot
 T4-B).
 
-The mocked suite in test_camoufox.py drives a fake Page whose evaluate()
-IGNORES the JS expression it receives and re-implements the cap in Python
-(see its own docstring): it proves the adapter's handling of evaluate()'s
-return value, never the truth of _CAPPED_HTML_JS itself. Every test below
+The mocked suite in test_camoufox.py drives a fake Page whose
+wait_for_function() IGNORES the JS expression it receives and re-implements
+the cap in Python (see its own docstring): it proves the adapter's handling
+of the read's return value, never the truth of _CAPPED_HTML_JS itself. Every test below
 either drives _read_capped/_settled_content/_check_final_document against a
 real, unproxied Camoufox Firefox page (CappedRead*, SettledContent*,
 FinalDocumentUrlCheck*), or drives the full guarded CamoufoxFetcher.fetch()
@@ -233,7 +233,11 @@ class SettledContentNavigationBudgetTest(_RealCamoufoxTestCase):
         budget_seconds = 5.0
         deadline = time.monotonic() + budget_seconds
         t0 = time.monotonic()
-        cfx.CamoufoxFetcher._settled_content(page, 200, deadline)
+        with self.assertRaises(
+                FetchError,
+                msg="the first read, held by the busy main thread past the "
+                "budget, has no document to return"):
+            cfx.CamoufoxFetcher._settled_content(page, 200, deadline)
         elapsed = time.monotonic() - t0
         self.assertLess(
             elapsed, budget_seconds + 1.0,
