@@ -4,16 +4,24 @@
   * autolycos/ never imports core/ (extractibility invariant).
   * the port/error modules core relies on stay tool-free (so core cannot pull a
     tool transitively).
+
+autolycos's own source is located via the RESOLVED, installed package
+(importlib.util.find_spec) rather than a ROOT-relative path: carte 18bdfd9f
+moves autolycos's tests into packages/autolycos/tests/ ahead of a future
+`git subtree split`, and a hardcoded ROOT/packages/autolycos path would break
+the moment autolycos stops being a workspace member at that fixed location.
+autolycos checks its OWN invariants independently, from its own test file
+(packages/autolycos/tests/test_import_contract.py).
 """
 
 from __future__ import annotations
 
 import ast
+import importlib.util
 import pathlib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-AUTOLYCOS_SRC = ROOT / "packages" / "autolycos" / "src" / "autolycos"
 KERDOOS_SRC = ROOT / "packages" / "kerdoos" / "src" / "kerdoos"
 
 TOOLS = {"requests", "curl_cffi", "playwright", "patchright",
@@ -23,6 +31,15 @@ TOOLS = {"requests", "curl_cffi", "playwright", "patchright",
 # Concrete adapter / wiring module suffixes that core must never import.
 CONCRETE_SUFFIXES = ("adapters", "router", "factory",
                      "sqlite_store", "yaml_store")
+
+
+def _autolycos_src() -> pathlib.Path:
+    spec = importlib.util.find_spec("autolycos")
+    if spec is None or not spec.submodule_search_locations:
+        raise AssertionError(
+            "the autolycos package is not resolvable via importlib -- is "
+            "it installed in this environment (uv sync --all-packages)?")
+    return pathlib.Path(next(iter(spec.submodule_search_locations)))
 
 
 def _imports(path: pathlib.Path) -> set[str]:
@@ -62,13 +79,15 @@ class ImportContractTest(unittest.TestCase):
                 )
 
     def test_autolycos_never_imports_core(self) -> None:
-        for f in _py_files(AUTOLYCOS_SRC):
+        autolycos_src = _autolycos_src()
+        for f in _py_files(autolycos_src):
             for name in _imports(f):
                 top = name.split(".")[0]
                 self.assertNotIn(
                     top, ("core", "kerdoos"),
-                    f"{f.relative_to(ROOT)} imports {top!r} (extractibility "
-                    "invariant: autolycos never imports kerdoos/core)",
+                    f"{f.relative_to(autolycos_src.parent)} imports {top!r} "
+                    "(extractibility invariant: autolycos never imports "
+                    "kerdoos/core)",
                 )
 
     def test_mcp_interface_never_imports_autolycos(self) -> None:
@@ -84,18 +103,19 @@ class ImportContractTest(unittest.TestCase):
 
     def test_core_port_dependencies_are_tool_free(self) -> None:
         # Modules core is allowed to import must not drag a tool in.
+        autolycos_src = _autolycos_src()
         port_modules = [
-            AUTOLYCOS_SRC / "ports.py",
-            AUTOLYCOS_SRC / "errors.py",
-            AUTOLYCOS_SRC / "__init__.py",
+            autolycos_src / "ports.py",
+            autolycos_src / "errors.py",
+            autolycos_src / "__init__.py",
             # safety.py is the shared anti-SSRF choke point imported by the
             # registry loader; it must stay tool-free (stdlib + .errors only)
             # so a future tool import in the SSRF guard breaks this test.
-            AUTOLYCOS_SRC / "safety.py",
+            autolycos_src / "safety.py",
             # challenge.py is the shared challenge heuristic imported by every
             # fetcher adapter; it must stay tool-free (pure stdlib) so the
             # cross-tier `challenged` signal never drags a tool in.
-            AUTOLYCOS_SRC / "challenge.py",
+            autolycos_src / "challenge.py",
             KERDOOS_SRC / "parsers" / "ports.py",
             KERDOOS_SRC / "persistence" / "ports.py",
             # auth ports back AuthService (core.app.auth); they must stay
@@ -106,7 +126,7 @@ class ImportContractTest(unittest.TestCase):
             for name in _imports(f):
                 self.assertNotIn(
                     name.split(".")[0], TOOLS,
-                    f"{f.relative_to(ROOT)} (a core dependency) imports {name!r}",
+                    f"{f.name} (a core dependency) imports {name!r}",
                 )
 
 

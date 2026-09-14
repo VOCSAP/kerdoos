@@ -1414,7 +1414,7 @@ class DockerfileDefaultTargetTest(unittest.TestCase):
             self.skipTest(f"docker daemon not reachable: {info.stderr}")
 
     def test_default_target_is_release_not_the_strace_test_stage(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
+        repo_root = Path(__file__).resolve().parent.parent.parent
         proc = subprocess.run(
             [self._DOCKER, "buildx", "build", "--call=targets", str(repo_root)],
             capture_output=True, text=True, timeout=60)
@@ -1440,7 +1440,7 @@ class DockerfileLastStageTest(unittest.TestCase):
     makes `release` the buildx default, independent of a running daemon."""
 
     def setUp(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
+        repo_root = Path(__file__).resolve().parent.parent.parent
         self._dockerfile = repo_root / "Dockerfile"
         if not self._dockerfile.is_file():
             self.skipTest(

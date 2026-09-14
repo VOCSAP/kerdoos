@@ -60,7 +60,7 @@ Tout ce qui suit est mesure sur `main` = fa23df8.
 | Rempart role admin | `AppService.add_site` re-verifie `principal.role == "admin"` | `services.py:187-195` |
 | Validation d'URL en ecriture | `add_source` : site du catalogue, tier disponible, `validate_source_url(domain_policy)`, `make_source_id(owner, ...)` | `services.py:212-239` |
 | Dependance MCP | **Absente** : ni `mcp` ni `fastmcp` dans `uv.lock` ni dans le venv ; pas d'extra `[mcp]` | `packages/kerdoos/pyproject.toml:25-26` ; `uv.lock` |
-| Contrat d'imports | `TOOLS` du test statique ne contient pas `mcp` | `tests/test_import_contract.py:19-21` |
+| Contrat d'imports | `TOOLS` du test statique ne contient pas `mcp` | `tests/test_import_contract.py:27-29` |
 
 Ce que la carte suppose acquis et qui ne l'est pas :
 
