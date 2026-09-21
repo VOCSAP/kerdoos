@@ -103,6 +103,24 @@ se lit sur disque.
   (`README.md` public et metadonnees de package restent en anglais).
 - **Jamais de tiret cadratin** (em dash) -- utiliser `--` ou reformuler.
 
+## Agent skills
+
+### Issue tracker
+
+Les issues vivent dans la **roadmap partagee** `claude-peers` (outils MCP
+`roadmap_*`), pas dans GitHub Issues. Voir `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Cinq roles canoniques portes en `tags` de carte, chaines inchangees
+(`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`,
+`wontfix`). Voir `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Layout **multi-contexte** : `CONTEXT-MAP.md` a la racine, un `CONTEXT.md` par
+paquet du workspace. Voir `docs/agents/domain.md`.
+
 ## Point d'integration externe -- SMTP
 
 Le digest est emis vers un **relais SMTP externe configurable** (host, port,
