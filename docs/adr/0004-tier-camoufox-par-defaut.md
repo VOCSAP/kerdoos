@@ -336,10 +336,13 @@ environ 1,26 Go mesure.
 - Le `PinningProxy` applique l'allowlist de **domaines** (DomainPolicy + domaines de
   sous-ressources declares du site) a l'**autorite du CONNECT**, **avant** toute
   resolution. Hors allowlist : refus, sans resolution ni connexion.
-- Raison : le proxy est le seul point par lequel passe **tout** le trafic du navigateur
-  (pages, service workers, WebSockets, popups, trafic interne). Un garde pose dans le
-  navigateur ne voit qu'une partie de ce trafic ; il reste en **defense en profondeur**,
-  jamais comme controle principal.
+- Raison : le contrôle de l'allowlist doit porter sur les connexions du navigateur
+  (pages, service workers, WebSockets, popups, trafic interne), pas seulement sur les
+  requêtes visibles d'une API d'interception. **Décision :** compter le proxy et
+  l'absence de sortie directe comme remparts, à prouver séparément en T4. Une garde
+  intra-navigateur n'est pas exigée sur chaque tier : retirée sur `camoufox`, elle
+  fait l'objet d'un arbitrage distinct sur `browser` en C3/T4-11-browser ; elle ne
+  remplace jamais le contrôle de l'autorité du CONNECT.
 - **Etendu au tier `browser` existant** dans la meme tranche (T0.5) : le trou y est
   preexistant.
 
@@ -447,16 +450,18 @@ comme un second rempart ; elle ne l'est pas sur ce tier) :
   issues daijro/camoufox #271 et #428, lues le 2026-09-13) et un cout de
   construction que rien ne justifie tant que la preuve T4-10 tient. A rouvrir
   seulement si T4-10 ou T4-2 revele une sortie hors proxy.
-- **Le tier `browser` (patchright/Chromium) porte la meme construction** (`context.route`
-  + `route_web_socket` + `service_workers="block"`), qualifiee depuis T3 de "meilleur
-  effort, non comptee" dans sa docstring, jamais mesuree. La meme mesure lui est due,
-  sous le nom **T4-11-browser**, avec la meme regle de decision ET le meme A/B de
-  liveness (page multi-canaux avec et sans garde, duree du fetch et tenue de la
-  porte) : le resultat Camoufox ne se transpose pas (autre navigateur, autre
-  mecanisme d'interception), mais le risque qu'il a revele, une garde qui coute sur
-  la porte partagee sans mordre, vaut pour tout rempart intra-navigateur. Tant que
-  T4-11-browser n'est pas executee, la garde du tier `browser` reste non comptee et
-  son cout de liveness est inconnu.
+- **Le tier `browser` doit distinguer les interceptions HTTP et WebSocket.**
+  T4-11-browser, carte `33c5bddf`, est mesurée ci-dessous ; le résultat Camoufox ne
+  se transpose pas à patchright/Chromium. **Décision : retirer `route_web_socket`,
+  conserver `service_workers="block"` et ne pas promouvoir `context.route` comme
+  rempart.** **Maintenir `context.route` comme atténuation locale**, sur la base
+  de l'A/B isolant HTTP des WebSockets, sans garantie générale de stabilité ni de
+  liveness. **Révision explicite de la règle de décision :** l'ancien choix binaire
+  « retrait ou re-promotion comme rempart » confondait bénéfice local de fetch et
+  garantie de sécurité. Chaque interception est désormais évaluée séparément ;
+  HTTP peut être maintenu pour son bénéfice local sans être compté comme rempart.
+  Ce maintien n'autorise pas à clore la liveness : le crash post-navigation doit
+  encore être couvert par la lecture bornée et sa preuve en image dans `30333254`.
 
 ### Preuves d'execution exigees (tranche T4, dans l'image, `KERDOOS_REQUIRE_IMAGE_TESTS=1`)
 Chaque preuve est **jugee au contenu** (titre, code d'erreur, journal), jamais a la
@@ -506,14 +511,75 @@ des centaines de Ko.
   preuve (attendu pour re-promouvoir : au moins un appel sur le thread `camoufox-fetch`
   pour `bloque.example` sans CONNECT correspondant au proxy) reste la forme a
   rejouer si quelqu'un veut reintroduire une garde intra-navigateur sur ce tier.
-- **T4-11-browser -- meme preuve sur le tier `browser` (patchright/Chromium), NON
-  EXECUTEE.** Handler journalisant thread + URL, `<img src="https://bloque.example/
-  x.png">` et un `WebSocket` hors allowlist, formes `context.route`, `page.route` et
-  `route_web_socket`, PLUS l'A/B de liveness (page multi-canaux avec et sans garde,
-  duree du fetch et tenue de la porte, deux repetitions). Regle de decision
-  identique : jamais appele, ou appele mais degradant les fetches, = retrait ;
-  appele sur le thread du fetch sans degradation = re-promotion au rang de rempart
-  avec sa docstring. Due en T4.
+- **T4-11-browser -- campagne exécutée le 2026-09-25 ; HTTP maintenu comme
+  atténuation locale, WebSocket retiré, liveness post-navigation à prouver.**
+  Les preuves portent sur une image aux versions du lock (patchright 1.61.2,
+  Chromium 149.0.7827.55), avec les sources `fc2abcd`, pas sur une promesse de
+  comportement de versions futures. La sonde utilise le vrai fetch et le vrai
+  proxy, avec un dialer de banc injecté ; zéro canari n'est pas une preuve générale
+  d'absence de sortie réseau hors proxy.
+
+  **MESURÉ, rejeux architecte.** Préfixe de commande :
+  `bash C:/Users/Olivier/.agent-forge/scratch/33c5bddf/run.sh`.
+  Les fragments décisifs ci-dessous sont extraits verbatim de la ligne `RESULT`.
+
+  | Arguments du rejeu | Fragments de sortie décisifs |
+  |---|---|
+  | `probe_forms.py patchright context_ws` | `"handler_invocations": 0` ; `wss://shop.test/ws-allowed throw TypeError: binding is not a function` |
+  | `ab_liveness.py guard hostile route_only` | `"outcome": "result"` ; `"fetch_s": 7.67, "gate_hold_s": 7.51` ; `"handler_invocations": {"route": 216, "ws": 0}` ; `"handler_threads": ["Thread-1 (_run)"]` ; `"canary_hits": 0` |
+  | `ab_liveness.py noguard hostile` | `Error: Page.goto: Page crashed` ; `"fetch_s": 10.07, "gate_hold_s": 9.88` ; `"canary_hits": 0` |
+
+  **SUPPOSÉ dans cette révision, rapport externe non rejoué intégralement :** la
+  campagne du debugger décrit neuf résultats sur neuf avec la garde complète,
+  contre cinq crashes sur cinq sans elle ; sur huit popups seuls, deux occupations
+  de porte jusqu'à 90 s sur huit avec la garde, quatre crashes et deux résultats,
+  contre quatre crashes sur quatre sans garde. Dans la campagne complémentaire
+  isolant HTTP, aux mêmes délais de 30/90 s, les cinq premiers essais de chaque
+  bras entrelacés : `route_only` donne neuf résultats en 6,08 à 6,41 s et un crash
+  en 8,73 s sur dix essais, sans queue de 90 s ; `noguard` donne cinq crashes en
+  8,55 à 8,88 s sur cinq essais, sans résultat ni queue de 90 s. Ces nombres
+  décrivent les échantillons, pas des probabilités de production. Zéro queue sur
+  dix ne prouve pas son impossibilité ; les campagnes avec les deux gardes ne
+  permettent pas d'attribuer à HTTP seul les queues observées. Les sondes mesurent
+  la durée d'une porte instrumentée, pas la réacquisition d'un `BrowserGate` réel.
+
+  **DÉDUIT**, `browser.py:73,435-436,451-452,473-493` sur `fc2abcd` : `goto`
+  possède déjà un timeout de 30 s, et le watchdog de 90 s enveloppe aussi la
+  fermeture du navigateur. Une pile de dispatcher greenlet encore actif à 45 s
+  ne localise pas l'appel bloqué. L'affirmation « goto ne reçoit jamais le crash »
+  est retirée.
+
+  **SUPPOSÉ dans cette révision, trace du debugger non rejouée :** son run bloqué
+  instrumenté donne `goto end` à 11:23:50.762 UTC, `page.crash` à 11:23:53.295,
+  puis `browser.close start` à 11:25:19.690, à l'échéance du watchdog. Un run
+  bloqué sur douze dans cette série. **DÉDUIT**, `browser.py:439-441` et ces
+  horodatages : le blocage est compatible avec `page.content()` après une
+  navigation terminée ; l'appel n'a pas été instrumenté directement. Le crash
+  est livré, mais après `goto`. Ajouter un timeout à `goto` ou seulement un
+  callback de crash ne démontre donc pas une interruption de la lecture.
+
+  **Options et recommandation.** Retirer HTTP est peu coûteux, réversible et
+  supprime son éventuel coût de porte, mais abandonne le bénéfice local mesuré
+  sur la page multi-canaux. Le maintenir comme atténuation locale conserve ce
+  bénéfice, au prix du traitement et des tests de liveness post-navigation ; le
+  qualifier de rempart ne réduit pas ce risque. Les deux options restent locales
+  à l'adaptateur, sans changement de port ni de politique du proxy. **Choix :
+  maintenir HTTP sans le promouvoir, retirer WebSocket et borner la lecture.**
+  La force décisive est le bénéfice observé de HTTP isolé, sans queue de 90 s dans
+  son échantillon, et non une garantie extrapolée d'absence de dégradation.
+  La clôture du couplage `33c5bddf`/`30333254` exige encore la preuve de lecture
+  bornée après crash et de réacquisition de la porte réelle après nettoyage.
+
+  **Migration bornée, décision :** intégrer le cas de crash post-`goto` à la
+  lecture bornée de `30333254`, sans élargir ce lot à la cause du SEGV des popups,
+  qui reste dans `908f33cc`. Réutiliser le budget existant et garder le watchdog
+  total comme dernier recours. Ne pas modifier `BrowserBudget` ni `tiers.py`, ne
+  pas ajouter de terme de budget public et ne pas appeler l'API sync depuis un
+  autre thread. Prouver dans l'image qu'un crash post-navigation donne une erreur
+  dans le budget de lecture, puis que la porte est libérée après le nettoyage ;
+  la présence de `timeout=` dans le code ne suffit pas. Si la fermeture reste
+  bloquée après interruption de lecture, ne pas déclarer la liveness corrigée :
+  ce résiduel de cycle de processus relève de `908f33cc`.
 
 ## Decision 5 -- Liveness : lecons obligatoires des tiers Chromium
 
@@ -687,7 +753,7 @@ mise a jour le rende "meilleure" que Camoufox. »
 |---|---|---|
 | C1 | Allowlist de domaines dans le proxy, point de controle suffisant | Decision 4 (C1), tranche T0.5 |
 | C2 | Preferences Firefox imposees, OCSP tranche | Decision 4 (C2) |
-| C3 | Structure du contexte + proxy inevitable comme second rempart ; garde de contexte RETIREE du tier `camoufox` (T4-11 executee : inerte et degradant les pages hostiles) ; T4-11-browser due | Decision 4 (C3 referme), preuves T4-10, T4-11, T4-11-browser |
+| C3 | Structure du contexte + proxy inévitable comme second rempart ; garde retirée de `camoufox` ; T4-11-browser : WebSocket retiré, HTTP maintenu non compté comme rempart, liveness post-navigation à prouver | Décision 4 (C3), preuves T4-10, T4-11, T4-11-browser |
 | C4 | Build deterministe, provenance, secrets de build | Decision 2 (build deterministe) |
 | C5 | Zero telechargement a l'execution, par construction | Decision 1 (disponibilite), Decision 6 |
 | C6 | Durcissement de l'image | Decision 8 |
@@ -738,8 +804,11 @@ decision operateur requise :
    repetable lors d'une prochaine mesure ? (amendement sous la Decision 1)
 4. **Taille reelle de l'image** : **fermee en T2**, mesuree a 4,62 Go contre 2,42 Go
    (+2,20 Go, dont 1,29 Go pour la couche du binaire).
-5. **T4-11-browser** : la garde de contexte du tier `browser` n'a jamais ete mesuree ;
-   sa preuve (Decision 4, C3) est due en T4, avec l'A/B de liveness.
+5. **T4-11-browser** : arbitrage des interceptions rendu, retrait WebSocket et
+   maintien HTTP non compté comme rempart. Reste la preuve en image de lecture
+   bornée après crash et de réacquisition de la porte réelle dans `30333254` ; la
+   cause du SEGV reste dans `908f33cc`. Voir C3 pour les mesures, leurs limites et
+   les conditions de clôture.
 
 ## Changelog
 
