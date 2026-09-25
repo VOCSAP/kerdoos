@@ -91,7 +91,7 @@ BROWSER_FETCH_TIMEOUT_SECONDS = 90.0
 # so a timed-out fetch's cleanup can target ONLY this fetch's own process
 # tree (browser + its patchright Node driver parent + descendants) instead
 # of a concurrent, unrelated fetch's.
-_LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
+_LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
 
 # Subtracts Chromium's implicit bypass rules so loopback and link-local
 # targets go through the egress-proxy like everything else. Travels in the

@@ -69,7 +69,7 @@ CAMOUFOX_BROWSER_VERSION = "152.0.4-beta.30"
 warnings.filterwarnings(
     "ignore", message="When using a proxy", category=RuntimeWarning)
 
-_LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
+_LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
 # By name, and checked against the package's own enum before every launch:
 # an addon added upstream would otherwise be downloaded on first launch.
 _EXCLUDED_DEFAULT_ADDONS = ("UBO",)

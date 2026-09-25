@@ -280,7 +280,7 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         proxy_server = chromium.launch_kwargs["proxy"]["server"]
         self.assertTrue(proxy_server.startswith("http://127.0.0.1:"))
         # No egress-weakening launch flags survive the scrub -- only the
-        # per-fetch --kerdoos-launch-id marker (roadmap d8b7b8fd) remains.
+        # per-fetch --autolycos-launch-id marker (roadmap d8b7b8fd) remains.
         self.assertEqual(len(chromium.launch_kwargs["args"]), 1)
         self.assertTrue(
             chromium.launch_kwargs["args"][0].startswith(

@@ -201,7 +201,7 @@ def _load_seleniumbase():  # type: ignore[no-untyped-def]
 # THIS launch's OWN process tree by cmdline substring instead of by mere
 # process-tree novelty, which also matches a concurrent, unrelated
 # browser/uc launch's own Chrome.
-_LAUNCH_ID_ARG_PREFIX = "--kerdoos-launch-id="
+_LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
 # SeleniumBase's own driver process sits between this Python process and the
 # marked Chrome process; the marker itself lives only in Chrome's argv.
 _LAUNCH_PARENT_NAMES = frozenset({"chromedriver", "uc_driver"})
@@ -417,7 +417,7 @@ class UcFetcher:
         from Python once started, so a hang is bounded by abandoning the
         thread (daemon) and killing the process tree it spawned instead.
 
-        A unique --kerdoos-launch-id marker is injected into chromium_arg so
+        A unique --autolycos-launch-id marker is injected into chromium_arg so
         cleanup targets only THIS launch's own process tree (roadmap
         65cef071). An atomic claim decides which side -- this method's
         timeout, or the thread's own completion -- resolves the launch;
@@ -520,12 +520,12 @@ class UcFetcher:
         # take the late sweep's own baseline down with it, disarming two
         # cleanup mechanisms on one exception.
         try:
-            driver._kerdoos_launch_marker = marker  # noqa: SLF001
+            driver._autolycos_launch_marker = marker  # noqa: SLF001
             # MEASURED (image, https target): SeleniumBase's reconnect()
             # terminates the uc_driver service and starts a NEW one mid
             # navigation, so the frozen set below goes stale and the late
             # sweep needs the same pid baseline the launch path uses.
-            driver._kerdoos_pids_before = (  # noqa: SLF001
+            driver._autolycos_pids_before = (  # noqa: SLF001
                 pids_before if single_flight else None)
             # MEASURED (autonomous image, real Driver + SIGSTOP): uc_driver
             # is a SIBLING of Chrome in undetected mode -- it carries no
@@ -534,7 +534,7 @@ class UcFetcher:
             # attribution the deadline branch above relies on (roadmap
             # 6521bbce): never a by-name re-scan once the gate may belong
             # to someone else.
-            driver._kerdoos_launch_siblings = _capture_identities(  # noqa: SLF001
+            driver._autolycos_launch_siblings = _capture_identities(  # noqa: SLF001
                 _launch_process_tree(
                     marker, pids_before if single_flight else None))
         except Exception:  # noqa: BLE001 -- best-effort, never fail the launch
@@ -555,7 +555,7 @@ class UcFetcher:
         driver.service.process.pid (uc_driver's EXACT pid, not a
         name/time heuristic), under the gate.
         """
-        marker = getattr(driver, "_kerdoos_launch_marker", None)
+        marker = getattr(driver, "_autolycos_launch_marker", None)
         holder: dict = {}
         done = threading.Event()
 
@@ -671,7 +671,7 @@ class UcFetcher:
         """
         if marker is not None:
             _kill_launch_processes(marker)
-        _kill_identities(list(getattr(driver, "_kerdoos_launch_siblings", ())))
+        _kill_identities(list(getattr(driver, "_autolycos_launch_siblings", ())))
         self._kill_service_process(driver)
         self._late_sweep(driver, marker, worker)
 
@@ -723,7 +723,7 @@ class UcFetcher:
         _launch_with_deadline (the unit-test fakes), which would pay the
         wait for nothing.
         """
-        pids_before = getattr(driver, "_kerdoos_pids_before", None)
+        pids_before = getattr(driver, "_autolycos_pids_before", None)
         if pids_before is None or marker is None:
             return
         if self._gate.max_concurrent != 1:

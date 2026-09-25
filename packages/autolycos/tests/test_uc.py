@@ -279,7 +279,7 @@ class UcFetcherWiringTest(unittest.TestCase):
         # internal commas into bogus standalone switches and silently drop
         # the deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
         self.assertIsInstance(chromium_arg, list)
-        # host-resolver-rules + the per-launch --kerdoos-launch-id marker
+        # host-resolver-rules + the per-launch --autolycos-launch-id marker
         # _launch_with_deadline appends (roadmap 65cef071).
         self.assertEqual(len(chromium_arg), 2)
         arg = chromium_arg[0]
@@ -687,7 +687,7 @@ class UcDriverSiblingDiscoveryTest(unittest.TestCase):
 
     def test_sibling_spawned_after_the_baseline_snapshot_is_attributed(
             self) -> None:
-        marker = "--kerdoos-launch-id=abc123"
+        marker = "--autolycos-launch-id=abc123"
         pids_before = uc._snapshot_descendant_pids()
         proc = self._spawn_fake_uc_driver()
         self._wait_until_visible(proc.pid)
@@ -696,7 +696,7 @@ class UcDriverSiblingDiscoveryTest(unittest.TestCase):
 
     def test_sibling_present_before_the_baseline_snapshot_is_not_attributed(
             self) -> None:
-        marker = "--kerdoos-launch-id=abc123"
+        marker = "--autolycos-launch-id=abc123"
         proc = self._spawn_fake_uc_driver()
         self._wait_until_visible(proc.pid)
         pids_before = uc._snapshot_descendant_pids()  # already includes proc
@@ -708,7 +708,7 @@ class UcDriverSiblingDiscoveryTest(unittest.TestCase):
         # max_concurrent > 1: the caller passes pids_before=None, so a real
         # uc_driver sibling stays out of reach regardless of spawn timing --
         # documented limitation above KERDOOS_BROWSER_MAX_CONCURRENT=1.
-        marker = "--kerdoos-launch-id=abc123"
+        marker = "--autolycos-launch-id=abc123"
         uc._snapshot_descendant_pids()  # mirrors the caller's own baseline
         proc = self._spawn_fake_uc_driver()
         self._wait_until_visible(proc.pid)
@@ -726,7 +726,7 @@ class UcDriverSiblingDiscoveryTest(unittest.TestCase):
         # unaffected -- it is driven by PID-set membership alone.
         import psutil
 
-        marker = "--kerdoos-launch-id=abc123"
+        marker = "--autolycos-launch-id=abc123"
         pids_before = uc._snapshot_descendant_pids()
         proc = self._spawn_fake_uc_driver()
         self._wait_until_visible(proc.pid)
@@ -904,7 +904,7 @@ class _HangingPostNavDriver:
             self.process = _HangingPostNavDriver._FakeServiceProcess(pid)
 
     def __init__(self, marker: str | None, service_pid: int) -> None:
-        self._kerdoos_launch_marker = marker
+        self._autolycos_launch_marker = marker
         self.service = self._FakeService(service_pid)
         self.quit_called = 0
 
@@ -979,7 +979,7 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
 
     def test_timeout_kills_marker_matched_chrome_and_the_exact_service_pid(
             self) -> None:
-        marker = "--kerdoos-launch-id=abc123"
+        marker = "--autolycos-launch-id=abc123"
         chrome_proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", marker])
         service_proc = subprocess.Popen(
@@ -1034,7 +1034,7 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
         # it strikes precisely when the host is out of resources -- the
         # state this deadline exists to survive. Chrome is already running
         # by then, so returning without a kill would release the gate on it.
-        marker = "--kerdoos-launch-id=nothread1"
+        marker = "--autolycos-launch-id=nothread1"
         chrome_proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", marker])
         try:
@@ -1058,7 +1058,7 @@ class UcPostNavigationDeadlineTest(unittest.TestCase):
         # on `done` rather than on the worker's liveness lets a frozen
         # teardown out of the bound: the gate would be released on a
         # still-running Chrome.
-        marker = "--kerdoos-launch-id=quit9f2"
+        marker = "--autolycos-launch-id=quit9f2"
         chrome_proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", marker])
         service_proc = subprocess.Popen(

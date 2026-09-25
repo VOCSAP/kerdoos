@@ -489,7 +489,7 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
                 driver_cls, {"uc": True, "headless": True,
                              "binary_location": binary})
             known = {pid for pid, _ in getattr(
-                driver, "_kerdoos_launch_siblings", ())}
+                driver, "_autolycos_launch_siblings", ())}
             # The SPARING direction of _names_a_driver is unit-tested; this
             # is its other direction, on a real driver process. Without it,
             # an upstream rename of the uc_driver binary would silently

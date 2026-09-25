@@ -2,32 +2,19 @@
 
 from __future__ import annotations
 
-import ast
 import pathlib
 import unittest
 
 _SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "autolycos"
 _CONSUMER_TOKEN = "KERDOOS"
-_CONSUMER_PACKAGE = "kerdoos"
 
 
 def consumer_references(source: str) -> list[str]:
-    findings = [
+    return [
         f"line {number}: {line.strip()}"
         for number, line in enumerate(source.splitlines(), start=1)
-        if _CONSUMER_TOKEN in line
+        if _CONSUMER_TOKEN.casefold() in line.casefold()
     ]
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            modules = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            modules = [node.module]
-        else:
-            continue
-        findings.extend(
-            f"line {node.lineno}: imports {module}" for module in modules
-            if module.split(".")[0] == _CONSUMER_PACKAGE)
-    return findings
 
 
 class ConsumerNeutralityTest(unittest.TestCase):
@@ -40,6 +27,12 @@ class ConsumerNeutralityTest(unittest.TestCase):
         ])
         self.assertEqual(len(consumer_references(sample)), 3,
                          consumer_references(sample))
+
+    def test_scanner_rejects_lowercase_consumer_token(self) -> None:
+        sample = "MARKER = '--kerdoos-launch-id='"
+        self.assertEqual(
+            consumer_references(sample),
+            ["line 1: MARKER = '--kerdoos-launch-id='"])
 
     def test_scanner_accepts_a_neutral_module(self) -> None:
         sample = "\n".join([
