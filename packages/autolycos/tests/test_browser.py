@@ -176,14 +176,6 @@ class _FakePage:
         return self._content
 
 
-class _FakeWebSocketRoute:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
-
-
 class _FakeContext:
     def __init__(self, page: _FakePage, **kwargs) -> None:  # noqa: ANN003
         self._page = page
@@ -332,17 +324,12 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         for a in chromium.launch_kwargs["args"]:
             self.assertNotIn("--proxy-bypass-list", a)
 
-    def test_every_websocket_is_closed_before_its_handshake(self) -> None:
-        # route() does not see WebSockets, so a WS to an internal port would
-        # be seen by neither the proxy nor the route guard -- an internal-port
-        # liveness oracle for a scraped page.
+    def test_websocket_route_is_not_installed(self) -> None:
         page = _FakePage("<html>" + "x" * 5000, 200)
         _, chromium, _ = self._run(page)
         context = chromium._browser.context
-        self.assertEqual(context.ws_route_pattern, "**/*")
-        ws_route = _FakeWebSocketRoute()
-        context.ws_route_handler(ws_route)
-        self.assertTrue(ws_route.closed)
+        self.assertIsNone(context.ws_route_pattern)
+        self.assertIsNone(context.ws_route_handler)
 
     def test_context_created_with_service_workers_blocked(self) -> None:
         # ADR 0004 D4/C3: a service worker must not be able to make ANY

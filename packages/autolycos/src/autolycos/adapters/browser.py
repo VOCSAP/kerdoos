@@ -33,13 +33,8 @@ Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
     address class this posture exists to refuse. It must travel in the proxy
     dict, never in `args` -- --proxy-bypass-list is on the scrub list, so an
     args-borne copy would be stripped and the hole would reopen silently.
-  * BEST EFFORT, not counted as a control (ADR 0004 C3: never measured to
-    run on this tier, T4-11 decides): context.route("**/*") (bound to
-    the browser CONTEXT, not just the page, so it also covers popups/new pages
-    opened via window.open) aborts any request whose host the proxy would
-    also refuse. route() does not see WebSockets at all, which is a separate
-    API: context.route_web_socket("**/*") closes every WS before its
-    handshake, so a scraped page cannot use one to probe internal ports.
+  * LOCAL attenuation, not a security control: context.route("**/*") aborts
+    off-allowlist sub-resource requests that can crash a hostile renderer.
     Service workers cannot make any request at all (service_workers="block"
     on the context).
   * the rendered HTML is size-capped (anti-OOM, CWE-400).
@@ -478,16 +473,9 @@ class BrowserFetcher:
                             else:
                                 route.abort()
 
-                        # Bound to the CONTEXT, not just the page, so it also
-                        # covers popups/new pages opened via window.open
-                        # (ADR 0004 D4/C3).
+                        # Not a security control: abort off-allowlist
+                        # sub-resources that can crash a hostile renderer.
                         context.route("**/*", _guard)
-                        # route() never sees WebSockets; they have their own
-                        # API. Closing them unconditionally denies a scraped
-                        # page the internal-port liveness oracle a WS
-                        # handshake would otherwise give it.
-                        context.route_web_socket(
-                            "**/*", lambda ws: ws.close())
                         page = context.new_page()
                         navigation_responses: list[tuple[str, int]] = []
 
