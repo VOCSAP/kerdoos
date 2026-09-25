@@ -58,6 +58,8 @@ EXCEPTIONS: dict[tuple[str, str], str] = {
     ("magalu_bab5438g3h_camoufox.html", "ak.gh"): "2.17.42.146",
     ("magalu_bab5438g3h_camoufox.html", "zipcode"): "92990000",
     ("magalu_uc.html", "zipcode"): "92990000",
+    # public HQ address, JSON-LD Organization block, not a visitor CEP.
+    ("terabyte_40561.html", "zipcode"): "80030-001",
 }
 
 
@@ -168,11 +170,16 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
             _apply_exception(filename, "userLocation", value, violations)
 
     for m in re.finditer(
-            r'(?:"(zip_?[Cc]ode|postal_?[Cc]ode|cep)"\s*:\s*"?(\d{5,9})|'
-            r'(?:zip_?code|cep)=(\d{5,9}))', text, re.I):
+            r'(?:"(zip_?[Cc]ode|postal_?[Cc]ode|cep)"\s*:\s*"?(\d{5}-?\d{3}|\d{5})|'
+            r'(?:zip_?code|cep)=(\d{5}-?\d{3}|\d{5}))', text, re.I):
         value = m.group(2) or m.group(3)
-        if value and not _is_zeroed(value):
+        if value and not _is_zeroed(value.replace("-", "")):
             _apply_exception(filename, "zipcode", value, violations)
+
+    for m in re.finditer(r'"ak\.ak"\s*:\s*"([^"]*)"', text, re.I):
+        value = m.group(1)
+        if value and not re.fullmatch(r"[Aa]*", value):
+            _apply_exception(filename, "ak.ak", value, violations)
 
     for m in re.finditer(r'traceparent["\']?\s*[:=]\s*["\']?([0-9a-fA-F-]{10,})',
                           text, re.I):
@@ -334,6 +341,7 @@ class FixturePrivacyTest(unittest.TestCase):
             ("session-id", '{"session-id":"a1b2c3d4e5f6"}'),
             ("latitude", '{"latitude":-23.6821604}'),
             ("longitude", '{"longitude":-46.875494}'),
+            ("ak.ak", '{"ak.ak":"hOBiQwZUYzCg5VSAfCLimQ=="}'),
             ("traceparent", 'traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"'),
             ("ipv4", '{"host":"93.184.216.34"}'),
             ("ipv6", '{"host":"2606:2800:220:1:248:1893:25c8:1946"}'),
@@ -378,6 +386,8 @@ class FixturePrivacyTest(unittest.TestCase):
             ("placeholder deviceId", '{"deviceId":"placeholder"}'),
             ("city-precision latitude", '{"latitude":-23.68}'),
             ("city-precision longitude", '{"longitude":-46.87}'),
+            ("placeholder ak.ak", '{"ak.ak":"AAAAAAAAAAAAAAAAAAAAAAAA"}'),
+            ("empty ak.ak", '{"ak.ak":""}'),
             ("support email", '{"contact":"suporte@loja.com.br"}'),
             ("asset filename, not an email", '"logo_large_plus@2x.webp"'),
             ("version string, not an ipv4", '{"engine":{"version":"150.0.0.0"}}'),
@@ -399,6 +409,18 @@ class FixturePrivacyTest(unittest.TestCase):
             [("ak.gh", "2.17.42.146")],
             "the same value in a file NOT on the exception list must still "
             "be flagged -- an exception is per (file, key), never global")
+
+    def test_zipcode_exception_matches_the_exact_value_not_a_prefix(self) -> None:
+        self.assertEqual(
+            find_violations('{"postalCode":"80030-001"}', "terabyte_40561.html"),
+            [],
+            "80030-001 is the vendor's own exempted HQ address (JSON-LD "
+            "Organization block)")
+        self.assertEqual(
+            find_violations('{"postalCode":"80030-999"}', "terabyte_40561.html"),
+            [("zipcode", "80030-999")],
+            "a different CEP sharing the same 80030 prefix must still be "
+            "flagged -- the exception matches the exact value, not a prefix")
 
     def test_no_identifying_value_in_the_current_fixtures(self) -> None:
         report = scan_directory(FIXTURES_DIR)
