@@ -1098,6 +1098,12 @@ class BrowserFetchPsutilAbsentTest(unittest.TestCase):
             "(dangerous) kill, not a silent no-op")
 
 
+# A worker leaving its `with PinningProxy(...)` can spend the proxy's whole
+# 5s stop() join on Linux, where closing the listening socket does not wake
+# the serving thread's accept().
+_WORKER_EXIT_TIMEOUT = 15.0
+
+
 class _BlockedUntilReleasedBrowser:
     """A launched Chromium standing in: new_page() blocks until `release`
     is set, then raises, so an abandoned fetch thread exits on demand
@@ -1183,7 +1189,7 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
         for _ in range(2):
             self._abandon_with_unconfirmed_kill(gate, release, ceiling=2)
         release.set()
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + _WORKER_EXIT_TIMEOUT
         while time.monotonic() < deadline:
             with browser._abandoned_fetch_threads_lock:
                 if browser._abandoned_fetch_thread_count == 0:
@@ -1232,7 +1238,7 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
                     "the ceiling stopped counting a worker whose late kill "
                     "is still running")
                 backstop_release.set()
-                blocked.workers[0].join(timeout=5)
+                blocked.workers[0].join(timeout=_WORKER_EXIT_TIMEOUT)
             self.assertEqual(self._count(), 0)
         finally:
             release.set()
@@ -1251,7 +1257,7 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
         def _kill(marker: str) -> bool:
             if threading.current_thread() is caller:
                 release.set()
-                blocked.workers[0].join(timeout=5)
+                blocked.workers[0].join(timeout=_WORKER_EXIT_TIMEOUT)
                 self.assertFalse(blocked.workers[0].is_alive())
                 return False
             return True
