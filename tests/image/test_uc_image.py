@@ -29,6 +29,7 @@ from autolycos.errors import FetchError
 from autolycos.safety import DomainPolicy, ValidatedTarget
 from tests.image.webrtc_image_support import (
     NssTrustedCertificate,
+    TcpCapture,
     UdpCapture,
     lan_ip,
     runtime_certificate_tools_available,
@@ -339,6 +340,108 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
         finally:
             if foreign.poll() is None:
                 foreign.kill()
+
+    def test_next_fetch_removes_profile_recreated_by_late_launch(self) -> None:
+        import psutil
+        from autolycos.adapters.uc import _find_patchright_chromium
+        from seleniumbase import Driver
+
+        baseline = set(Path(tempfile.gettempdir()).glob("autolycos-uc-*"))
+        start_driver = threading.Event()
+        profile_process_seen = threading.Event()
+        profile_paths: list[str] = []
+        profile_received = threading.Event()
+
+        def delayed_driver(**kwargs):  # noqa: ANN003
+            profile_paths.append(kwargs["user_data_dir"])
+            profile_received.set()
+            start_driver.wait(timeout=30.0)
+            driver = Driver(**kwargs)
+            expected_arg = f"--user-data-dir={kwargs['user_data_dir']}"
+            for process in psutil.Process(os.getpid()).children(recursive=True):
+                try:
+                    if expected_arg in process.cmdline():
+                        profile_process_seen.set()
+                        break
+                except psutil.Error:
+                    continue
+            return driver
+
+        target = ValidatedTarget(
+            url="https://example.com/",
+            scheme="https",
+            host="example.com",
+            port=443,
+            ip="192.0.2.1",
+        )
+        fetcher = uc.UcFetcher(
+            _NEUTRAL_POLICY,
+            launch_timeout_seconds=0.01,
+            orphan_sweep_delay_seconds=1.0,
+        )
+        try:
+            with mock.patch.object(uc, "validate_target", return_value=target), \
+                 mock.patch.object(uc, "_load_seleniumbase", return_value=delayed_driver), \
+                 mock.patch.object(
+                     uc,
+                     "_find_patchright_chromium",
+                     return_value=_find_patchright_chromium(),
+                 ):
+                with self.assertRaisesRegex(FetchError, "uc launch exceeded"):
+                    fetcher.fetch("https://example.com/")
+            self.assertTrue(
+                profile_received.wait(timeout=30.0),
+                "timed-out launch never received a temporary profile",
+            )
+            self.assertFalse(
+                Path(profile_paths[0]).exists(),
+                "temporary profile survived the fetch timeout",
+            )
+            start_driver.set()
+            self.assertTrue(
+                profile_process_seen.wait(timeout=30.0),
+                "late launch never started Chrome with the temporary profile",
+            )
+        finally:
+            start_driver.set()
+
+        expected_arg = f"--user-data-dir={profile_paths[0]}"
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            active = False
+            for process in psutil.Process(os.getpid()).children(recursive=True):
+                try:
+                    active = expected_arg in process.cmdline()
+                except psutil.Error:
+                    continue
+                if active:
+                    break
+            if not active:
+                break
+            time.sleep(0.5)
+        self.assertFalse(active, "late Chrome remained after driver quit")
+
+        directories = set(Path(tempfile.gettempdir()).glob("autolycos-uc-*")) - baseline
+        self.assertTrue(directories, "late launch did not recreate a profile")
+
+        contents = {
+            path.relative_to(directory)
+            for directory in directories
+            for path in directory.rglob("*")
+        }
+        self.assertTrue(contents, "late Chrome recreated an empty profile")
+
+        with mock.patch.object(uc, "validate_target", return_value=target), \
+             mock.patch.object(
+                 uc,
+                 "_load_seleniumbase",
+                 return_value=lambda **kwargs: _FakeDriver("<html>next</html>"),
+             ):
+            result = fetcher.fetch("https://example.com/")
+
+        self.assertEqual(result.status, 200)
+        leaked = set(Path(tempfile.gettempdir()).glob("autolycos-uc-*")) - baseline
+        self.assertEqual(leaked, set(), f"profiles leaked: {leaked}")
 
 
 _UC_DRIVER_NAMES = ("uc_driver", "chromedriver")
@@ -679,12 +782,17 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
             url="https://shop.test/webrtc", scheme="https", host="shop.test",
             port=443, ip="127.0.0.1")
         capture = UdpCapture()
+        tcp_capture = TcpCapture()
         capture.start()
+        tcp_capture.start()
+        self.addCleanup(tcp_capture.close)
         from seleniumbase import Driver
         with mock.patch.object(uc, "validate_target", return_value=target), \
              mock.patch.object(uc, "_load_seleniumbase", return_value=Driver), \
              mock.patch.object(
                  uc, "_uc_chromium_args", side_effect=lambda args: list(args)), \
+             mock.patch.object(
+                 uc, "_host_resolver_rules", return_value="MAP shop.test 127.0.0.1"), \
              mock.patch.object(
                  uc, "_webrtc_user_data_dir", tempfile.TemporaryDirectory):
             control = uc.UcFetcher(
@@ -696,7 +804,35 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
         time.sleep(0.5)
         self.assertTrue(
             capture.events(), "unprotected UC missed the UDP canary")
+        self.assertEqual(
+            set(tcp_capture.events()),
+            {("127.0.0.1", 3484), (local_ip, 3484)},
+            "unprotected UC missed a TCP canary",
+        )
         capture.clear()
+        tcp_capture.clear()
+
+        with mock.patch.object(uc, "validate_target", return_value=target), \
+             mock.patch.object(uc, "_load_seleniumbase", return_value=Driver), \
+             mock.patch.object(
+                 uc,
+                 "_host_resolver_rules",
+                 return_value="MAP shop.test 127.0.0.1",
+             ):
+            resolver_relaxed = uc.UcFetcher(
+                DomainPolicy(frozenset({"shop.test"})),
+                fetch_timeout_seconds=30.0,
+            ).fetch("https://shop.test/webrtc")
+        self.assertEqual(resolver_relaxed.status, 200)
+        self.assertIn("webrtc-tcp-allocation-ready", resolver_relaxed.html)
+        time.sleep(0.5)
+        self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
+        self.assertTrue(
+            tcp_capture.events(),
+            "UC with literal-IP resolution enabled missed TCP canary",
+        )
+        capture.clear()
+        tcp_capture.clear()
 
         observed_args: list[str] = []
         observing = threading.Event()
@@ -732,7 +868,9 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(result.status, 200)
         self.assertIn("webrtc-page-loaded", result.html)
+        self.assertIn("webrtc-tcp-allocation-ready", result.html)
         self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
+        self.assertEqual(tcp_capture.events(), [], "WebRTC opened direct TCP")
         self.assertIn(
             "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
             observed_args)

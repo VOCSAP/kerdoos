@@ -346,6 +346,23 @@ environ 1,26 Go mesure.
 - **Etendu au tier `browser` existant** dans la meme tranche (T0.5) : le trou y est
   preexistant.
 
+### Addendum WebRTC des tiers Chromium
+- **`browser`** : la garantie mesuree contre les UDP WebRTC hors proxy est le switch
+  `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`. Le banc image impose
+  un controle positif TURN/TCP, puis ne constate aucun accept TCP direct pendant le
+  fetch protege. Par lecture du `PinningProxy`, un CONNECT vers le canari est refuse
+  hors allowlist et hors ports autorises.
+- **`uc`** : le meme switch seul est inoperant avec Chrome complet en
+  `--headless=new`. La garantie UDP mesuree est la preference
+  `webrtc.ip_handling_policy=disable_non_proxied_udp` d'un profil temporaire par
+  fetch. Avec ce profil mais sans `MAP * ~NOTFOUND`, le banc TURN/TCP atteint le
+  canari ; avec la resolution deny-by-default active, aucun accept TCP direct n'est
+  constate.
+- Un timeout reel de lancement UC, apres qu'un Chrome a demarre avec ce profil, ne
+  laisse aucun nouveau repertoire `autolycos-uc-*` apres son balayage differe. Le
+  multicast mDNS d'un candidat `.local` reste un residuel LOW : les canaris TURN ne
+  l'observent pas.
+
 ### C2 -- Preferences Firefox imposees
 Une liste **explicite et figee** de preferences, fusionnee **par-dessus** toute
 preference de l'appelant (l'appelant ne peut ni les retirer ni les modifier), equivalent

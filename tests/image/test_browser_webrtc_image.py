@@ -25,6 +25,7 @@ from autolycos.egress_proxy import PinningProxy
 from autolycos.safety import DomainPolicy
 from tests.image.webrtc_image_support import (
     NssTrustedCertificate,
+    TcpCapture,
     UdpCapture,
     lan_ip,
     runtime_certificate_tools_available,
@@ -90,9 +91,18 @@ class BrowserWebRtcEgressImageTest(unittest.TestCase):
         self.addCleanup(server.shutdown)
 
         capture = UdpCapture()
+        tcp_capture = TcpCapture()
         capture.start()
+        tcp_capture.start()
+        self.addCleanup(tcp_capture.close)
         self._assert_unprotected_chromium_hits_canary(capture, server.server_port)
+        self.assertEqual(
+            set(tcp_capture.events()),
+            {("127.0.0.1", 3484), (local_ip, 3484)},
+            "unprotected Chromium missed a TCP canary",
+        )
         capture.clear()
+        tcp_capture.clear()
 
         from patchright.sync_api import BrowserType
         import psutil
@@ -124,21 +134,34 @@ class BrowserWebRtcEgressImageTest(unittest.TestCase):
             connection.connect(("127.0.0.1", server.server_port))
             return connection
 
-        with mock.patch.object(browser, "PinningProxy", functools.partial(
-                PinningProxy, dialer=dial)), \
-             mock.patch.object(browser, "_load_stealth", return_value=_NoopStealth), \
-             mock.patch.object(browser.uuid, "uuid4", return_value=SimpleNamespace(
-                 hex="webrtc-proof")), \
-             mock.patch.object(BrowserType, "launch", capture_launch), \
-             mock.patch.object(safety.socket, "getaddrinfo", safe_addrinfo):
-            result = browser.BrowserFetcher(
-                DomainPolicy(frozenset({"shop.test"}))).fetch(
-                    "https://shop.test/webrtc")
+        with self.assertLogs("autolycos.egress_proxy", "WARNING") as proxy_logs:
+            with mock.patch.object(browser, "PinningProxy", functools.partial(
+                    PinningProxy, dialer=dial)), \
+                 mock.patch.object(browser, "_load_stealth", return_value=_NoopStealth), \
+                 mock.patch.object(browser.uuid, "uuid4", return_value=SimpleNamespace(
+                     hex="webrtc-proof")), \
+                 mock.patch.object(BrowserType, "launch", capture_launch), \
+                 mock.patch.object(safety.socket, "getaddrinfo", safe_addrinfo):
+                result = browser.BrowserFetcher(
+                    DomainPolicy(frozenset({"shop.test"}))).fetch(
+                        "https://shop.test/webrtc")
+            time.sleep(0.5)
 
-        time.sleep(0.5)
         self.assertEqual(result.status, 200)
         self.assertIn("webrtc-page-loaded", result.html)
+        self.assertIn("webrtc-tcp-allocation-ready", result.html)
+        self.assertTrue(
+            any("CONNECT 127.0.0.1:3484 refused" in line
+                for line in proxy_logs.output),
+            "PinningProxy did not refuse the loopback TURN CONNECT",
+        )
+        self.assertTrue(
+            any(f"CONNECT {local_ip}:3484 refused" in line
+                for line in proxy_logs.output),
+            "PinningProxy did not refuse the LAN TURN CONNECT",
+        )
         self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
+        self.assertEqual(tcp_capture.events(), [], "WebRTC opened direct TCP")
         self.assertIn(_WEBRTC_POLICY, observed_args)
 
     def _assert_unprotected_chromium_hits_canary(

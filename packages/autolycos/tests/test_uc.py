@@ -24,6 +24,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from autolycos import safety
 from autolycos.adapters import uc
 from autolycos.browser_gate import BrowserGate
@@ -216,6 +218,25 @@ class UcProfileCleanupTest(unittest.TestCase):
              mock.patch.object(uc.tempfile, "TemporaryDirectory", _BusyProfile):
             with self.assertRaisesRegex(FetchError, "initial timeout"):
                 uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
+
+    @pytest.mark.xfail(strict=True, reason="pending operator-applied sweep")
+    def test_next_fetch_removes_orphaned_profile(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="autolycos-uc-") as directory:
+            orphan = Path(directory)
+            (orphan / "Default").mkdir()
+            (orphan / "Default" / "Preferences").write_text(
+                "{}", encoding="utf-8")
+            with mock.patch.object(
+                safety.socket, "getaddrinfo", return_value=_addrinfo("104.18.0.1")
+            ), mock.patch.object(
+                uc,
+                "_load_seleniumbase",
+                return_value=lambda **kwargs: _FakeDriver("<html>ok</html>", **kwargs),
+            ):
+                result = uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
+
+            self.assertEqual(result.status, 200)
+            self.assertFalse(orphan.exists(), f"orphaned profile remains: {orphan}")
 
 
 class UcFetcherContractTest(unittest.TestCase):
