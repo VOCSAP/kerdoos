@@ -1105,6 +1105,7 @@ class _BlockedUntilReleasedBrowser:
 
     def __init__(self, release: threading.Event) -> None:
         self._release = release
+        self.workers: list[threading.Thread] = []
 
     def new_context(self, **kwargs):  # noqa: ANN003, ANN201
         return self
@@ -1116,6 +1117,7 @@ class _BlockedUntilReleasedBrowser:
         pass
 
     def new_page(self):  # noqa: ANN201
+        self.workers.append(threading.current_thread())
         self._release.wait(timeout=10)
         raise RuntimeError("connection reset (simulated post-kill unblock)")
 
@@ -1187,9 +1189,85 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
                 if browser._abandoned_fetch_thread_count == 0:
                     break
             time.sleep(0.05)
+        self.assertEqual(self._count(), 0)
 
         result = self._fetch(gate, self._ok_chromium(), max_abandoned_fetches=2)
         self.assertEqual(result.method, "browser")
+
+    def _count(self) -> int:
+        with browser._abandoned_fetch_threads_lock:
+            return browser._abandoned_fetch_thread_count
+
+    def test_worker_still_running_its_late_cleanup_keeps_counting(
+            self) -> None:
+        """The worker's late kill can wait several seconds on a live
+        process tree: the ceiling must keep counting it until that cleanup
+        is over, not from the moment its browser session returned."""
+        gate = BrowserGate(max_concurrent=1)
+        release = threading.Event()
+        in_backstop = threading.Event()
+        backstop_release = threading.Event()
+        caller = threading.current_thread()
+
+        def _kill(marker: str) -> bool:
+            if threading.current_thread() is caller:
+                return False
+            in_backstop.set()
+            backstop_release.wait(timeout=10)
+            return True
+
+        blocked = _BlockedUntilReleasedBrowser(release)
+        try:
+            with mock.patch.object(browser, "_kill_launch_processes",
+                                   side_effect=_kill):
+                with self.assertRaises(FetchError):
+                    self._fetch(gate, _FakeChromium(browser_obj=blocked),
+                                fetch_timeout_seconds=0.2)
+                self.assertEqual(self._count(), 1)
+                release.set()
+                self.assertTrue(in_backstop.wait(timeout=5),
+                                "the worker never reached its late cleanup")
+                self.assertEqual(
+                    self._count(), 1,
+                    "the ceiling stopped counting a worker whose late kill "
+                    "is still running")
+                backstop_release.set()
+                blocked.workers[0].join(timeout=5)
+            self.assertEqual(self._count(), 0)
+        finally:
+            release.set()
+            backstop_release.set()
+
+    def test_worker_gone_before_the_deadline_branch_counts_is_not_counted(
+            self) -> None:
+        """The deadline branch counts only after its own kill returns; if
+        the worker has fully exited meanwhile, nothing is left to give the
+        count back, so it must not be taken."""
+        gate = BrowserGate(max_concurrent=1)
+        release = threading.Event()
+        caller = threading.current_thread()
+        blocked = _BlockedUntilReleasedBrowser(release)
+
+        def _kill(marker: str) -> bool:
+            if threading.current_thread() is caller:
+                release.set()
+                blocked.workers[0].join(timeout=5)
+                self.assertFalse(blocked.workers[0].is_alive())
+                return False
+            return True
+
+        try:
+            with mock.patch.object(browser, "_kill_launch_processes",
+                                   side_effect=_kill):
+                with self.assertRaises(FetchError):
+                    self._fetch(gate, _FakeChromium(browser_obj=blocked),
+                                fetch_timeout_seconds=0.2)
+            self.assertEqual(
+                self._count(), 0,
+                "an already-exited worker was counted and can never be "
+                "given back")
+        finally:
+            release.set()
 
 
 class StaticRouterBrowserLaunchTimeoutTest(unittest.TestCase):

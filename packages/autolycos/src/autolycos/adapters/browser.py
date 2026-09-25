@@ -510,22 +510,24 @@ class BrowserFetcher:
             except BaseException as exc:  # noqa: BLE001 -- relayed or discarded
                 outcome = ("error", exc)
 
-            with _abandoned_fetch_threads_lock:
-                liveness["finished"] = True
-                if liveness["counted"]:
-                    _abandoned_fetch_thread_count -= 1
-
-            if _claim():
-                kind, value = outcome
-                holder[kind] = value
-            else:
-                # The deadline already fired and the main thread moved on:
-                # this fetch's result is unreachable either way. The main
-                # thread's own timeout branch already killed (and waited
-                # for) this process tree and is solely responsible for the
-                # abandoned-fetch ceiling; this call is a harmless,
-                # idempotent backstop, not a second source of truth.
-                _kill_launch_processes(marker)
+            try:
+                if _claim():
+                    kind, value = outcome
+                    holder[kind] = value
+                else:
+                    # The deadline already fired and the main thread moved
+                    # on: this fetch's result is unreachable either way. The
+                    # main thread's own timeout branch already killed (and
+                    # waited for) this process tree; this call is a
+                    # harmless, idempotent backstop. It can still wait up to
+                    # _KILL_WAIT_SECONDS, so the thread is only given back to
+                    # the ceiling once it is over.
+                    _kill_launch_processes(marker)
+            finally:
+                with _abandoned_fetch_threads_lock:
+                    liveness["finished"] = True
+                    if liveness["counted"]:
+                        _abandoned_fetch_thread_count -= 1
 
         # Gate acquired around the whole launch-to-close cycle (card
         # ca30b736: ADR 0002 Decision 1's single-Chromium OOM-coherence
