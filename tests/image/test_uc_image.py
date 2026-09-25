@@ -1,7 +1,7 @@
 """UcFetcher: real-Chromium acceptance tests, gated on the autonomous image
 (KERDOOS_REQUIRE_IMAGE_TESTS).
 
-These four classes launch a real patchright Chromium via SeleniumBase and
+These classes launch a real patchright Chromium via SeleniumBase and
 must run inside the autonomous Docker image (or hard-fail loudly if that
 image lacks a real Chromium, per KERDOOS_REQUIRE_IMAGE_TESTS=1 -- a silent
 skip must never read as a pass).
