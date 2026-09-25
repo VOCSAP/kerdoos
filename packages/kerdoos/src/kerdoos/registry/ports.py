@@ -45,7 +45,7 @@ class SiteConfig:
     # to import the registry (keeps the core->registry boundary clean).
     tier2_label: str | None = None
     # Render-critical sub-resource CDN hosts allowed by the egress proxy's
-    # CONNECT allowlist, never as navigation targets.
+    # CONNECT allowlist; does not expand the initial target DomainPolicy.
     subresource_domains: tuple[str, ...] = ()
 
 
