@@ -19,4 +19,4 @@ router = APIRouter(dependencies=[Depends(verify_session)])
 
 @router.get("/me")
 def me(principal: Principal = Depends(verify_session)) -> dict[str, str]:
-    return {"owner_id": principal.owner_id, "role": principal.role}
+    return {"role": principal.role}

@@ -342,7 +342,7 @@ class JsonApiUntouchedTest(_WebUITestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"status": "ok"})
         me = self.client.get("/me")
-        self.assertEqual(me.json(), {"owner_id": "o1", "role": "user"})
+        self.assertEqual(me.json(), {"role": "user"})
 
     def test_json_login_failure_is_json_401(self):
         resp = self.client.post(
