@@ -43,6 +43,12 @@ BROWSER_FETCH_TIMEOUT_SECONDS = 90.0
 # tree (browser + its patchright Node driver parent + descendants) instead
 # of a concurrent, unrelated fetch's.
 _LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
+_WEBRTC_IP_HANDLING_POLICY = (
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+_WEBRTC_IP_HANDLING_POLICY_NAMES = (
+    "--webrtc-ip-handling-policy",
+    "--force-webrtc-ip-handling-policy",
+)
 
 _CAPPED_HTML_JS = (
     "cap => { const h = document.documentElement.outerHTML;"
@@ -78,6 +84,21 @@ _abandoned_fetch_thread_count = 0
 
 def _normalize_domains(domains: Iterable[str]) -> frozenset[str]:
     return frozenset(d.lower().rstrip(".") for d in domains if d)
+
+
+def _is_webrtc_ip_handling_policy(arg: str) -> bool:
+    normalized = arg.lower()
+    return any(
+        normalized == name or normalized.startswith(f"{name}=")
+        for name in _WEBRTC_IP_HANDLING_POLICY_NAMES
+    )
+
+
+def _browser_launch_args(args: Iterable[str]) -> list[str]:
+    filtered = strip_dangerous_browser_args(args)
+    return [
+        arg for arg in filtered if not _is_webrtc_ip_handling_policy(arg)
+    ] + [_WEBRTC_IP_HANDLING_POLICY]
 
 
 _HOSTNAME_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
@@ -365,7 +386,7 @@ class BrowserFetcher:
         # Scrubs the WHOLE list handed to launch, not a prefix of it: there is
         # no caller-supplied args channel today, and the guard only keeps its
         # meaning if adding one cannot route flags around it.
-        launch_args = strip_dangerous_browser_args([marker])
+        launch_args = _browser_launch_args([marker])
 
         holder: dict = {}
         renderer_crashed = threading.Event()

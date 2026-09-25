@@ -47,13 +47,16 @@ is computed from the rendered page_source, not from the status).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
+from contextlib import contextmanager
 import re
 import threading
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from urllib.parse import quote
 
 from ..browser_gate import BrowserGate, default_browser_gate
@@ -126,6 +129,43 @@ POST_NAV_KILL_PASSES = 3
 def _normalize_domains(domains: Iterable[str]) -> list[str]:
     # Sorted + de-duplicated for a deterministic rule string (testability).
     return sorted({d.lower().rstrip(".") for d in domains if d})
+
+
+def _is_webrtc_ip_handling_policy(arg: str) -> bool:
+    normalized = arg.lower()
+    return any(
+        normalized == name or normalized.startswith(f"{name}=")
+        for name in _WEBRTC_IP_HANDLING_POLICY_NAMES
+    )
+
+
+def _uc_chromium_args(args: Iterable[str]) -> list[str]:
+    return [
+        arg for arg in args if not _is_webrtc_ip_handling_policy(arg)
+    ] + [_WEBRTC_IP_HANDLING_POLICY]
+
+
+@contextmanager
+def _webrtc_user_data_dir() -> Iterator[str]:
+    """Provide the profile policy Chromium honors in UC headless mode."""
+    with tempfile.TemporaryDirectory(
+        prefix="autolycos-uc-",
+        ignore_cleanup_errors=True,
+    ) as directory:
+        profile = os.path.join(directory, "Default")
+        os.mkdir(profile)
+        with open(os.path.join(profile, "Preferences"), "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "webrtc": {
+                        "ip_handling_policy": "disable_non_proxied_udp",
+                        "multiple_routes_enabled": False,
+                        "nonproxied_udp_enabled": False,
+                    },
+                },
+                file,
+            )
+        yield directory
 
 
 def _host_resolver_rules(
@@ -202,6 +242,12 @@ def _load_seleniumbase():  # type: ignore[no-untyped-def]
 # process-tree novelty, which also matches a concurrent, unrelated
 # browser/uc launch's own Chrome.
 _LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
+_WEBRTC_IP_HANDLING_POLICY = (
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+_WEBRTC_IP_HANDLING_POLICY_NAMES = (
+    "--webrtc-ip-handling-policy",
+    "--force-webrtc-ip-handling-policy",
+)
 # SeleniumBase's own driver process sits between this Python process and the
 # marked Chrome process; the marker itself lives only in Chrome's argv.
 _LAUNCH_PARENT_NAMES = frozenset({"chromedriver", "uc_driver"})
@@ -752,7 +798,8 @@ class UcFetcher:
             # syntax for composing MAP/EXCLUDE sub-rules in one flag value)
             # into bogus standalone switches, silently dropping the
             # deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
-            "chromium_arg": [f"--host-resolver-rules={rule}"],
+            "chromium_arg": _uc_chromium_args(
+                [f"--host-resolver-rules={rule}"]),
         }
         binary_location = _find_patchright_chromium()
         if binary_location is not None:
@@ -760,6 +807,8 @@ class UcFetcher:
         # Gate acquired around the whole launch-to-quit cycle (card ca30b736:
         # ADR 0002 Decision 1's single-Chromium OOM-coherence guarantee --
         # the SAME gate as the browser tier, since uc reuses its Chromium).
-        with self._gate.acquire():
-            driver = self._launch_with_deadline(driver_cls, driver_kwargs)
-            return self._run_after_launch_with_deadline(driver, safe_url)
+        with _webrtc_user_data_dir() as user_data_dir:
+            driver_kwargs["user_data_dir"] = user_data_dir
+            with self._gate.acquire():
+                driver = self._launch_with_deadline(driver_cls, driver_kwargs)
+                return self._run_after_launch_with_deadline(driver, safe_url)

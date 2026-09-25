@@ -1,7 +1,7 @@
 """UcFetcher: real-Chromium acceptance tests, gated on the autonomous image
 (KERDOOS_REQUIRE_IMAGE_TESTS).
 
-These four classes launch a real patchright Chromium via SeleniumBase and
+These classes launch a real patchright Chromium via SeleniumBase and
 must run inside the autonomous Docker image (or hard-fail loudly if that
 image lacks a real Chromium, per KERDOOS_REQUIRE_IMAGE_TESTS=1 -- a silent
 skip must never read as a pass).
@@ -11,19 +11,32 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from autolycos.adapters import uc
 from autolycos.browser_gate import BrowserGate
 from autolycos.errors import FetchError
 from autolycos.safety import DomainPolicy, ValidatedTarget
+from tests.image.webrtc_image_support import (
+    NssTrustedCertificate,
+    UdpCapture,
+    lan_ip,
+    runtime_certificate_tools_available,
+    webrtc_page,
+)
 
 _HAS_SELENIUMBASE = importlib.util.find_spec("seleniumbase") is not None
+_HAS_POSIX_SHELL = os.name == "posix" and Path("/bin/sh").is_file()
 
 
 def _real_chromium_available() -> bool:
@@ -612,6 +625,117 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
                 return True
             time.sleep(interval)
         return predicate()
+
+
+class UcWebRtcEgressImageTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if (
+            _HAS_REAL_CHROMIUM
+            and _HAS_POSIX_SHELL
+            and runtime_certificate_tools_available()
+        ):
+            self._certificate = NssTrustedCertificate()
+            self.addCleanup(self._certificate.cleanup)
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but Chromium, a POSIX shell, "
+                "openssl, or NSS certutil is unavailable"
+            )
+        self.skipTest(
+            "needs real Chromium, a POSIX shell, openssl, and NSS certutil "
+            "(autonomous image)"
+        )
+
+    def test_fetch_blocks_unproxied_webrtc_udp_and_keeps_status(self) -> None:
+        local_ip = lan_ip()
+        page = webrtc_page(local_ip)
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/hold":
+                    time.sleep(2.0)
+                    body = b"ok"
+                else:
+                    body = page
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:  # noqa: ANN002
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 443), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(
+            self._certificate.certificate, self._certificate.private_key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+
+        target = ValidatedTarget(
+            url="https://shop.test/webrtc", scheme="https", host="shop.test",
+            port=443, ip="127.0.0.1")
+        capture = UdpCapture()
+        capture.start()
+        from seleniumbase import Driver
+        with mock.patch.object(uc, "validate_target", return_value=target), \
+             mock.patch.object(uc, "_load_seleniumbase", return_value=Driver), \
+             mock.patch.object(
+                 uc, "_uc_chromium_args", side_effect=lambda args: list(args)), \
+             mock.patch.object(
+                 uc, "_webrtc_user_data_dir", tempfile.TemporaryDirectory):
+            control = uc.UcFetcher(
+                DomainPolicy(frozenset({"shop.test"})),
+                fetch_timeout_seconds=30.0,
+            ).fetch("https://shop.test/webrtc")
+        self.assertEqual(control.status, 200)
+        self.assertIn("webrtc-page-loaded", control.html)
+        time.sleep(0.5)
+        self.assertTrue(
+            capture.events(), "unprotected UC missed the UDP canary")
+        capture.clear()
+
+        observed_args: list[str] = []
+        observing = threading.Event()
+
+        def observe_args() -> None:
+            import psutil
+
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and not observing.is_set():
+                for process in psutil.Process().children(recursive=True):
+                    try:
+                        command = process.cmdline()
+                    except psutil.Error:
+                        continue
+                    if "--autolycos-launch-id=uc-webrtc-proof" in command:
+                        observed_args.extend(command)
+                        return
+                time.sleep(0.05)
+
+        observer = threading.Thread(target=observe_args, daemon=True)
+        observer.start()
+        with mock.patch.object(uc, "validate_target", return_value=target), \
+             mock.patch.object(uc, "_load_seleniumbase", return_value=Driver), \
+             mock.patch.object(uc.uuid, "uuid4", return_value=SimpleNamespace(
+                 hex="uc-webrtc-proof")):
+            result = uc.UcFetcher(
+                DomainPolicy(frozenset({"shop.test"})),
+                fetch_timeout_seconds=30.0,
+            ).fetch("https://shop.test/webrtc")
+        observing.set()
+        observer.join(timeout=1.0)
+
+        time.sleep(0.5)
+        self.assertEqual(result.status, 200)
+        self.assertIn("webrtc-page-loaded", result.html)
+        self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
+        self.assertIn(
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            observed_args)
 
 
 if __name__ == "__main__":

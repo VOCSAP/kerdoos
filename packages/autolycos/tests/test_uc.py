@@ -11,6 +11,7 @@ covered without a real browser. Real UC E2E is a blocking-before-prod fast-follo
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -152,6 +153,71 @@ class FindPatchrightChromiumTest(unittest.TestCase):
         self.assertIn("chromium-999", path)
 
 
+class UcWebRtcPolicyTest(unittest.TestCase):
+    def test_security_policy_replaces_conflicting_site_arguments(self) -> None:
+        args = uc._uc_chromium_args([
+            "--host-resolver-rules=MAP shop.test 104.18.0.1",
+            "--webrtc-ip-handling-policy=default",
+            "--force-webrtc-ip-handling-policy=default",
+            "--webrtc-ip-handling-policy",
+            "--FORCE-WEBRTC-IP-HANDLING-POLICY",
+        ])
+        policy_args = [
+            arg for arg in args
+            if arg.lower().startswith((
+                "--webrtc-ip-handling-policy",
+                "--force-webrtc-ip-handling-policy",
+            ))
+        ]
+        self.assertEqual(policy_args, [uc._WEBRTC_IP_HANDLING_POLICY])
+
+
+class UcWebRtcPreferencesTest(unittest.TestCase):
+    def test_profile_disables_nonproxied_udp(self) -> None:
+        with uc._webrtc_user_data_dir() as directory:
+            preferences = json.loads(
+                (Path(directory) / "Default" / "Preferences").read_text(
+                    encoding="utf-8"))
+        self.assertEqual(
+            preferences["webrtc"],
+            {
+                "ip_handling_policy": "disable_non_proxied_udp",
+                "multiple_routes_enabled": False,
+                "nonproxied_udp_enabled": False,
+            },
+        )
+
+
+class UcProfileCleanupTest(unittest.TestCase):
+    def test_fetch_error_survives_profile_cleanup_failure(self) -> None:
+        real_temporary_directory = tempfile.TemporaryDirectory
+
+        class _BusyProfile:
+            def __init__(self, *, prefix: str, ignore_cleanup_errors: bool = False) -> None:
+                self._directory = real_temporary_directory(prefix=prefix)
+                self._ignore_cleanup_errors = ignore_cleanup_errors
+
+            def __enter__(self) -> str:
+                return self._directory.name
+
+            def __exit__(self, *_args) -> bool:
+                self._directory.cleanup()
+                if not self._ignore_cleanup_errors:
+                    raise OSError("profile is busy")
+                return False
+
+        def _timed_out_driver(**_kwargs) -> None:
+            raise FetchError("initial timeout")
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")), \
+             mock.patch.object(uc, "_load_seleniumbase",
+                               return_value=_timed_out_driver), \
+             mock.patch.object(uc.tempfile, "TemporaryDirectory", _BusyProfile):
+            with self.assertRaisesRegex(FetchError, "initial timeout"):
+                uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
+
+
 class UcFetcherContractTest(unittest.TestCase):
     def test_method_name(self) -> None:
         self.assertEqual(uc.UcFetcher.method_name, "uc")
@@ -279,16 +345,15 @@ class UcFetcherWiringTest(unittest.TestCase):
         # internal commas into bogus standalone switches and silently drop
         # the deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
         self.assertIsInstance(chromium_arg, list)
-        # host-resolver-rules + the per-launch --autolycos-launch-id marker
-        # _launch_with_deadline appends (roadmap 65cef071).
-        self.assertEqual(len(chromium_arg), 2)
+        self.assertEqual(len(chromium_arg), 3)
         arg = chromium_arg[0]
         self.assertIn(
             "--host-resolver-rules=MAP www.magazineluiza.com.br 104.18.0.1", arg)
         self.assertIn("MAP * ~NOTFOUND", arg)
         self.assertIn("EXCLUDE mlcdn.com.br", arg)
         self.assertNotIn("EXCLUDE www.magazineluiza.com.br", arg)
-        self.assertTrue(chromium_arg[1].startswith(uc._LAUNCH_ID_ARG_PREFIX))
+        self.assertEqual(chromium_arg[1], uc._WEBRTC_IP_HANDLING_POLICY)
+        self.assertTrue(chromium_arg[2].startswith(uc._LAUNCH_ID_ARG_PREFIX))
         self.assertTrue(driver.kwargs["uc"])
         self.assertEqual(result.method, "uc")
         self.assertEqual(result.status, 200)      # CDP absent -> 200 fallback
