@@ -352,6 +352,9 @@ class BrowserFetcher:
                 raise FetchError(
                     f"final document is on port {final_port}, not the "
                     f"requested port {requested_port}")
+        if (document_uri is not None
+                and urldefrag(final_url).url != urldefrag(document_uri).url):
+            raise FetchError("final document URI does not match page URL")
 
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using Playwright, so a
