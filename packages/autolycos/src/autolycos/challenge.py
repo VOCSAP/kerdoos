@@ -11,25 +11,7 @@ known challenge/interstitial marker, or is implausibly short for a real page.
 
 from __future__ import annotations
 
-# Substrings (lowercased) specific to an ACTIVE anti-bot interstitial. Each must
-# be absent from healthy pages: bare "captcha" and "challenge-platform" are
-# deliberately NOT here -- they match Google reCAPTCHA v3 (grecaptcha-badge,
-# recaptcha/api.js) and Cloudflare's PASSIVE telemetry script
-# (/cdn-cgi/challenge-platform/.../scripts/) that legitimate pages embed, which
-# would falsely flag them and drive a healthy fetch to INDETERMINATE.
-#   * Cloudflare active challenge : "just a moment" (title), "cf-chl-" (challenge
-#     element class), "_cf_chl_opt" (challenge JS options), "attention required".
-#   * Vendor challenges           : "px-captcha" (PerimeterX), "datadome",
-#     "_incapsula_" (Imperva).
-#   * Akamai Bot Manager          : "scf-akamai" and "sec-if-cpt" are the real
-#     challenge DOM (Magalu: sec-if-cpt-container / scf-akamai-logo /
-#     behavioral-content), served at HTTP 200. "sec-cpt" is kept as a generic
-#     Akamai hint but does NOT match Magalu's DOM (pending security-auditor call).
-#   * Amazon Robot Check          : "validatecaptcha" (the /errors/validateCaptcha
-#     form action of the anti-bot wall Amazon serves at HTTP 200; specific enough
-#     not to hit a healthy /dp page, and restores retry on that soft block).
-#   * MercadoLivre JS gate        : "account-verification" redirect + the
-#     "micro-landing" shell that renders before hydration.
+# Generic captcha markers are excluded because healthy pages load reCAPTCHA and passive Cloudflare scripts.
 CHALLENGE_MARKERS: tuple[str, ...] = (
     "just a moment", "cf-chl-", "_cf_chl_opt", "attention required",
     "px-captcha", "datadome", "_incapsula_", "sec-cpt", "scf-akamai",

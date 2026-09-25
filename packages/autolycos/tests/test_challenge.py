@@ -3,14 +3,17 @@
 The shared heuristic drives the core retry loop for every tier, so it must NOT
 false-positive on healthy pages that legitimately embed Google reCAPTCHA v3 or
 Cloudflare's passive telemetry script, yet MUST still catch a real interstitial.
-Every committed HTML fixture (a real, healthy 200 page) is asserted non-challenged
-as a regression lock.
+Known challenge walls are excluded by name; every other committed HTML fixture
+is asserted non-challenged as a regression lock.
 """
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from autolycos.challenge import (
     CHALLENGE_MARKERS,
@@ -19,27 +22,28 @@ from autolycos.challenge import (
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-_ROOT_FIXTURES = Path(__file__).parents[3] / "tests" / "fixtures"
-_HEALTHY_FIXTURE_NAMES = (
-    "kabum_aw3225qf.html",
-    "amazon_b0cvqgsrz9.html",
-    "mercadolivre_mlb35045987.html",
-    "terabyte_40561.html",
-    "pichau_cv700b.html",
-    "magalu_uc.html",
-    "magalu_bab5438g3h_camoufox.html",
-    "magalu_238968700_camoufox.html",
+_FIXTURE_ROOTS = (
+    _FIXTURES,
+    Path(__file__).parents[3] / "tests" / "fixtures",
 )
-_HEALTHY_FIXTURES = (
-    *((_FIXTURES / name) for name in _HEALTHY_FIXTURE_NAMES),
-    *((_ROOT_FIXTURES / name) for name in _HEALTHY_FIXTURE_NAMES),
-    _ROOT_FIXTURES / "mercadolivre_mlb35045987_camoufox.html",
-)
+_CHALLENGE_FIXTURES = {
+    "magalu_cffi.html": "Akamai Bot Manager wall",
+    "mercadolivre_captcha_wall_camoufox.html": "MercadoLivre captcha wall",
+}
+
+
+def _healthy_fixtures() -> tuple[Path, ...]:
+    return tuple(
+        fixture
+        for directory in _FIXTURE_ROOTS
+        for fixture in sorted(directory.glob("*.html"))
+        if fixture.name not in _CHALLENGE_FIXTURES
+    )
 
 
 class HealthyFixturesNotChallengedTest(unittest.TestCase):
     def test_every_real_page_is_not_challenged(self) -> None:
-        for fixture in _HEALTHY_FIXTURES:
+        for fixture in _healthy_fixtures():
             html = fixture.read_text(encoding="utf-8", errors="replace")
             with self.subTest(fixture=fixture):
                 self.assertFalse(
@@ -56,6 +60,28 @@ class MercadoLivreCaptchaWallTest(unittest.TestCase):
     def test_account_verification_wall_remains_challenged(self) -> None:
         self.assertTrue(looks_challenged(
             200, "account-verification" + "x" * 5000))
+
+
+class HealthyFixtureDiscoveryTest(unittest.TestCase):
+    def test_fixture_added_to_a_directory_is_collected(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            fixture = Path(temporary_directory) / "unknown_healthy.html"
+            fixture.write_text(
+                "<html>" + "healthy content " * 200 + "</html>",
+                encoding="utf-8")
+            self.assertFalse(looks_challenged(
+                200, fixture.read_text(encoding="utf-8")))
+            with patch.object(sys.modules[__name__], "_FIXTURE_ROOTS",
+                              (fixture.parent,)):
+                self.assertIn(fixture, _healthy_fixtures())
+
+    def test_every_challenge_exclusion_exists_in_every_directory(self) -> None:
+        self.assertTrue(_CHALLENGE_FIXTURES,
+                        "Challenge exclusions must not be empty")
+        for directory in _FIXTURE_ROOTS:
+            for name in _CHALLENGE_FIXTURES:
+                with self.subTest(directory=directory, fixture=name):
+                    self.assertTrue((directory / name).is_file())
 
 
 class BroadMarkersRemovedTest(unittest.TestCase):
