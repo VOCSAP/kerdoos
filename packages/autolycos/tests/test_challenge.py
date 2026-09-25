@@ -22,20 +22,26 @@ from autolycos.challenge import (
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-_FIXTURE_ROOTS = (
-    _FIXTURES,
-    Path(__file__).parents[3] / "tests" / "fixtures",
-)
+_ROOT_FIXTURES = Path(__file__).parents[3] / "tests" / "fixtures"
 _CHALLENGE_FIXTURES = {
     "magalu_cffi.html": "Akamai Bot Manager wall",
     "mercadolivre_captcha_wall_camoufox.html": "MercadoLivre captcha wall",
 }
 
 
+def _fixture_roots() -> tuple[Path, ...]:
+    assert _FIXTURES.is_dir(), "Package fixtures directory must exist"
+    assert any(_FIXTURES.glob("*.html")), (
+        "Package fixtures directory must contain HTML")
+    return tuple(
+        directory for directory in (_FIXTURES, _ROOT_FIXTURES)
+        if directory.is_dir())
+
+
 def _healthy_fixtures() -> tuple[Path, ...]:
     return tuple(
         fixture
-        for directory in _FIXTURE_ROOTS
+        for directory in _fixture_roots()
         for fixture in sorted(directory.glob("*.html"))
         if fixture.name not in _CHALLENGE_FIXTURES
     )
@@ -63,6 +69,29 @@ class MercadoLivreCaptchaWallTest(unittest.TestCase):
 
 
 class HealthyFixtureDiscoveryTest(unittest.TestCase):
+    def test_missing_root_fixture_directory_is_optional(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            module = sys.modules[__name__]
+            missing_root = Path(temporary_directory) / "missing"
+            with patch.object(module, "_ROOT_FIXTURES", missing_root,
+                              create=True):
+                self.assertEqual(_fixture_roots(), (_FIXTURES,))
+
+    def test_missing_package_fixture_directory_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            module = sys.modules[__name__]
+            missing_fixtures = Path(temporary_directory) / "missing"
+            with patch.object(module, "_FIXTURES", missing_fixtures):
+                with self.assertRaises(AssertionError):
+                    _fixture_roots()
+
+    def test_empty_package_fixture_directory_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            module = sys.modules[__name__]
+            with patch.object(module, "_FIXTURES", Path(temporary_directory)):
+                with self.assertRaises(AssertionError):
+                    _fixture_roots()
+
     def test_fixture_added_to_a_directory_is_collected(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             fixture = Path(temporary_directory) / "unknown_healthy.html"
@@ -71,14 +100,14 @@ class HealthyFixtureDiscoveryTest(unittest.TestCase):
                 encoding="utf-8")
             self.assertFalse(looks_challenged(
                 200, fixture.read_text(encoding="utf-8")))
-            with patch.object(sys.modules[__name__], "_FIXTURE_ROOTS",
-                              (fixture.parent,)):
+            with patch.object(sys.modules[__name__], "_ROOT_FIXTURES",
+                              fixture.parent):
                 self.assertIn(fixture, _healthy_fixtures())
 
     def test_every_challenge_exclusion_exists_in_every_directory(self) -> None:
         self.assertTrue(_CHALLENGE_FIXTURES,
                         "Challenge exclusions must not be empty")
-        for directory in _FIXTURE_ROOTS:
+        for directory in _fixture_roots():
             for name in _CHALLENGE_FIXTURES:
                 with self.subTest(directory=directory, fixture=name):
                     self.assertTrue((directory / name).is_file())
