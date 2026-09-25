@@ -44,10 +44,8 @@ class SiteConfig:
     # source_id -> label map and passes it to the digest, so digest/ never has
     # to import the registry (keeps the core->registry boundary clean).
     tier2_label: str | None = None
-    # Render-critical sub-resource CDN hosts allowed by the browser tier's
-    # page.route guard (e.g. http2.mlstatic.com for MercadoLivre). SEPARATE from
-    # the navigation allowlist: these are never navigated to, only loaded as
-    # sub-resources so a full client-side render can hydrate.
+    # Render-critical sub-resource CDN hosts allowed by the egress proxy's
+    # CONNECT allowlist; does not expand the initial target DomainPolicy.
     subresource_domains: tuple[str, ...] = ()
 
 
