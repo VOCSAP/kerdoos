@@ -19,6 +19,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -26,8 +27,16 @@ from autolycos.adapters import uc
 from autolycos.browser_gate import BrowserGate
 from autolycos.errors import FetchError
 from autolycos.safety import DomainPolicy, ValidatedTarget
+from tests.image.webrtc_image_support import (
+    NssTrustedCertificate,
+    UdpCapture,
+    lan_ip,
+    runtime_certificate_tools_available,
+    webrtc_page,
+)
 
 _HAS_SELENIUMBASE = importlib.util.find_spec("seleniumbase") is not None
+_HAS_POSIX_SHELL = os.name == "posix" and Path("/bin/sh").is_file()
 
 
 def _real_chromium_available() -> bool:
@@ -620,26 +629,27 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
 
 class UcWebRtcEgressImageTest(unittest.TestCase):
     def setUp(self) -> None:
-        from test_browser_webrtc_image import (
-            _NssTrustedCertificate,
-            _runtime_certificate_tools_available,
-        )
-
-        if _HAS_REAL_CHROMIUM and _runtime_certificate_tools_available():
-            self._certificate = _NssTrustedCertificate()
+        if (
+            _HAS_REAL_CHROMIUM
+            and _HAS_POSIX_SHELL
+            and runtime_certificate_tools_available()
+        ):
+            self._certificate = NssTrustedCertificate()
             self.addCleanup(self._certificate.cleanup)
             return
         if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
             self.fail(
-                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but Chromium, openssl, or "
-                "certutil is unavailable")
-        self.skipTest("needs real Chromium, openssl, and certutil")
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but Chromium, a POSIX shell, "
+                "openssl, or NSS certutil is unavailable"
+            )
+        self.skipTest(
+            "needs real Chromium, a POSIX shell, openssl, and NSS certutil "
+            "(autonomous image)"
+        )
 
     def test_fetch_blocks_unproxied_webrtc_udp_and_keeps_status(self) -> None:
-        from test_browser_webrtc_image import _UdpCapture, _lan_ip, _webrtc_page
-
-        lan_ip = _lan_ip()
-        page = _webrtc_page(lan_ip)
+        local_ip = lan_ip()
+        page = webrtc_page(local_ip)
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
@@ -668,7 +678,7 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
         target = ValidatedTarget(
             url="https://shop.test/webrtc", scheme="https", host="shop.test",
             port=443, ip="127.0.0.1")
-        capture = _UdpCapture()
+        capture = UdpCapture()
         capture.start()
         from seleniumbase import Driver
         with mock.patch.object(uc, "validate_target", return_value=target), \
