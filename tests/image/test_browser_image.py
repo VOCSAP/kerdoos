@@ -167,5 +167,163 @@ class RealBrowserFreezeTest(unittest.TestCase):
         self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
 
 
+class _NoopStealth:
+    def apply_stealth_sync(self, page) -> None:  # noqa: ANN001
+        pass
+
+
+class _InterceptingContext:
+    def __init__(self, context, handler, page_wrapper=None) -> None:  # noqa: ANN001
+        self._context = context
+        self._handler = handler
+        self._page_wrapper = page_wrapper or (lambda page: page)
+
+    def route(self, pattern, handler) -> None:  # noqa: ANN001
+        self._context.route(pattern, handler)
+        self._context.route(pattern, self._handler)
+
+    def route_web_socket(self, pattern, handler) -> None:  # noqa: ANN001
+        self._context.route_web_socket(pattern, handler)
+
+    def new_page(self):  # noqa: ANN201
+        return self._page_wrapper(self._context.new_page())
+
+    def close(self) -> None:
+        self._context.close()
+
+
+class _InterceptingBrowser:
+    def __init__(self, browser_obj, handler, page_wrapper=None) -> None:  # noqa: ANN001
+        self._browser_obj = browser_obj
+        self._handler = handler
+        self._page_wrapper = page_wrapper
+
+    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
+        return _InterceptingContext(
+            self._browser_obj.new_context(**kwargs), self._handler,
+            self._page_wrapper)
+
+    def close(self) -> None:
+        self._browser_obj.close()
+
+
+class _BusyAfterNavigationPage:
+    def __init__(self, page, duration_ms: int) -> None:  # noqa: ANN001
+        self._page = page
+        self._duration_ms = duration_ms
+
+    def __getattr__(self, name):  # noqa: ANN204
+        return getattr(self._page, name)
+
+    def goto(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        response = self._page.goto(*args, **kwargs)
+        self._page.evaluate(
+            "duration => { setTimeout(() => { const end = Date.now() + duration; "
+            "while (Date.now() < end) {} }, 0); }",
+            self._duration_ms)
+        return response
+
+
+class BrowserFinalDocumentImageTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if _HAS_PATCHRIGHT and _HAS_POSIX_SHELL:
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but patchright or a POSIX "
+                "shell is unavailable -- run inside the autonomous image")
+        self.skipTest(
+            "needs patchright and a POSIX shell (autonomous image), not "
+            "just patchright")
+
+    def _fetch(self, path: str, handler, *, page_wrapper=None,
+               fetch_timeout_seconds: float = 10.0):
+        from patchright.sync_api import BrowserType
+
+        original_launch = BrowserType.launch
+
+        def _patched_launch(browser_type, **kwargs):  # noqa: ANN001, ANN003
+            return _InterceptingBrowser(
+                original_launch(browser_type, **kwargs), handler, page_wrapper)
+
+        with mock.patch.object(BrowserType, "launch", _patched_launch), \
+             mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")), \
+             mock.patch.object(browser, "_load_stealth", return_value=_NoopStealth):
+            return browser.BrowserFetcher(
+                _NEUTRAL_POLICY, fetch_timeout_seconds=fetch_timeout_seconds
+            ).fetch(f"https://example.com/{path}")
+
+    def test_script_navigation_to_chromium_error_document_is_refused(self) -> None:
+        def _route(route) -> None:
+            if route.request.url == "https://example.com/start":
+                route.fulfill(
+                    status=200, content_type="text/html",
+                    body=("<html><body>start<script>"
+                          "setTimeout(() => { location.href = "
+                          "'https://example.com:9/gone'; }, 0);"
+                          "</script></body></html>"))
+            else:
+                route.abort("connectionrefused")
+
+        with self.assertRaisesRegex(
+                FetchError, r"chrome-error://chromewebdata"):
+            self._fetch("start", _route)
+
+    def test_busy_main_thread_fails_before_outer_fetch_timeout(self) -> None:
+        def _route(route) -> None:
+            route.fulfill(
+                status=200, content_type="text/html",
+                body="<html><body>ready</body></html>")
+
+        t0 = time.monotonic()
+        with mock.patch.object(browser, "NAV_TIMEOUT_MS", 1_000):
+            with self.assertRaisesRegex(
+                    FetchError, r"rendered document read exceeded"):
+                self._fetch(
+                    "busy", _route,
+                    page_wrapper=lambda page: _BusyAfterNavigationPage(
+                        page, 6_000),
+                    fetch_timeout_seconds=5.0)
+        elapsed = time.monotonic() - t0
+        self.assertLess(
+            elapsed, 3.0,
+            f"bounded document read took {elapsed:.1f}s instead of its 1s budget")
+
+    def test_https_to_http_script_navigation_is_refused(self) -> None:
+        def _route(route) -> None:
+            if route.request.url == "https://example.com/downgrade":
+                route.fulfill(
+                    status=200, content_type="text/html",
+                    body=("<html><body>start<script>"
+                          "setTimeout(() => { location.href = "
+                          "'http://example.com/final'; }, 0);"
+                          "</script></body></html>"))
+            else:
+                route.fulfill(
+                    status=200, content_type="text/html",
+                    body="<html><body>plain text</body></html>")
+
+        with self.assertRaisesRegex(FetchError, r"fell back to http"):
+            self._fetch("downgrade", _route)
+
+    def test_script_navigated_main_document_status_is_reported(self) -> None:
+        def _route(route) -> None:
+            if route.request.url == "https://example.com/status":
+                route.fulfill(
+                    status=200, content_type="text/html",
+                    body=("<html><body>start<script>"
+                          "setTimeout(() => { location.href = '/missing'; }, 0);"
+                          "</script></body></html>"))
+            else:
+                route.fulfill(
+                    status=404, content_type="text/html",
+                    body="<html><body>gone</body></html>")
+
+        result = self._fetch("status", _route)
+        self.assertEqual(result.status, 404)
+        self.assertIn("gone", result.html)
+
+
 if __name__ == "__main__":
     unittest.main()
