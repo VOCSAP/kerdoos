@@ -197,6 +197,19 @@ class FinalDocumentContractTest(unittest.TestCase):
                 "https://mercadolivre.com.br/p/MLB1",
                 "chrome-error://chromewebdata/")
 
+    def test_rejects_document_uri_with_a_different_page_url(self) -> None:
+        with self.assertRaisesRegex(FetchError, "does not match page URL"):
+            browser.BrowserFetcher._check_final_document(
+                "https://mercadolivre.com.br/p/MLB1#page",
+                "https://mercadolivre.com.br/p/MLB1",
+                "https://mercadolivre.com.br/p/MLB2#document")
+
+    def test_allows_fragment_only_document_uri_difference(self) -> None:
+        browser.BrowserFetcher._check_final_document(
+            "https://mercadolivre.com.br/p/MLB1#page",
+            "https://mercadolivre.com.br/p/MLB1",
+            "https://mercadolivre.com.br/p/MLB1#document")
+
 
 # ----- navigation wiring, driven with a FAKE Playwright (no real browser) -----
 
