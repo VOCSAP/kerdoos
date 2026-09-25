@@ -17,6 +17,7 @@ from __future__ import annotations
 import ipaddress
 import pathlib
 import re
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -202,6 +203,15 @@ class FixturePrivacyTest(unittest.TestCase):
             len(files), 0,
             f"no .html fixture found under {FIXTURES_DIR} -- a scan over an "
             "empty directory must not read as a passing scan")
+
+    def test_an_empty_fixtures_directory_fails_the_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as empty_dir:
+            files = sorted(pathlib.Path(empty_dir).glob("*.html"))
+            with self.assertRaises(
+                    AssertionError,
+                    msg="a directory with 0 .html files must not read as a "
+                    "passing scan"):
+                self.assertGreater(len(files), 0)
 
     def test_positive_control_each_pattern_is_detected(self) -> None:
         # built from parts so no contiguous JWT-shaped literal sits in the
