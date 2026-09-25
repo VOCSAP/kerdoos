@@ -14,8 +14,8 @@ import os
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
-from pathlib import Path
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -620,21 +620,23 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
 
 class UcWebRtcEgressImageTest(unittest.TestCase):
     def setUp(self) -> None:
-        if _HAS_REAL_CHROMIUM and Path("/certs/leaf.crt").is_file():
+        from test_browser_webrtc_image import (
+            _NssTrustedCertificate,
+            _runtime_certificate_tools_available,
+        )
+
+        if _HAS_REAL_CHROMIUM and _runtime_certificate_tools_available():
+            self._certificate = _NssTrustedCertificate()
+            self.addCleanup(self._certificate.cleanup)
             return
         if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
             self.fail(
-                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but Chromium or probe "
-                "certificate is unavailable")
-        self.skipTest("needs real Chromium and the autonomous probe certificate")
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but Chromium, openssl, or "
+                "certutil is unavailable")
+        self.skipTest("needs real Chromium, openssl, and certutil")
 
     def test_fetch_blocks_unproxied_webrtc_udp_and_keeps_status(self) -> None:
-        from test_browser_webrtc_image import (
-            BrowserWebRtcEgressImageTest,
-            _UdpCapture,
-            _lan_ip,
-            _webrtc_page,
-        )
+        from test_browser_webrtc_image import _UdpCapture, _lan_ip, _webrtc_page
 
         lan_ip = _lan_ip()
         page = _webrtc_page(lan_ip)
@@ -655,19 +657,37 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
             def log_message(self, *args) -> None:  # noqa: ANN002
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        certificate = Path("/certs/leaf.crt")
+        server = ThreadingHTTPServer(("127.0.0.1", 443), Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certificate, certificate.with_name("leaf.key"))
+        context.load_cert_chain(
+            self._certificate.certificate, self._certificate.private_key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
 
+        target = ValidatedTarget(
+            url="https://shop.test/webrtc", scheme="https", host="shop.test",
+            port=443, ip="127.0.0.1")
         capture = _UdpCapture()
         capture.start()
-        BrowserWebRtcEgressImageTest()._assert_unprotected_chromium_hits_canary(
-            capture, server.server_port)
+        from seleniumbase import Driver
+        with mock.patch.object(uc, "validate_target", return_value=target), \
+             mock.patch.object(uc, "_load_seleniumbase", return_value=Driver), \
+             mock.patch.object(
+                 uc, "_uc_chromium_args", side_effect=lambda args: list(args)), \
+             mock.patch.object(
+                 uc, "_webrtc_user_data_dir", tempfile.TemporaryDirectory):
+            control = uc.UcFetcher(
+                DomainPolicy(frozenset({"shop.test"})),
+                fetch_timeout_seconds=30.0,
+            ).fetch("https://shop.test/webrtc")
+        self.assertEqual(control.status, 200)
+        self.assertIn("webrtc-page-loaded", control.html)
+        time.sleep(0.5)
+        self.assertTrue(
+            capture.events(), "unprotected UC missed the UDP canary")
         capture.clear()
+
         observed_args: list[str] = []
         observing = threading.Event()
 
@@ -686,12 +706,8 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
                         return
                 time.sleep(0.05)
 
-        target = ValidatedTarget(
-            url="https://shop.test/webrtc", scheme="https", host="shop.test",
-            port=443, ip="127.0.0.1")
         observer = threading.Thread(target=observe_args, daemon=True)
         observer.start()
-        from seleniumbase import Driver
         with mock.patch.object(uc, "validate_target", return_value=target), \
              mock.patch.object(uc, "_load_seleniumbase", return_value=Driver), \
              mock.patch.object(uc.uuid, "uuid4", return_value=SimpleNamespace(
@@ -705,6 +721,7 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
 
         time.sleep(0.5)
         self.assertEqual(result.status, 200)
+        self.assertIn("webrtc-page-loaded", result.html)
         self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
         self.assertIn(
             "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",

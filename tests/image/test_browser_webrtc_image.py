@@ -1,16 +1,24 @@
-"""Real BrowserFetcher WebRTC egress proof for the autonomous probe image."""
+"""Real BrowserFetcher WebRTC egress proof.
+
+Build the required image from the repository root:
+    docker build --target autonomous-test -t kerdoos-t4-test:local .
+"""
 
 from __future__ import annotations
 
 import functools
 import importlib.util
 import os
+import shutil
 import socket
 import ssl
+import subprocess
 import struct
+import tempfile
 import threading
 import time
 import unittest
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +30,6 @@ from autolycos.egress_proxy import PinningProxy
 from autolycos.safety import DomainPolicy
 
 _HAS_PATCHRIGHT = importlib.util.find_spec("patchright") is not None
-_CERTIFICATE = Path("/certs/leaf.crt")
 _PRIVATE_PORTS = frozenset({3478, 3479, 3480, 3481, 3482, 3483})
 _WEBRTC_POLICY = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
 
@@ -30,6 +37,72 @@ _WEBRTC_POLICY = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
 class _NoopStealth:
     def apply_stealth_sync(self, page) -> None:  # noqa: ANN001
         pass
+
+
+def _runtime_certificate_tools_available() -> bool:
+    return all(shutil.which(tool) for tool in ("openssl", "certutil"))
+
+
+class _NssTrustedCertificate:
+    def __init__(self) -> None:
+        self._directory = tempfile.TemporaryDirectory(prefix="kerdoos-webrtc-")
+        directory = Path(self._directory.name)
+        ca_certificate = directory / "ca.crt"
+        ca_key = directory / "ca.key"
+        leaf_request = directory / "leaf.csr"
+        self.certificate = directory / "leaf.crt"
+        self.private_key = directory / "leaf.key"
+        extensions = directory / "leaf.ext"
+        extensions.write_text(
+            "subjectAltName=DNS:shop.test\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature,keyEncipherment\n",
+            encoding="ascii",
+        )
+        self._run(
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-days", "1", "-subj", "/CN=Kerdoos Test CA",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-keyout", str(ca_key), "-out", str(ca_certificate),
+        )
+        self._run(
+            "openssl", "req", "-newkey", "rsa:2048", "-nodes",
+            "-subj", "/CN=shop.test", "-keyout", str(self.private_key),
+            "-out", str(leaf_request),
+        )
+        self._run(
+            "openssl", "x509", "-req", "-in", str(leaf_request),
+            "-CA", str(ca_certificate), "-CAkey", str(ca_key), "-CAcreateserial",
+            "-days", "1", "-out", str(self.certificate), "-extfile",
+            str(extensions),
+        )
+        nss_database = Path.home() / ".pki" / "nssdb"
+        nss_database.mkdir(parents=True, exist_ok=True)
+        if not (nss_database / "cert9.db").is_file():
+            self._run(
+                "certutil", "-N", "-d", f"sql:{nss_database}",
+                "--empty-password",
+            )
+        self._nickname = f"kerdoos-webrtc-{uuid.uuid4().hex}"
+        self._run(
+            "certutil", "-A", "-d", f"sql:{nss_database}", "-n",
+            self._nickname, "-t", "C,,", "-i", str(ca_certificate),
+        )
+        self._nss_database = nss_database
+
+    def cleanup(self) -> None:
+        subprocess.run(
+            [
+                "certutil", "-D", "-d", f"sql:{self._nss_database}", "-n",
+                self._nickname,
+            ],
+            check=False,
+        )
+        self._directory.cleanup()
+
+    @staticmethod
+    def _run(*command: str) -> None:
+        subprocess.run(command, check=True)
 
 
 class _UdpCapture:
@@ -92,7 +165,7 @@ def _lan_ip() -> str:
 
 
 def _webrtc_page(lan_ip: str) -> bytes:
-    return f"""<!doctype html><html><body><p>price 123</p>
+    return f"""<!doctype html><html><body><p id="webrtc-page-loaded">price 123</p>
 <img src="/hold">
 <script>
 (async () => {{
@@ -122,13 +195,15 @@ def _webrtc_page(lan_ip: str) -> bytes:
 
 class BrowserWebRtcEgressImageTest(unittest.TestCase):
     def setUp(self) -> None:
-        if _HAS_PATCHRIGHT and _CERTIFICATE.is_file():
+        if _HAS_PATCHRIGHT and _runtime_certificate_tools_available():
+            self._certificate = _NssTrustedCertificate()
+            self.addCleanup(self._certificate.cleanup)
             return
         if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
             self.fail(
-                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but patchright or probe "
-                "certificate is unavailable")
-        self.skipTest("needs patchright and the autonomous probe image certificate")
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but patchright, openssl, or "
+                "certutil is unavailable")
+        self.skipTest("needs patchright, openssl, and certutil")
 
     def test_fetch_blocks_unproxied_webrtc_udp_and_keeps_status(self) -> None:
         lan_ip = _lan_ip()
@@ -152,7 +227,8 @@ class BrowserWebRtcEgressImageTest(unittest.TestCase):
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(_CERTIFICATE, _CERTIFICATE.with_name("leaf.key"))
+        context.load_cert_chain(
+            self._certificate.certificate, self._certificate.private_key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
@@ -205,6 +281,7 @@ class BrowserWebRtcEgressImageTest(unittest.TestCase):
 
         time.sleep(0.5)
         self.assertEqual(result.status, 200)
+        self.assertIn("webrtc-page-loaded", result.html)
         self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
         self.assertIn(_WEBRTC_POLICY, observed_args)
 

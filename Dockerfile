@@ -41,6 +41,7 @@ WORKDIR /app
 # each child stage builds below stays cached across source-code edits.
 COPY pyproject.toml uv.lock ./
 COPY packages/autolycos/pyproject.toml packages/autolycos/pyproject.toml
+COPY packages/autolycos/LICENSE packages/autolycos/README.md packages/autolycos/
 COPY packages/kerdoos/pyproject.toml packages/kerdoos/pyproject.toml
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
@@ -307,7 +308,7 @@ RUN set -eu; \
 FROM autonomous AS autonomous-test
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends strace \
+    && apt-get install -y --no-install-recommends libnss3-tools strace \
     && rm -rf /var/lib/apt/lists/*
 
 # --- release: identical to `autonomous`, kept LAST so a flagless

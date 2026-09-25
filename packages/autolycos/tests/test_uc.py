@@ -11,6 +11,7 @@ covered without a real browser. Real UC E2E is a blocking-before-prod fast-follo
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -158,10 +159,33 @@ class UcWebRtcPolicyTest(unittest.TestCase):
             "--host-resolver-rules=MAP shop.test 104.18.0.1",
             "--webrtc-ip-handling-policy=default",
             "--force-webrtc-ip-handling-policy=default",
+            "--webrtc-ip-handling-policy",
+            "--FORCE-WEBRTC-IP-HANDLING-POLICY",
         ])
-        self.assertEqual(args.count(uc._WEBRTC_IP_HANDLING_POLICY), 1)
-        self.assertNotIn("--webrtc-ip-handling-policy=default", args)
-        self.assertNotIn("--force-webrtc-ip-handling-policy=default", args)
+        policy_args = [
+            arg for arg in args
+            if arg.lower().startswith((
+                "--webrtc-ip-handling-policy",
+                "--force-webrtc-ip-handling-policy",
+            ))
+        ]
+        self.assertEqual(policy_args, [uc._WEBRTC_IP_HANDLING_POLICY])
+
+
+class UcWebRtcPreferencesTest(unittest.TestCase):
+    def test_profile_disables_nonproxied_udp(self) -> None:
+        with uc._webrtc_user_data_dir() as directory:
+            preferences = json.loads(
+                (Path(directory) / "Default" / "Preferences").read_text(
+                    encoding="utf-8"))
+        self.assertEqual(
+            preferences["webrtc"],
+            {
+                "ip_handling_policy": "disable_non_proxied_udp",
+                "multiple_routes_enabled": False,
+                "nonproxied_udp_enabled": False,
+            },
+        )
 
 
 class UcFetcherContractTest(unittest.TestCase):

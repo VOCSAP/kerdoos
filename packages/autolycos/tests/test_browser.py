@@ -138,11 +138,17 @@ class BrowserWebRtcPolicyTest(unittest.TestCase):
             "--autolycos-launch-id=test",
             "--webrtc-ip-handling-policy=default",
             "--force-webrtc-ip-handling-policy=default",
+            "--webrtc-ip-handling-policy",
+            "--FORCE-WEBRTC-IP-HANDLING-POLICY",
         ])
-        self.assertEqual(
-            args.count(browser._WEBRTC_IP_HANDLING_POLICY), 1)
-        self.assertNotIn("--webrtc-ip-handling-policy=default", args)
-        self.assertNotIn("--force-webrtc-ip-handling-policy=default", args)
+        policy_args = [
+            arg for arg in args
+            if arg.lower().startswith((
+                "--webrtc-ip-handling-policy",
+                "--force-webrtc-ip-handling-policy",
+            ))
+        ]
+        self.assertEqual(policy_args, [browser._WEBRTC_IP_HANDLING_POLICY])
 
 
 class FinalDocumentContractTest(unittest.TestCase):

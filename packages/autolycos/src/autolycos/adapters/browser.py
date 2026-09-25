@@ -45,9 +45,9 @@ BROWSER_FETCH_TIMEOUT_SECONDS = 90.0
 _LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
 _WEBRTC_IP_HANDLING_POLICY = (
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
-_WEBRTC_IP_HANDLING_POLICY_PREFIXES = (
-    "--webrtc-ip-handling-policy=",
-    "--force-webrtc-ip-handling-policy=",
+_WEBRTC_IP_HANDLING_POLICY_NAMES = (
+    "--webrtc-ip-handling-policy",
+    "--force-webrtc-ip-handling-policy",
 )
 
 _CAPPED_HTML_JS = (
@@ -86,11 +86,18 @@ def _normalize_domains(domains: Iterable[str]) -> frozenset[str]:
     return frozenset(d.lower().rstrip(".") for d in domains if d)
 
 
+def _is_webrtc_ip_handling_policy(arg: str) -> bool:
+    normalized = arg.lower()
+    return any(
+        normalized == name or normalized.startswith(f"{name}=")
+        for name in _WEBRTC_IP_HANDLING_POLICY_NAMES
+    )
+
+
 def _browser_launch_args(args: Iterable[str]) -> list[str]:
     filtered = strip_dangerous_browser_args(args)
     return [
-        arg for arg in filtered
-        if not arg.startswith(_WEBRTC_IP_HANDLING_POLICY_PREFIXES)
+        arg for arg in filtered if not _is_webrtc_ip_handling_policy(arg)
     ] + [_WEBRTC_IP_HANDLING_POLICY]
 
 
