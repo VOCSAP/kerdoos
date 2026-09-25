@@ -56,16 +56,17 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from collections.abc import Iterable
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urldefrag, urlsplit
 
 from ..browser_gate import BrowserGate, default_browser_gate
 from ..challenge import looks_challenged
 from ..egress_proxy import PinningProxy, strip_dangerous_browser_args
 from ..errors import FetchError
 from ..ports import FetchResult
-from ..safety import DomainPolicy, validate_target
+from ..safety import _DEFAULT_PORT, DomainPolicy, validate_target
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,14 @@ BROWSER_FETCH_TIMEOUT_SECONDS = 90.0
 # tree (browser + its patchright Node driver parent + descendants) instead
 # of a concurrent, unrelated fetch's.
 _LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
+
+_CAPPED_HTML_JS = (
+    "cap => { const h = document.documentElement.outerHTML;"
+    " return h.length > cap ? null : h; }")
+_BOUNDED_READ_JS = (
+    "cap => { const h = (" + _CAPPED_HTML_JS + ")(cap);"
+    " return h === null ? -1"
+    " : document.documentURI + String.fromCharCode(10) + h; }")
 
 # Subtracts Chromium's implicit bypass rules so loopback and link-local
 # targets go through the egress-proxy like everything else. Travels in the
@@ -275,6 +284,14 @@ def _kill_launch_processes(marker: str) -> bool:
     return not alive
 
 
+def _effective_port(parts: SplitResult) -> int | None:
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    return port if port is not None else _DEFAULT_PORT.get(parts.scheme)
+
+
 class BrowserFetcher:
     """Fetcher port implementation backed by Playwright (headless Chromium).
 
@@ -321,6 +338,46 @@ class BrowserFetcher:
             self._domain_policy.domain_allowed(host)
             or self._subresource_allowed(host))
 
+    @classmethod
+    def _read_document(cls, page, deadline: float) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+        timeout_ms = max((deadline - time.monotonic()) * 1000, 1.0)
+        try:
+            value = page.wait_for_function(
+                _BOUNDED_READ_JS, arg=MAX_HTML_BYTES,
+                timeout=timeout_ms).json_value()
+        except Exception as exc:  # noqa: BLE001 -- Patchright errors are adapter failures
+            raise FetchError("rendered document read exceeded its budget") from exc
+        if not isinstance(value, str):
+            raise FetchError(
+                f"rendered page exceeds {MAX_HTML_BYTES} characters cap")
+        document_uri, _, html = value.partition("\n")
+        return document_uri, html
+
+    @staticmethod
+    def _check_final_document(final_url: str, requested_url: str,
+                              document_uri: str | None = None) -> None:
+        requested = urlsplit(requested_url)
+        requested_host = (requested.hostname or "").rstrip(".")
+        requested_port = _effective_port(requested)
+        for url in (final_url or "", document_uri):
+            if url is None:
+                continue
+            final = urlsplit(url)
+            final_host = (final.hostname or "").rstrip(".")
+            if final.scheme not in _DEFAULT_PORT or final_host != requested_host:
+                raise FetchError(
+                    f"final document is {final.scheme}://{final_host}, not "
+                    f"the requested host {requested_host}")
+            if requested.scheme == "https" and final.scheme != "https":
+                raise FetchError(
+                    f"final document fell back to {final.scheme} from a "
+                    "requested https URL")
+            final_port = _effective_port(final)
+            if final_port not in (requested_port, _DEFAULT_PORT[final.scheme]):
+                raise FetchError(
+                    f"final document is on port {final_port}, not the "
+                    f"requested port {requested_port}")
+
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using Playwright, so a
         # non-allowlisted or rebinding target is refused even if the optional
@@ -357,6 +414,9 @@ class BrowserFetcher:
         launch_args = strip_dangerous_browser_args([marker])
 
         holder: dict = {}
+        renderer_crashed = threading.Event()
+        reading_document = threading.Event()
+        read_deadline = {"value": 0.0}
         claim_lock = threading.Lock()
         claimed = {"value": False}
 
@@ -429,19 +489,37 @@ class BrowserFetcher:
                         context.route_web_socket(
                             "**/*", lambda ws: ws.close())
                         page = context.new_page()
+                        navigation_responses: list[tuple[str, int]] = []
+
+                        def _record_navigation_response(nav_response) -> None:  # type: ignore[no-untyped-def]
+                            if (nav_response.request.is_navigation_request()
+                                    and nav_response.frame.parent_frame is None):
+                                navigation_responses.append(
+                                    (nav_response.url, nav_response.status))
+
+                        page.on("response", _record_navigation_response)
+                        page.on("crash", lambda _page: renderer_crashed.set())
                         # JS-level stealth on top of patchright's launch
                         # patches, applied BEFORE any navigation.
                         stealth.apply_stealth_sync(page)
+                        navigation_deadline = (
+                            time.monotonic() + NAV_TIMEOUT_MS / 1000)
                         response = page.goto(
                             url, wait_until=_WAIT_UNTIL, timeout=NAV_TIMEOUT_MS)
                         if response is None:
                             raise FetchError("no response from navigation")
-                        status = response.status
-                        html = page.content()
-                        if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
-                            raise FetchError(
-                                f"rendered page exceeds {MAX_HTML_BYTES} "
-                                "bytes cap")
+                        read_deadline["value"] = navigation_deadline
+                        reading_document.set()
+                        document_uri, html = self._read_document(
+                            page, navigation_deadline)
+                        document_url = urldefrag(document_uri).url
+                        status = next(
+                            (response_status
+                             for response_url, response_status
+                             in reversed(navigation_responses)
+                             if response_url == document_url),
+                            response.status)
+                        self._check_final_document(page.url, url, document_uri)
                         outcome = ("result", FetchResult(
                             html=html,
                             status=status,
@@ -473,7 +551,27 @@ class BrowserFetcher:
         with self._gate.acquire():
             run_thread = threading.Thread(target=_run, daemon=True)
             run_thread.start()
-            run_thread.join(timeout=self._fetch_timeout_seconds)
+            deadline = time.monotonic() + self._fetch_timeout_seconds
+            while run_thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                run_thread.join(timeout=min(remaining, 0.1))
+                if (run_thread.is_alive() and reading_document.is_set()
+                        and renderer_crashed.is_set() and _claim()):
+                    killed_cleanly = _kill_launch_processes(marker)
+                    if not killed_cleanly:
+                        with _abandoned_fetch_threads_lock:
+                            _abandoned_fetch_thread_count += 1
+                    raise FetchError("renderer crashed during document read")
+                if (run_thread.is_alive() and reading_document.is_set()
+                        and time.monotonic() >= read_deadline["value"]
+                        and _claim()):
+                    killed_cleanly = _kill_launch_processes(marker)
+                    if not killed_cleanly:
+                        with _abandoned_fetch_threads_lock:
+                            _abandoned_fetch_thread_count += 1
+                    raise FetchError("rendered document read exceeded its budget")
             if run_thread.is_alive() and _claim():
                 killed_cleanly = _kill_launch_processes(marker)
                 if not killed_cleanly:
@@ -491,10 +589,6 @@ class BrowserFetcher:
                 raise FetchError(
                     f"browser fetch exceeded {self._fetch_timeout_seconds}s "
                     "total timeout")
-            # Either the thread had already finished by the deadline, or it
-            # won the claim race right as the deadline fired -- either way
-            # it is about to return (or already has), so this join is
-            # bounded.
             run_thread.join()
             if "error" in holder:
                 raise holder["error"]

@@ -139,6 +139,14 @@ class _FakeResponse:
         self.status = status
 
 
+class _FakeJSHandle:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def json_value(self) -> str:
+        return self._value
+
+
 class _FakePage:
     def __init__(self, content: str, status: int) -> None:
         self._content = content
@@ -150,10 +158,19 @@ class _FakePage:
         self.route_pattern: str | None = None
         self.route_handler = None
         self.goto_args: tuple | None = None
+        self.url = ""
+        self._event_handlers: dict[str, object] = {}
 
     def goto(self, url, wait_until, timeout):  # noqa: ANN001
         self.goto_args = (url, wait_until, timeout)
+        self.url = url
         return _FakeResponse(self._status)
+
+    def on(self, event: str, handler) -> None:  # noqa: ANN001
+        self._event_handlers[event] = handler
+
+    def wait_for_function(self, expression, arg, timeout):  # noqa: ANN001
+        return _FakeJSHandle(f"{self.url}\n{self._content}")
 
     def content(self) -> str:
         return self._content
