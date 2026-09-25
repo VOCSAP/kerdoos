@@ -19,29 +19,43 @@ from autolycos.challenge import (
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-_HEALTHY_FIXTURES = (
+_ROOT_FIXTURES = Path(__file__).parents[3] / "tests" / "fixtures"
+_HEALTHY_FIXTURE_NAMES = (
     "kabum_aw3225qf.html",
     "amazon_b0cvqgsrz9.html",
     "mercadolivre_mlb35045987.html",
     "terabyte_40561.html",
-    # Pichau: Cloudflare-fronted but its only residual is the PASSIVE
-    # challenge-platform script (already excluded); no active marker survives.
     "pichau_cv700b.html",
-    # Magalu RESOLVED (post-Akamai UC render): no challenge DOM, must be healthy.
     "magalu_uc.html",
     "magalu_bab5438g3h_camoufox.html",
     "magalu_238968700_camoufox.html",
+)
+_HEALTHY_FIXTURES = (
+    *((_FIXTURES / name) for name in _HEALTHY_FIXTURE_NAMES),
+    *((_ROOT_FIXTURES / name) for name in _HEALTHY_FIXTURE_NAMES),
+    _ROOT_FIXTURES / "mercadolivre_mlb35045987_camoufox.html",
 )
 
 
 class HealthyFixturesNotChallengedTest(unittest.TestCase):
     def test_every_real_page_is_not_challenged(self) -> None:
-        for name in _HEALTHY_FIXTURES:
-            html = (_FIXTURES / name).read_text(encoding="utf-8", errors="replace")
-            with self.subTest(fixture=name):
+        for fixture in _HEALTHY_FIXTURES:
+            html = fixture.read_text(encoding="utf-8", errors="replace")
+            with self.subTest(fixture=fixture):
                 self.assertFalse(
                     looks_challenged(200, html),
-                    f"{name} wrongly flagged challenged")
+                    f"{fixture} wrongly flagged challenged")
+
+
+class MercadoLivreCaptchaWallTest(unittest.TestCase):
+    def test_captcha_wall_index_is_challenged(self) -> None:
+        html = (_FIXTURES / "mercadolivre_captcha_wall_camoufox.html").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertTrue(looks_challenged(200, html))
+
+    def test_account_verification_wall_remains_challenged(self) -> None:
+        self.assertTrue(looks_challenged(
+            200, "account-verification" + "x" * 5000))
 
 
 class BroadMarkersRemovedTest(unittest.TestCase):

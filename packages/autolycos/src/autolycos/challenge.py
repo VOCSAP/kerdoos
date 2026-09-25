@@ -34,7 +34,8 @@ CHALLENGE_MARKERS: tuple[str, ...] = (
     "just a moment", "cf-chl-", "_cf_chl_opt", "attention required",
     "px-captcha", "datadome", "_incapsula_", "sec-cpt", "scf-akamai",
     "sec-if-cpt", "validatecaptcha",
-    "account-verification", "micro-landing-container", "micro-landing-title",
+    "captcha-wall-index", "account-verification", "micro-landing-container",
+    "micro-landing-title",
 )
 
 # Below this length a 200 body is almost certainly a block/stub, not a page.
