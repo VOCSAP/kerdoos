@@ -50,6 +50,16 @@ class HealthTest(unittest.TestCase):
         app_b = create_app()
         self.assertIsNot(app_a, app_b)
 
+    def test_launch_timeout_env_vars_reach_the_selected_fetchers(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS": "31",
+            "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS": "19",
+        }):
+            app = create_app()
+        router = app.state.app_service._router
+        self.assertEqual(router.select("uc")._launch_timeout_seconds, 31.0)
+        self.assertEqual(router.select("browser")._launch_timeout_seconds, 19.0)
+
 
 class DigestEvaluatorLifespanTest(unittest.TestCase):
     """ADR 0003 Decision 4/8: the intra-process evaluator lifespan task is
