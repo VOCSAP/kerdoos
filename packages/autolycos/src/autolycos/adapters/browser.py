@@ -397,6 +397,10 @@ class BrowserFetcher:
         read_deadline = {"value": 0.0}
         claim_lock = threading.Lock()
         claimed = {"value": False}
+        # Guarded by _abandoned_fetch_threads_lock: the ceiling counts a
+        # thread only while it is alive, so _run gives back what the main
+        # thread counted, on every exit path.
+        liveness = {"finished": False, "counted": False}
 
         def _claim() -> bool:
             with claim_lock:
@@ -404,6 +408,13 @@ class BrowserFetcher:
                     return False
                 claimed["value"] = True
                 return True
+
+        def _count_abandoned() -> None:
+            global _abandoned_fetch_thread_count
+            with _abandoned_fetch_threads_lock:
+                if not liveness["finished"]:
+                    liveness["counted"] = True
+                    _abandoned_fetch_thread_count += 1
 
         def _run() -> None:
             # Owns the ENTIRE launch-to-close cycle on this ONE thread, start
@@ -499,6 +510,11 @@ class BrowserFetcher:
             except BaseException as exc:  # noqa: BLE001 -- relayed or discarded
                 outcome = ("error", exc)
 
+            with _abandoned_fetch_threads_lock:
+                liveness["finished"] = True
+                if liveness["counted"]:
+                    _abandoned_fetch_thread_count -= 1
+
             if _claim():
                 kind, value = outcome
                 holder[kind] = value
@@ -529,16 +545,14 @@ class BrowserFetcher:
                         and renderer_crashed.is_set() and _claim()):
                     killed_cleanly = _kill_launch_processes(marker)
                     if not killed_cleanly:
-                        with _abandoned_fetch_threads_lock:
-                            _abandoned_fetch_thread_count += 1
+                        _count_abandoned()
                     raise FetchError("renderer crashed during document read")
                 if (run_thread.is_alive() and reading_document.is_set()
                         and time.monotonic() >= read_deadline["value"]
                         and _claim()):
                     killed_cleanly = _kill_launch_processes(marker)
                     if not killed_cleanly:
-                        with _abandoned_fetch_threads_lock:
-                            _abandoned_fetch_thread_count += 1
+                        _count_abandoned()
                     raise FetchError("rendered document read exceeded its budget")
             if run_thread.is_alive() and _claim():
                 killed_cleanly = _kill_launch_processes(marker)
@@ -552,8 +566,7 @@ class BrowserFetcher:
                     # resource-leak safety net into a permanent refusal
                     # after enough confirmed-clean freezes (roadmap
                     # d8b7b8fd).
-                    with _abandoned_fetch_threads_lock:
-                        _abandoned_fetch_thread_count += 1
+                    _count_abandoned()
                 raise FetchError(
                     f"browser fetch exceeded {self._fetch_timeout_seconds}s "
                     "total timeout")

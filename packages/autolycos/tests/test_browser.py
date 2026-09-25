@@ -1098,6 +1098,100 @@ class BrowserFetchPsutilAbsentTest(unittest.TestCase):
             "(dangerous) kill, not a silent no-op")
 
 
+class _BlockedUntilReleasedBrowser:
+    """A launched Chromium standing in: new_page() blocks until `release`
+    is set, then raises, so an abandoned fetch thread exits on demand
+    without any real OS process involved."""
+
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+
+    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
+        return self
+
+    def route(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
+
+    def route_web_socket(self, pattern, handler) -> None:  # noqa: ANN001
+        pass
+
+    def new_page(self):  # noqa: ANN201
+        self._release.wait(timeout=10)
+        raise RuntimeError("connection reset (simulated post-kill unblock)")
+
+    def close(self) -> None:
+        pass
+
+
+class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
+    """Roadmap 74310de2: the abandoned-fetch ceiling bounds threads that
+    are STILL alive, so an unconfirmed-kill fetch whose thread later exits
+    must stop counting against it -- otherwise a handful of incidents
+    disables the tier until the process restarts."""
+
+    def setUp(self) -> None:
+        with browser._abandoned_fetch_threads_lock:
+            self._saved_abandoned_count = browser._abandoned_fetch_thread_count
+            browser._abandoned_fetch_thread_count = 0
+
+    def tearDown(self) -> None:
+        with browser._abandoned_fetch_threads_lock:
+            browser._abandoned_fetch_thread_count = self._saved_abandoned_count
+
+    def _fetch(self, gate, chromium, **fetcher_kwargs):  # noqa: ANN001, ANN003, ANN202
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                return browser.BrowserFetcher(
+                    _POLICY, gate=gate, **fetcher_kwargs).fetch(
+                        "https://mercadolivre.com.br/p/MLB1")
+
+    def _abandon_with_unconfirmed_kill(self, gate, release, ceiling) -> None:  # noqa: ANN001
+        chromium = _FakeChromium(browser_obj=_BlockedUntilReleasedBrowser(release))
+        # psutil unavailable: the kill can never be confirmed, so each
+        # timed-out fetch genuinely counts against the ceiling.
+        with mock.patch.dict(sys.modules, {"psutil": None}):
+            with self.assertRaises(FetchError):
+                self._fetch(gate, chromium, fetch_timeout_seconds=0.2,
+                            max_abandoned_fetches=ceiling)
+
+    def _ok_chromium(self) -> _FakeChromium:
+        return _FakeChromium(
+            browser_obj=_FakeBrowser(_FakePage("<html>ok</html>", 200)))
+
+    def test_ceiling_refuses_while_abandoned_threads_are_still_alive(
+            self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        release = threading.Event()
+        try:
+            for _ in range(2):
+                self._abandon_with_unconfirmed_kill(gate, release, ceiling=2)
+            with self.assertRaisesRegex(FetchError, "browser tier refused"):
+                self._fetch(gate, self._ok_chromium(), max_abandoned_fetches=2)
+        finally:
+            release.set()
+
+    def test_ceiling_frees_up_once_abandoned_threads_exit(self) -> None:
+        gate = BrowserGate(max_concurrent=1)
+        release = threading.Event()
+        for _ in range(2):
+            self._abandon_with_unconfirmed_kill(gate, release, ceiling=2)
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with browser._abandoned_fetch_threads_lock:
+                if browser._abandoned_fetch_thread_count == 0:
+                    break
+            time.sleep(0.05)
+
+        result = self._fetch(gate, self._ok_chromium(), max_abandoned_fetches=2)
+        self.assertEqual(result.method, "browser")
+
+
 class StaticRouterBrowserLaunchTimeoutTest(unittest.TestCase):
     """Roadmap b3213f3c: KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS is injected
     by the kerdoos composition root through StaticRouter/_make_browser --
