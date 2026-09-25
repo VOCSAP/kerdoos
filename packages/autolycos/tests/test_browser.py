@@ -132,6 +132,19 @@ class BrowserFetcherContractTest(unittest.TestCase):
         self.assertTrue(fetcher._host_allowed("mercadolivre.com.br."))
 
 
+class BrowserWebRtcPolicyTest(unittest.TestCase):
+    def test_security_policy_replaces_conflicting_site_arguments(self) -> None:
+        args = browser._browser_launch_args([
+            "--autolycos-launch-id=test",
+            "--webrtc-ip-handling-policy=default",
+            "--force-webrtc-ip-handling-policy=default",
+        ])
+        self.assertEqual(
+            args.count(browser._WEBRTC_IP_HANDLING_POLICY), 1)
+        self.assertNotIn("--webrtc-ip-handling-policy=default", args)
+        self.assertNotIn("--force-webrtc-ip-handling-policy=default", args)
+
+
 class FinalDocumentContractTest(unittest.TestCase):
     def test_rejects_multibyte_document_above_the_byte_cap(self) -> None:
         page = _FakePage(
@@ -338,12 +351,13 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         # pin flag; the proxy does the pinning at the network layer).
         proxy_server = chromium.launch_kwargs["proxy"]["server"]
         self.assertTrue(proxy_server.startswith("http://127.0.0.1:"))
-        # No egress-weakening launch flags survive the scrub -- only the
-        # per-fetch --autolycos-launch-id marker (roadmap d8b7b8fd) remains.
-        self.assertEqual(len(chromium.launch_kwargs["args"]), 1)
+        self.assertEqual(len(chromium.launch_kwargs["args"]), 2)
         self.assertTrue(
             chromium.launch_kwargs["args"][0].startswith(
                 browser._LAUNCH_ID_ARG_PREFIX))
+        self.assertEqual(
+            chromium.launch_kwargs["args"][1],
+            browser._WEBRTC_IP_HANDLING_POLICY)
         for a in chromium.launch_kwargs["args"]:
             self.assertNotIn("--host-resolver-rules", a)
         # Phase 2b: JS stealth was applied to the rendered page.

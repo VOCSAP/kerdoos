@@ -128,6 +128,13 @@ def _normalize_domains(domains: Iterable[str]) -> list[str]:
     return sorted({d.lower().rstrip(".") for d in domains if d})
 
 
+def _uc_chromium_args(args: Iterable[str]) -> list[str]:
+    return [
+        arg for arg in args
+        if not arg.startswith(_WEBRTC_IP_HANDLING_POLICY_PREFIXES)
+    ] + [_WEBRTC_IP_HANDLING_POLICY]
+
+
 def _host_resolver_rules(
     target: ValidatedTarget, subresource_domains: Iterable[str]
 ) -> str:
@@ -202,6 +209,12 @@ def _load_seleniumbase():  # type: ignore[no-untyped-def]
 # process-tree novelty, which also matches a concurrent, unrelated
 # browser/uc launch's own Chrome.
 _LAUNCH_ID_ARG_PREFIX = "--autolycos-launch-id="
+_WEBRTC_IP_HANDLING_POLICY = (
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+_WEBRTC_IP_HANDLING_POLICY_PREFIXES = (
+    "--webrtc-ip-handling-policy=",
+    "--force-webrtc-ip-handling-policy=",
+)
 # SeleniumBase's own driver process sits between this Python process and the
 # marked Chrome process; the marker itself lives only in Chrome's argv.
 _LAUNCH_PARENT_NAMES = frozenset({"chromedriver", "uc_driver"})
@@ -752,7 +765,8 @@ class UcFetcher:
             # syntax for composing MAP/EXCLUDE sub-rules in one flag value)
             # into bogus standalone switches, silently dropping the
             # deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
-            "chromium_arg": [f"--host-resolver-rules={rule}"],
+            "chromium_arg": _uc_chromium_args(
+                [f"--host-resolver-rules={rule}"]),
         }
         binary_location = _find_patchright_chromium()
         if binary_location is not None:

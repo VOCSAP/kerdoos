@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import ssl
 import subprocess
 import sys
 import threading
+from pathlib import Path
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest import mock
 
 from autolycos.adapters import uc
@@ -612,6 +616,99 @@ class UcPostNavigationFreezeImageTest(unittest.TestCase):
                 return True
             time.sleep(interval)
         return predicate()
+
+
+class UcWebRtcEgressImageTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if _HAS_REAL_CHROMIUM and Path("/certs/leaf.crt").is_file():
+            return
+        if os.environ.get("KERDOOS_REQUIRE_IMAGE_TESTS") == "1":
+            self.fail(
+                "KERDOOS_REQUIRE_IMAGE_TESTS=1 but Chromium or probe "
+                "certificate is unavailable")
+        self.skipTest("needs real Chromium and the autonomous probe certificate")
+
+    def test_fetch_blocks_unproxied_webrtc_udp_and_keeps_status(self) -> None:
+        from test_browser_webrtc_image import (
+            BrowserWebRtcEgressImageTest,
+            _UdpCapture,
+            _lan_ip,
+            _webrtc_page,
+        )
+
+        lan_ip = _lan_ip()
+        page = _webrtc_page(lan_ip)
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/hold":
+                    time.sleep(2.0)
+                    body = b"ok"
+                else:
+                    body = page
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:  # noqa: ANN002
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        certificate = Path("/certs/leaf.crt")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, certificate.with_name("leaf.key"))
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+
+        capture = _UdpCapture()
+        capture.start()
+        BrowserWebRtcEgressImageTest()._assert_unprotected_chromium_hits_canary(
+            capture, server.server_port)
+        capture.clear()
+        observed_args: list[str] = []
+        observing = threading.Event()
+
+        def observe_args() -> None:
+            import psutil
+
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and not observing.is_set():
+                for process in psutil.Process().children(recursive=True):
+                    try:
+                        command = process.cmdline()
+                    except psutil.Error:
+                        continue
+                    if "--autolycos-launch-id=uc-webrtc-proof" in command:
+                        observed_args.extend(command)
+                        return
+                time.sleep(0.05)
+
+        target = ValidatedTarget(
+            url="https://shop.test/webrtc", scheme="https", host="shop.test",
+            port=443, ip="127.0.0.1")
+        observer = threading.Thread(target=observe_args, daemon=True)
+        observer.start()
+        from seleniumbase import Driver
+        with mock.patch.object(uc, "validate_target", return_value=target), \
+             mock.patch.object(uc, "_load_seleniumbase", return_value=Driver), \
+             mock.patch.object(uc.uuid, "uuid4", return_value=SimpleNamespace(
+                 hex="uc-webrtc-proof")):
+            result = uc.UcFetcher(
+                DomainPolicy(frozenset({"shop.test"})),
+                fetch_timeout_seconds=30.0,
+            ).fetch("https://shop.test/webrtc")
+        observing.set()
+        observer.join(timeout=1.0)
+
+        time.sleep(0.5)
+        self.assertEqual(result.status, 200)
+        self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
+        self.assertIn(
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            observed_args)
 
 
 if __name__ == "__main__":

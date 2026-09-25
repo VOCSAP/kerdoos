@@ -152,6 +152,18 @@ class FindPatchrightChromiumTest(unittest.TestCase):
         self.assertIn("chromium-999", path)
 
 
+class UcWebRtcPolicyTest(unittest.TestCase):
+    def test_security_policy_replaces_conflicting_site_arguments(self) -> None:
+        args = uc._uc_chromium_args([
+            "--host-resolver-rules=MAP shop.test 104.18.0.1",
+            "--webrtc-ip-handling-policy=default",
+            "--force-webrtc-ip-handling-policy=default",
+        ])
+        self.assertEqual(args.count(uc._WEBRTC_IP_HANDLING_POLICY), 1)
+        self.assertNotIn("--webrtc-ip-handling-policy=default", args)
+        self.assertNotIn("--force-webrtc-ip-handling-policy=default", args)
+
+
 class UcFetcherContractTest(unittest.TestCase):
     def test_method_name(self) -> None:
         self.assertEqual(uc.UcFetcher.method_name, "uc")
@@ -279,16 +291,15 @@ class UcFetcherWiringTest(unittest.TestCase):
         # internal commas into bogus standalone switches and silently drop
         # the deny-by-default MAP * ~NOTFOUND (roadmap dde2d243).
         self.assertIsInstance(chromium_arg, list)
-        # host-resolver-rules + the per-launch --autolycos-launch-id marker
-        # _launch_with_deadline appends (roadmap 65cef071).
-        self.assertEqual(len(chromium_arg), 2)
+        self.assertEqual(len(chromium_arg), 3)
         arg = chromium_arg[0]
         self.assertIn(
             "--host-resolver-rules=MAP www.magazineluiza.com.br 104.18.0.1", arg)
         self.assertIn("MAP * ~NOTFOUND", arg)
         self.assertIn("EXCLUDE mlcdn.com.br", arg)
         self.assertNotIn("EXCLUDE www.magazineluiza.com.br", arg)
-        self.assertTrue(chromium_arg[1].startswith(uc._LAUNCH_ID_ARG_PREFIX))
+        self.assertEqual(chromium_arg[1], uc._WEBRTC_IP_HANDLING_POLICY)
+        self.assertTrue(chromium_arg[2].startswith(uc._LAUNCH_ID_ARG_PREFIX))
         self.assertTrue(driver.kwargs["uc"])
         self.assertEqual(result.method, "uc")
         self.assertEqual(result.status, 200)      # CDP absent -> 200 fallback
