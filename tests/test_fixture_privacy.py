@@ -1,10 +1,17 @@
 """Convention: no fixture under tests/fixtures/ may carry an identifying
 value (client IP, cookie, tracker id, location, JWT, personal email). The
 repo is public; two prior reviews each caught one forgotten value by hand
-(traceparent, userLocation) before this scan existed.
+(traceparent, userLocation) before this scan existed, and a third pass (this
+scan's own first run) caught an unscrubbed visitor CEP a security-auditor
+gate then found the scan itself missed lat/lon and HTML/JSON-escaped forms.
 
 Exceptions are per (file, key) only, never global, so a legitimate public
 value in one fixture cannot blanket-whitelist the same key elsewhere.
+
+`scan_directory` reads every occurrence through 3 views of the same bytes
+(raw, HTML-entity-unescaped, JSON-quote-unescaped + URL-unquoted) because a
+value can hide from the raw-text regexes behind `&quot;` or a `\"` escape
+without ceasing to be the same identifying value once decoded.
 
 autolycos checks its OWN fixtures independently from its own test file
 (packages/autolycos/tests/test_fixture_privacy.py) -- no import between the
@@ -13,14 +20,18 @@ two, since autolycos never imports kerdoos (extractibility invariant).
 
 from __future__ import annotations
 
+import html
 import ipaddress
 import pathlib
 import re
 import tempfile
 import unittest
+import urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURES_DIR = ROOT / "tests" / "fixtures"
+
+ALLOWED_EXTENSIONS = {".html"}
 
 RFC5737 = [ipaddress.ip_network(n) for n in
            ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")]
@@ -34,6 +45,12 @@ SUPPORT_EMAIL_PREFIXES = ("suporte", "support", "ajuda", "help",
 # (e.g. "logo_large@2x.webp"); not an email, never a finding.
 ASSET_EXTENSIONS = ("webp", "png", "jpg", "jpeg", "gif", "svg", "ico",
                      "css", "js")
+
+# device/session identifier keys that must never carry a non-placeholder
+# value in a committed fixture.
+IDENTIFIER_KEYS = ("_d2id", "deviceId", "device_id", "session-id", "sessionId")
+
+LATLON_KEYS = ("latitude", "longitude", "lat", "lng")
 
 # (filename, key) -> the one value that key is allowed to carry in that
 # file. Never applies to the same key in a different file.
@@ -76,11 +93,13 @@ def _is_zeroed(value: str) -> bool:
     return bool(re.fullmatch(r"0+", value))
 
 
-def _is_placeholder_cookie(value: str) -> bool:
+def _is_placeholder_value(value: str) -> bool:
     if value.strip() == "":
         return True
     lowered = value.lower()
-    return "placeholder" in lowered or "redacted" in lowered or "scrubbed" in lowered
+    if any(w in lowered for w in ("placeholder", "redacted", "scrubbed")):
+        return True
+    return bool(re.fullmatch(r"[0x_-]+", lowered))
 
 
 def _apply_exception(filename: str, key: str, value: str,
@@ -90,24 +109,28 @@ def _apply_exception(filename: str, key: str, value: str,
     violations.append((key, value))
 
 
-def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
-    """Every (key, value) pair in `text` that looks identifying, after
-    applying the (filename, key) exception table. `filename` is the bare
-    name the exception table is keyed on, not a path."""
+def _views(text: str) -> list[str]:
+    """3 decodings of the same bytes: a value can hide from the raw-text
+    regexes behind an HTML entity (`&quot;`) or a JSON/URL escape (`\\"`,
+    `%22`) without ceasing to be the same identifying value once decoded."""
+    json_unescaped = urllib.parse.unquote(text.replace('\\"', '"'))
+    return [text, html.unescape(text), json_unescaped]
+
+
+def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
     violations: list[tuple[str, str]] = []
     # spans already attributed to a specific key, so the generic ipv4/ipv6
     # sweep below does not re-flag the same value under a second label.
     consumed: list[tuple[int, int]] = []
 
-    m = re.search(r'"x-forwarded-for"\s*:\s*"([^"]*)"', text, re.I)
-    if m:
+    for m in re.finditer(r'"x-forwarded-for"\s*:\s*"([^"]*)"', text, re.I):
         consumed.append(m.span(1))
         tokens = [t.strip() for t in m.group(1).split(",") if t.strip()]
         if any(_is_public_ipv4(t) for t in tokens):
             _apply_exception(filename, "x-forwarded-for", m.group(1), violations)
 
     for m in re.finditer(r'"cookie"\s*:\s*"([^"]*)"', text, re.I):
-        if not _is_placeholder_cookie(m.group(1)):
+        if not _is_placeholder_value(m.group(1)):
             _apply_exception(filename, "cookie", m.group(1), violations)
 
     for m in re.finditer(r'"rua\.trans"\s*:\s*"([^"]*)"', text):
@@ -131,14 +154,14 @@ def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
             _apply_exception(filename, "ak.gh", value, violations)
 
     for key_pattern, label in (
-        (r'"?remoteAddress"?\s*[:=]\s*"?([0-9a-fA-F:.]+)"?', "remoteAddress"),
-        (r'"?user[_]?[iI]p"?\s*[:=]\s*"?([0-9a-fA-F:.]+)"?', "userIp"),
+        (r'"?remoteAddress"?\s*[:=]\s*"([^"]*)"', "remoteAddress"),
+        (r'"?user[_]?[iI]p"?\s*[:=]\s*"([^"]*)"', "userIp"),
     ):
-        for m in re.finditer(key_pattern, text):
-            value = m.group(1)
+        for m in re.finditer(key_pattern, text, re.I):
             consumed.append(m.span(1))
-            if _is_public_ipv4(value) or _is_global_ipv6(value):
-                _apply_exception(filename, label, value, violations)
+            tokens = [t.strip() for t in m.group(1).split(",") if t.strip()]
+            if any(_is_public_ipv4(t) or _is_global_ipv6(t) for t in tokens):
+                _apply_exception(filename, label, m.group(1), violations)
 
     for m in re.finditer(r'"userLocation"\s*:\s*(\{[^}]*\}|"[^"]*")', text):
         value = m.group(1)
@@ -146,8 +169,8 @@ def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
             _apply_exception(filename, "userLocation", value, violations)
 
     for m in re.finditer(
-            r'(?:"(zip[Cc]ode|zip_code|cep|CEP)"\s*:\s*"?(\d{5,9})|'
-            r'zipcode=(\d{5,9}))', text):
+            r'(?:"(zip_?[Cc]ode|postal_?[Cc]ode|cep)"\s*:\s*"?(\d{5,9})|'
+            r'(?:zip_?code|cep)=(\d{5,9}))', text, re.I):
         value = m.group(2) or m.group(3)
         if value and not _is_zeroed(value):
             _apply_exception(filename, "zipcode", value, violations)
@@ -156,6 +179,27 @@ def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
                           text, re.I):
         if _nonzero_hex_count(m.group(1)) > 0:
             _apply_exception(filename, "traceparent", m.group(1), violations)
+
+    for key_name in IDENTIFIER_KEYS:
+        pattern = rf'"{re.escape(key_name)}"\s*:\s*"([^"]*)"'
+        for m in re.finditer(pattern, text):
+            value = m.group(1)
+            # these ids are shipped in this corpus as UUID-shaped values
+            # with only the fixed version/variant hex nibbles left non-zero
+            # once scrubbed (same convention as rua.trans); a real id has
+            # far more non-zero hex digits than that.
+            if value and not _is_placeholder_value(value) and _nonzero_hex_count(value) > 4:
+                _apply_exception(filename, key_name, value, violations)
+
+    for key_name in LATLON_KEYS:
+        pattern = rf'"{re.escape(key_name)}"\s*:\s*"?(-?\d+\.\d+)"?'
+        for m in re.finditer(pattern, text, re.I):
+            value = m.group(1)
+            decimals = value.split(".", 1)[1] if "." in value else ""
+            # 2 decimal places is city-block precision (~1km); more than
+            # that pins a location tightly enough to identify a visitor.
+            if len(decimals) > 2:
+                _apply_exception(filename, key_name, value, violations)
 
     def _already_consumed(span: tuple[int, int]) -> bool:
         return any(span[0] < c[1] and span[1] > c[0] for c in consumed)
@@ -195,6 +239,47 @@ def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
     return violations
 
 
+def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
+    """Every (key, value) pair that looks identifying in ANY of the 3
+    decodings of `text` (see `_views`), after applying the (filename, key)
+    exception table. `filename` is the bare name the exception table is
+    keyed on, not a path."""
+    violations: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for view in _views(text):
+        for pair in _scan_view(view, filename):
+            if pair not in seen:
+                seen.add(pair)
+                violations.append(pair)
+    return violations
+
+
+def scan_directory(directory: pathlib.Path) -> dict[str, list[tuple[str, str]]]:
+    """The real production scan path: every file under `directory`
+    (recursive), not just the ones a caller remembered to ask for. Raises
+    loudly on an empty directory (a scan that reads nothing must not read as
+    a scan that passed) and on any extension outside `ALLOWED_EXTENSIONS`
+    (a new fixture format ships unscanned otherwise, silently)."""
+    files = sorted(p for p in directory.rglob("*") if p.is_file())
+    if not files:
+        raise AssertionError(
+            f"no fixture file found under {directory} -- an empty "
+            "directory must not read as a passing scan")
+    report: dict[str, list[tuple[str, str]]] = {}
+    for f in files:
+        if f.suffix.lower() not in ALLOWED_EXTENSIONS:
+            raise AssertionError(
+                f"{f.relative_to(directory)}: extension {f.suffix!r} is "
+                f"not in the scanned allowlist {sorted(ALLOWED_EXTENSIONS)} "
+                "-- add it there or remove the file, do not let it slip "
+                "through unscanned")
+        violations = find_violations(
+            f.read_text(encoding="utf-8", errors="replace"), f.name)
+        if violations:
+            report[f.name] = violations
+    return report
+
+
 class FixturePrivacyTest(unittest.TestCase):
     def test_scans_a_nonzero_number_of_fixture_files(self) -> None:
         files = sorted(FIXTURES_DIR.glob("*.html"))
@@ -205,12 +290,22 @@ class FixturePrivacyTest(unittest.TestCase):
 
     def test_an_empty_fixtures_directory_fails_the_scan(self) -> None:
         with tempfile.TemporaryDirectory() as empty_dir:
-            files = sorted(pathlib.Path(empty_dir).glob("*.html"))
             with self.assertRaises(
                     AssertionError,
-                    msg="a directory with 0 .html files must not read as a "
+                    msg="a directory with 0 files must not read as a "
                     "passing scan"):
-                self.assertGreater(len(files), 0)
+                scan_directory(pathlib.Path(empty_dir))
+
+    def test_an_unexpected_extension_fails_the_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            leftover = pathlib.Path(tmp_dir) / "dump.json"
+            leftover.write_text('{"remoteAddress":"177.10.20.30"}',
+                                 encoding="utf-8")
+            with self.assertRaises(
+                    AssertionError,
+                    msg="a file extension outside the allowlist must fail "
+                    "the scan loudly instead of being silently skipped"):
+                scan_directory(pathlib.Path(tmp_dir))
 
     def test_positive_control_each_pattern_is_detected(self) -> None:
         # built from parts so no contiguous JWT-shaped literal sits in the
@@ -230,20 +325,39 @@ class FixturePrivacyTest(unittest.TestCase):
             ("ak.gh", '{"ak.gh":"93.184.216.34"}'),
             ("remoteAddress", '{"remoteAddress":"177.10.20.30"}'),
             ("userIp", '{"userIp":"177.10.20.30"}'),
+            ("remoteAddress (2nd of a list)", '{"remoteAddress":"10.0.0.1, 177.10.20.30"}'),
             ("userLocation", '{"userLocation":{"city":"Sao Paulo","lat":-23.55}}'),
             ("zipcode", '{"address":{"zipcode":"01311000"}}'),
+            ("postal_code", '{"address":{"postal_code":"01311000"}}'),
+            ("cep query form", 'href="/menu?cep=01311000"'),
+            ("_d2id", '{"_d2id":"a1b2c3d4e5f6"}'),
+            ("deviceId", '{"deviceId":"a1b2c3d4e5f6"}'),
+            ("session-id", '{"session-id":"a1b2c3d4e5f6"}'),
+            ("latitude", '{"latitude":-23.6821604}'),
+            ("longitude", '{"longitude":-46.875494}'),
             ("traceparent", 'traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"'),
             ("ipv4", '{"host":"93.184.216.34"}'),
             ("ipv6", '{"host":"2606:2800:220:1:248:1893:25c8:1946"}'),
             ("jwt", jwt_witness),
             ("email", '{"contact":"joao.silva@gmail.com"}'),
+            ("html-entity-escaped zipcode", '&quot;zipcode&quot;:&quot;01311000&quot;'),
+            ("JSON-escaped remoteAddress", '{\\"remoteAddress\\":\\"177.10.20.30\\"}'),
+            ("URL-encoded cep query", 'href="/menu?cep%3D01311000"'),
         ]
         for label, snippet in witnesses:
             with self.subTest(motif=label):
                 violations = find_violations(snippet, "witness.html")
                 keys = [k for k, _ in violations]
+                expected_key = {
+                    "remoteAddress (2nd of a list)": "remoteAddress",
+                    "postal_code": "zipcode",
+                    "cep query form": "zipcode",
+                    "html-entity-escaped zipcode": "zipcode",
+                    "JSON-escaped remoteAddress": "remoteAddress",
+                    "URL-encoded cep query": "zipcode",
+                }.get(label, label)
                 self.assertIn(
-                    label, keys,
+                    expected_key, keys,
                     f"a {label} witness with a real-looking value must be "
                     f"caught, found violations={violations!r}")
 
@@ -252,6 +366,7 @@ class FixturePrivacyTest(unittest.TestCase):
             ("rfc5737 ipv4", '{"remoteAddress":"203.0.113.7"}'),
             ("private ipv4", '{"remoteAddress":"10.0.0.5"}'),
             ("loopback ipv4", '{"remoteAddress":"127.0.0.1"}'),
+            ("remoteAddress list, all private/rfc5737", '{"remoteAddress":"10.0.0.1, 203.0.113.7"}'),
             ("placeholder cookie", '{"cookie":"placeholder_cookie=true"}'),
             ("nulled rua.trans", '{"rua.trans":"SJ-00000000-0000-4000-8000-000000000001"}'),
             ("nulled ak.rid", '{"ak.rid":"00000000"}'),
@@ -260,6 +375,10 @@ class FixturePrivacyTest(unittest.TestCase):
             ("empty userLocation", '{"userLocation":{}}'),
             ("empty zipcode", '{"zipcode":""}'),
             ("nulled zipcode", '{"zipcode":"00000"}'),
+            ("nulled _d2id", '{"_d2id":"00000000"}'),
+            ("placeholder deviceId", '{"deviceId":"placeholder"}'),
+            ("city-precision latitude", '{"latitude":-23.68}'),
+            ("city-precision longitude", '{"longitude":-46.87}'),
             ("support email", '{"contact":"suporte@loja.com.br"}'),
             ("asset filename, not an email", '"logo_large_plus@2x.webp"'),
             ("version string, not an ipv4", '{"engine":{"version":"150.0.0.0"}}'),
@@ -283,13 +402,7 @@ class FixturePrivacyTest(unittest.TestCase):
             "be flagged -- an exception is per (file, key), never global")
 
     def test_no_identifying_value_in_the_current_fixtures(self) -> None:
-        files = sorted(FIXTURES_DIR.glob("*.html"))
-        report: dict[str, list[tuple[str, str]]] = {}
-        for f in files:
-            violations = find_violations(
-                f.read_text(encoding="utf-8", errors="replace"), f.name)
-            if violations:
-                report[f.name] = violations
+        report = scan_directory(FIXTURES_DIR)
         self.assertEqual(
             report, {},
             "identifying value(s) found in committed fixtures (public repo): "
