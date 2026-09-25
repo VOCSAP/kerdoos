@@ -512,7 +512,7 @@ des centaines de Ko.
   pour `bloque.example` sans CONNECT correspondant au proxy) reste la forme a
   rejouer si quelqu'un veut reintroduire une garde intra-navigateur sur ce tier.
 - **T4-11-browser -- campagne exécutée le 2026-09-25 ; HTTP maintenu comme
-  atténuation locale, WebSocket retiré, liveness post-navigation à prouver.**
+  atténuation locale, WebSocket retiré, preuve post-navigation ciblée exécutée.**
   Les preuves portent sur une image aux versions du lock (patchright 1.61.2,
   Chromium 149.0.7827.55), avec les sources `fc2abcd`, pas sur une promesse de
   comportement de versions futures. La sonde utilise le vrai fetch et le vrai
@@ -567,8 +567,20 @@ des centaines de Ko.
   maintenir HTTP sans le promouvoir, retirer WebSocket et borner la lecture.**
   La force décisive est le bénéfice observé de HTTP isolé, sans queue de 90 s dans
   son échantillon, et non une garantie extrapolée d'absence de dégradation.
-  La clôture du couplage `33c5bddf`/`30333254` exige encore la preuve de lecture
-  bornée après crash et de réacquisition de la porte réelle après nettoyage.
+
+  **MESURÉ, contrôle de la livraison `e6205f1` :** dans l'image
+  `kerdoos-t4:788715f`, sources du SHA montées en lecture seule, commande
+  `python3 -m pytest tests/image/test_browser_image.py::BrowserRendererCrashImageTest`
+  : `1 passed in 14.93s`. **DÉDUIT** du test
+  `test_crash_after_navigation_fails_read_releases_gate_and_recovers` : crash
+  injecté après retour de la navigation réelle, erreur de lecture en moins de
+  6 s (budget de navigation/lecture de 5 s, watchdog total de 8 s), aucun nouveau
+  processus survivant au contrôle effectué une seconde après le retour, puis
+  second fetch réussi avec le même `BrowserGate(max_concurrent=1)` réel.
+  La preuve ciblée de lecture interrompue, nettoyage et réacquisition est
+  exécutée ; elle ne prouve ni l'absence générale de queues ni l'instant exact
+  de libération de la porte par rapport au dernier décès de processus.
+  La cause du SEGV reste ouverte dans `908f33cc`.
 
   **Migration bornée, décision :** intégrer le cas de crash post-`goto` à la
   lecture bornée de `30333254`, sans élargir ce lot à la cause du SEGV des popups,
@@ -753,7 +765,7 @@ mise a jour le rende "meilleure" que Camoufox. »
 |---|---|---|
 | C1 | Allowlist de domaines dans le proxy, point de controle suffisant | Decision 4 (C1), tranche T0.5 |
 | C2 | Preferences Firefox imposees, OCSP tranche | Decision 4 (C2) |
-| C3 | Structure du contexte + proxy inévitable comme second rempart ; garde retirée de `camoufox` ; T4-11-browser : WebSocket retiré, HTTP maintenu non compté comme rempart, liveness post-navigation à prouver | Décision 4 (C3), preuves T4-10, T4-11, T4-11-browser |
+| C3 | Structure du contexte + proxy inévitable comme second rempart ; garde retirée de `camoufox` ; T4-11-browser : WebSocket retiré, HTTP maintenu non compté comme rempart, preuve post-navigation ciblée exécutée sur `e6205f1` | Décision 4 (C3), preuves T4-10, T4-11, T4-11-browser |
 | C4 | Build deterministe, provenance, secrets de build | Decision 2 (build deterministe) |
 | C5 | Zero telechargement a l'execution, par construction | Decision 1 (disponibilite), Decision 6 |
 | C6 | Durcissement de l'image | Decision 8 |
@@ -805,10 +817,9 @@ decision operateur requise :
 4. **Taille reelle de l'image** : **fermee en T2**, mesuree a 4,62 Go contre 2,42 Go
    (+2,20 Go, dont 1,29 Go pour la couche du binaire).
 5. **T4-11-browser** : arbitrage des interceptions rendu, retrait WebSocket et
-   maintien HTTP non compté comme rempart. Reste la preuve en image de lecture
-   bornée après crash et de réacquisition de la porte réelle dans `30333254` ; la
-   cause du SEGV reste dans `908f33cc`. Voir C3 pour les mesures, leurs limites et
-   les conditions de clôture.
+   maintien HTTP non compté comme rempart. Preuve ciblée de lecture interrompue,
+   nettoyage et réacquisition de la porte réelle exécutée sur `e6205f1` ; la cause
+   du SEGV reste dans `908f33cc`. Voir C3 pour les mesures et leurs limites.
 
 ## Changelog
 
