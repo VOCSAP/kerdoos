@@ -1,49 +1,4 @@
-"""Browser Fetcher adapter (patchright/Chromium, MVP tier `browser`).
-
-Tier for sites whose content is injected by client-side JS. Which sites use it
-is the catalogue's decision, not this adapter's. A headless Chromium renders the
-page so the DOM the parser sees matches what a real browser produces.
-
-Undetected launch (Phase 2b): the browser is LAUNCHED by patchright -- a
-drop-in fork of playwright whose deep launch-time patches make Chromium
-undetected at startup (Kleos #11050) -- NOT vanilla playwright. On top of the
-launch patches, playwright-stealth's Stealth().apply_stealth_sync(page) injects
-JS-level evasion into each page before navigation. patchright exposes the same
-sync_api surface as playwright, so the egress-proxy wiring below is unchanged.
-
-Anti-SSRF posture (spec HIGH-2 / M1, CWE-918), fail-closed:
-  * validate_target runs FIRST, before Playwright is even imported and before
-    any navigation, so a non-allowlisted / rebinding / private target is refused
-    even when the optional dependency is absent (the guard raises first).
-  * PRIMARY control (ADR 0004 D4/C1): Chromium is launched behind a loopback
-    egress-proxy (PinningProxy) via proxy_config and does not resolve targets
-    itself -- it CONNECTs through the proxy. The proxy checks the CONNECT
-    authority's DOMAIN against this fetch's allowlist (navigation DomainPolicy
-    + declared sub-resource CDNs) BEFORE any resolution, refusing a
-    non-allowlisted host with zero DNS lookups. Once the domain passes, the
-    proxy resolves once, rejects any non-global IP (ip_is_safe) and dials the
-    PINNED IP -- closing the DNS-rebind TOCTOU at the network layer. This
-    replaces the fragile --host-resolver-rules launch flag. TLS stays
-    end-to-end (the proxy tunnels ciphertext; SNI/cert/Host verification stay
-    bound to the hostname). Egress-weakening launch flags are scrubbed
-    (strip_dangerous_browser_args).
-    `bypass="<-loopback>"` is what makes "everything" true: Chromium's
-    implicit bypass rules otherwise send localhost, 127.0.0.1/8, [::1],
-    169.254/16 and [FE80::]/10 DIRECTLY, emitting no CONNECT for the very
-    address class this posture exists to refuse. It must travel in the proxy
-    dict, never in `args` -- --proxy-bypass-list is on the scrub list, so an
-    args-borne copy would be stripped and the hole would reopen silently.
-  * LOCAL attenuation, not a security control: context.route("**/*") aborts
-    off-allowlist sub-resource requests that can crash a hostile renderer.
-    Service workers cannot make any request at all (service_workers="block"
-    on the context).
-  * the rendered HTML is size-capped (anti-OOM, CWE-400).
-
-Playwright is imported lazily INSIDE fetch(), so this module -- and the whole
-test suite -- imports fine without Playwright installed; the browser tier is
-only ever exercised when the static router selects it. Waiting for the render to
-settle (networkidle) is request COMPLETION, NOT retry (retry lives in the core).
-"""
+"""Browser Fetcher adapter using Patchright Chromium."""
 
 from __future__ import annotations
 
@@ -324,9 +279,8 @@ class BrowserFetcher:
     def _host_allowed(self, host: str) -> bool:
         """A request/CONNECT target host is allowed iff it is SHAPED like a
         DNS name and is a navigation domain OR a declared render-critical
-        sub-resource CDN. Single predicate shared by the egress-proxy's domain
-        check (ADR 0004 D4/C1, the PRIMARY control) and the context-level route
-        guard (defense in depth), so the two can never drift apart.
+        sub-resource CDN. Shared by the egress-proxy's domain check and the
+        local crash-mitigation route guard, so the two cannot drift apart.
         Fail-closed: an empty or unparseable host is never allowed."""
         host = host.lower().rstrip(".")
         return _is_hostname_shaped(host) and (
@@ -346,6 +300,9 @@ class BrowserFetcher:
             raise FetchError(
                 f"rendered page exceeds {MAX_HTML_BYTES} characters cap")
         document_uri, _, html = value.partition("\n")
+        if len(html.encode("utf-8", errors="ignore")) > MAX_HTML_BYTES:
+            raise FetchError(
+                f"rendered page exceeds {MAX_HTML_BYTES} bytes cap")
         return document_uri, html
 
     @staticmethod
@@ -358,6 +315,8 @@ class BrowserFetcher:
             if url is None:
                 continue
             final = urlsplit(url)
+            if final.username is not None or final.password is not None:
+                raise FetchError("final document contains userinfo")
             final_host = (final.hostname or "").rstrip(".")
             if final.scheme not in _DEFAULT_PORT or final_host != requested_host:
                 raise FetchError(
@@ -464,9 +423,6 @@ class BrowserFetcher:
                         context = browser.new_context(service_workers="block")
 
                         def _guard(route) -> None:  # type: ignore[no-untyped-def]
-                            # Defense in depth on top of the proxy's own
-                            # domain check: abort anything the proxy would
-                            # also refuse.
                             host = urlsplit(route.request.url).hostname or ""
                             if self._host_allowed(host):
                                 route.continue_()

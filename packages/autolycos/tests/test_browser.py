@@ -132,6 +132,53 @@ class BrowserFetcherContractTest(unittest.TestCase):
         self.assertTrue(fetcher._host_allowed("mercadolivre.com.br."))
 
 
+class FinalDocumentContractTest(unittest.TestCase):
+    def test_rejects_multibyte_document_above_the_byte_cap(self) -> None:
+        page = _FakePage(
+            "é" * (browser.MAX_HTML_BYTES // len("é".encode()) + 1), 200)
+        with self.assertRaisesRegex(FetchError, "bytes cap"):
+            browser.BrowserFetcher._read_document(page, time.monotonic() + 1)
+
+    def test_rejects_final_document_on_an_unrequested_port(self) -> None:
+        with self.assertRaisesRegex(FetchError, "port 8443"):
+            browser.BrowserFetcher._check_final_document(
+                "https://mercadolivre.com.br:8443/p/MLB1",
+                "https://mercadolivre.com.br/p/MLB1")
+
+    def test_rejects_different_allowed_final_host(self) -> None:
+        with self.assertRaisesRegex(FetchError, "not the requested host"):
+            browser.BrowserFetcher._check_final_document(
+                "https://www.mercadolivre.com.br/p/MLB1",
+                "https://mercadolivre.com.br/p/MLB1")
+
+    def test_rejects_https_to_http_final_document(self) -> None:
+        with self.assertRaisesRegex(FetchError, "fell back to http"):
+            browser.BrowserFetcher._check_final_document(
+                "http://mercadolivre.com.br/p/MLB1",
+                "https://mercadolivre.com.br/p/MLB1")
+
+    def test_rejects_final_document_with_userinfo(self) -> None:
+        with self.assertRaisesRegex(FetchError, "userinfo"):
+            browser.BrowserFetcher._check_final_document(
+                "https://user@mercadolivre.com.br/p/MLB1",
+                "https://mercadolivre.com.br/p/MLB1")
+
+    def test_rejects_non_http_final_document_schemes(self) -> None:
+        for final_url in ("about:blank", "data:text/html,ready",
+                          "chrome-error://chromewebdata/"):
+            with self.subTest(final_url=final_url):
+                with self.assertRaises(FetchError):
+                    browser.BrowserFetcher._check_final_document(
+                        final_url, "https://mercadolivre.com.br/p/MLB1")
+
+    def test_rejects_invalid_document_uri_when_page_url_is_allowed(self) -> None:
+        with self.assertRaisesRegex(FetchError, "chrome-error://chromewebdata"):
+            browser.BrowserFetcher._check_final_document(
+                "https://mercadolivre.com.br/p/MLB1",
+                "https://mercadolivre.com.br/p/MLB1",
+                "chrome-error://chromewebdata/")
+
+
 # ----- navigation wiring, driven with a FAKE Playwright (no real browser) -----
 
 class _FakeResponse:
@@ -148,9 +195,11 @@ class _FakeJSHandle:
 
 
 class _FakePage:
-    def __init__(self, content: str, status: int) -> None:
+    def __init__(self, content: str, status: int,
+                 document_uri: str | None = None) -> None:
         self._content = content
         self._status = status
+        self._document_uri = document_uri
         # Set by _FakeContext.route(): the guard is attached to the
         # CONTEXT now (ADR 0004 D4/C3), but mirrored here so every existing
         # test reading page.route_pattern/route_handler keeps working --
@@ -170,7 +219,8 @@ class _FakePage:
         self._event_handlers[event] = handler
 
     def wait_for_function(self, expression, arg, timeout):  # noqa: ANN001
-        return _FakeJSHandle(f"{self.url}\n{self._content}")
+        return _FakeJSHandle(
+            f"{self._document_uri or self.url}\n{self._content}")
 
     def content(self) -> str:
         return self._content
@@ -305,6 +355,13 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         self.assertEqual(result.status, 200)
         self.assertFalse(result.challenged)
         self.assertIn("xxxxx", result.html)
+
+    def test_rejects_document_uri_that_differs_from_page_url(self) -> None:
+        page = _FakePage(
+            "<html>" + "x" * 5000, 200,
+            document_uri="chrome-error://chromewebdata/")
+        with self.assertRaisesRegex(FetchError, "chrome-error://chromewebdata"):
+            self._run(page)
 
     def test_proxy_config_subtracts_the_implicit_loopback_bypass(self) -> None:
         # Without this, Chromium sends localhost / 127.0.0.1/8 / [::1] /
