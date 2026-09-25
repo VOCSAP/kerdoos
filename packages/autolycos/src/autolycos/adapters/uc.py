@@ -148,7 +148,10 @@ def _uc_chromium_args(args: Iterable[str]) -> list[str]:
 @contextmanager
 def _webrtc_user_data_dir() -> Iterator[str]:
     """Provide the profile policy Chromium honors in UC headless mode."""
-    with tempfile.TemporaryDirectory(prefix="autolycos-uc-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="autolycos-uc-",
+        ignore_cleanup_errors=True,
+    ) as directory:
         profile = os.path.join(directory, "Default")
         os.mkdir(profile)
         with open(os.path.join(profile, "Preferences"), "w", encoding="utf-8") as file:

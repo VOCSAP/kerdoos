@@ -188,6 +188,36 @@ class UcWebRtcPreferencesTest(unittest.TestCase):
         )
 
 
+class UcProfileCleanupTest(unittest.TestCase):
+    def test_fetch_error_survives_profile_cleanup_failure(self) -> None:
+        real_temporary_directory = tempfile.TemporaryDirectory
+
+        class _BusyProfile:
+            def __init__(self, *, prefix: str, ignore_cleanup_errors: bool = False) -> None:
+                self._directory = real_temporary_directory(prefix=prefix)
+                self._ignore_cleanup_errors = ignore_cleanup_errors
+
+            def __enter__(self) -> str:
+                return self._directory.name
+
+            def __exit__(self, *_args) -> bool:
+                self._directory.cleanup()
+                if not self._ignore_cleanup_errors:
+                    raise OSError("profile is busy")
+                return False
+
+        def _timed_out_driver(**_kwargs) -> None:
+            raise FetchError("initial timeout")
+
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")), \
+             mock.patch.object(uc, "_load_seleniumbase",
+                               return_value=_timed_out_driver), \
+             mock.patch.object(uc.tempfile, "TemporaryDirectory", _BusyProfile):
+            with self.assertRaisesRegex(FetchError, "initial timeout"):
+                uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
+
+
 class UcFetcherContractTest(unittest.TestCase):
     def test_method_name(self) -> None:
         self.assertEqual(uc.UcFetcher.method_name, "uc")
