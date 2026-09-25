@@ -274,8 +274,8 @@ lead). Les tests cites sont des tests qui mordent, pas des tests de presence.
 - Depend de : rien. Tranche D1, D2, D4, D5, D6.
 - Contenu : `mcp>=2.2,<3` dans pyproject + `uv lock` ; `interfaces/mcp/` avec
   `build_mcp_server` et un seul tool de sonde `whoami` (retourne `role`, jamais
-  `owner_id` : le `/me` WebUI serialise `owner_id`, le MCP ne reproduit pas cet
-  ecart) ; montage + lifespan + settings ; `TOOLS += "mcp"` dans
+  `owner_id`, meme contrat que le `/me` WebUI, qui ne rend lui aussi que `role`
+  depuis la carte e4b04cfe : l'ecart est ferme) ; montage + lifespan + settings ; `TOOLS += "mcp"` dans
   `test_import_contract.py` ; Dockerfile ENV.
 - Acceptation :
   - `uv lock` resout sans retrograder `fastapi`/`starlette` (mesure a rapporter).

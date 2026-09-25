@@ -108,7 +108,7 @@ class LoginTest(_WebAuthTestBase):
 
         me = self.client.get("/me")
         self.assertEqual(me.status_code, 200)
-        self.assertEqual(me.json(), {"owner_id": "o1", "role": "user"})
+        self.assertEqual(me.json(), {"role": "user"})
 
     def test_three_failure_branches_return_identical_401(self) -> None:
         self._add_owner("o1", "alice", "s3cret")
@@ -165,7 +165,30 @@ class AdminRouteTest(_WebAuthTestBase):
         self._login("root", "s3cret")
         resp = self.client.get("/admin/whoami")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"owner_id": "o1", "role": "admin"})
+        self.assertEqual(resp.json(), {"role": "admin"})
+
+
+class OwnerIdNeverSerializedTest(_WebAuthTestBase):
+    """Invariant 10: owner_id is derived from the authenticated Principal and
+    never serialized to the client, not even the caller's own."""
+
+    _OWNER_ID = "owner-7f3a9c"
+
+    def _assert_no_owner_identity(self, resp, expected_role: str) -> None:
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"role": expected_role})
+        self.assertNotIn(self._OWNER_ID, resp.text)
+
+    def test_me_response_carries_the_role_but_no_owner_identity(self) -> None:
+        self._add_owner(self._OWNER_ID, "alice", "s3cret")
+        self._login("alice", "s3cret")
+        self._assert_no_owner_identity(self.client.get("/me"), "user")
+
+    def test_admin_whoami_response_carries_no_owner_identity(self) -> None:
+        self._add_owner(self._OWNER_ID, "root", "s3cret", role="admin")
+        self._login("root", "s3cret")
+        self._assert_no_owner_identity(
+            self.client.get("/admin/whoami"), "admin")
 
 
 class LogoutTest(_WebAuthTestBase):

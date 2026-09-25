@@ -31,7 +31,7 @@ _NEXT_CUT = "06:00"
 
 @router.get("/whoami")
 def whoami(principal: Principal = Depends(require_admin)) -> dict[str, str]:
-    return {"owner_id": principal.owner_id, "role": principal.role}
+    return {"role": principal.role}
 
 
 def _render_admin(
