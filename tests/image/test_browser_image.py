@@ -224,7 +224,7 @@ class _BusyAfterNavigationPage:
         return response
 
 
-class BrowserFinalDocumentImageTest(unittest.TestCase):
+class _BrowserImageTestCase(unittest.TestCase):
     def setUp(self) -> None:
         if _HAS_PATCHRIGHT and _HAS_POSIX_SHELL:
             return
@@ -237,7 +237,7 @@ class BrowserFinalDocumentImageTest(unittest.TestCase):
             "just patchright")
 
     def _fetch(self, path: str, handler, *, page_wrapper=None,
-               fetch_timeout_seconds: float = 10.0):
+               fetch_timeout_seconds: float = 10.0, gate=None):
         from patchright.sync_api import BrowserType
 
         original_launch = BrowserType.launch
@@ -251,9 +251,12 @@ class BrowserFinalDocumentImageTest(unittest.TestCase):
                                return_value=_addrinfo("104.18.0.1")), \
              mock.patch.object(browser, "_load_stealth", return_value=_NoopStealth):
             return browser.BrowserFetcher(
-                _NEUTRAL_POLICY, fetch_timeout_seconds=fetch_timeout_seconds
+                _NEUTRAL_POLICY, fetch_timeout_seconds=fetch_timeout_seconds,
+                gate=gate
             ).fetch(f"https://example.com/{path}")
 
+
+class BrowserFinalDocumentImageTest(_BrowserImageTestCase):
     def test_script_navigation_to_chromium_error_document_is_refused(self) -> None:
         def _route(route) -> None:
             if route.request.url == "https://example.com/start":
@@ -323,6 +326,71 @@ class BrowserFinalDocumentImageTest(unittest.TestCase):
         result = self._fetch("status", _route)
         self.assertEqual(result.status, 404)
         self.assertIn("gone", result.html)
+
+
+class _CrashAfterNavigationPage:
+    def __init__(self, page) -> None:  # noqa: ANN001
+        self._page = page
+
+    def __getattr__(self, name):  # noqa: ANN204
+        return getattr(self._page, name)
+
+    def goto(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        import signal
+        import threading
+
+        import psutil
+
+        response = self._page.goto(*args, **kwargs)
+        renderer_pid = next(
+            process.pid
+            for process in psutil.Process().children(recursive=True)
+            if "--type=renderer" in " ".join(process.cmdline()))
+
+        def _crash_renderer() -> None:
+            try:
+                os.kill(renderer_pid, signal.SIGSEGV)
+            except ProcessLookupError:
+                pass
+
+        threading.Timer(0.005, _crash_renderer).start()
+        return response
+
+
+class BrowserRendererCrashImageTest(_BrowserImageTestCase):
+    def test_crash_after_navigation_fails_read_releases_gate_and_recovers(self) -> None:
+        def _route(route) -> None:
+            route.fulfill(
+                status=200, content_type="text/html",
+                body="<html><body>" + "x" * (4 * 1024 * 1024) +
+                     "</body></html>")
+
+        import psutil
+
+        gate = BrowserGate(max_concurrent=1)
+        before = {p.pid for p in psutil.Process().children(recursive=True)}
+        t0 = time.monotonic()
+        with mock.patch.object(browser, "NAV_TIMEOUT_MS", 5_000):
+            with self.assertRaisesRegex(
+                    FetchError, r"renderer crashed during document read"):
+                self._fetch(
+                    "crash", _route,
+                    page_wrapper=_CrashAfterNavigationPage,
+                    fetch_timeout_seconds=8.0,
+                    gate=gate)
+        elapsed = time.monotonic() - t0
+        self.assertLess(
+            elapsed, 6.0,
+            f"renderer crash took {elapsed:.1f}s instead of failing during the read")
+
+        time.sleep(1.0)
+        leftover = [
+            process for process in psutil.Process().children(recursive=True)
+            if process.pid not in before and process.is_running()]
+        self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
+
+        result = self._fetch("recovered", _route, gate=gate)
+        self.assertEqual(result.status, 200)
 
 
 if __name__ == "__main__":
