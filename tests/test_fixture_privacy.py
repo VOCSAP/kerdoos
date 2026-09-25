@@ -1,9 +1,6 @@
 """Convention: no fixture under tests/fixtures/ may carry an identifying
 value (client IP, cookie, tracker id, location, JWT, personal email). The
-repo is public; two prior reviews each caught one forgotten value by hand
-(traceparent, userLocation) before this scan existed, and a third pass (this
-scan's own first run) caught an unscrubbed visitor CEP a security-auditor
-gate then found the scan itself missed lat/lon and HTML/JSON-escaped forms.
+repo is public.
 
 Exceptions are per (file, key) only, never global, so a legitimate public
 value in one fixture cannot blanket-whitelist the same key elsewhere.
@@ -48,9 +45,11 @@ ASSET_EXTENSIONS = ("webp", "png", "jpg", "jpeg", "gif", "svg", "ico",
 
 # device/session identifier keys that must never carry a non-placeholder
 # value in a committed fixture.
-IDENTIFIER_KEYS = ("_d2id", "deviceId", "device_id", "session-id", "sessionId")
+IDENTIFIER_KEYS = ("_d2id", "deviceId", "device_id", "session-id", "sessionId",
+                    "session_id", "x-request-id", "requestId", "correlation_id",
+                    "c_uid", "csrfToken")
 
-LATLON_KEYS = ("latitude", "longitude", "lat", "lng")
+LATLON_KEYS = ("latitude", "longitude", "lat", "lng", "lon", "long")
 
 # (filename, key) -> the one value that key is allowed to carry in that
 # file. Never applies to the same key in a different file.
@@ -189,7 +188,7 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
 
     for key_name in IDENTIFIER_KEYS:
         pattern = rf'"{re.escape(key_name)}"\s*:\s*"([^"]*)"'
-        for m in re.finditer(pattern, text):
+        for m in re.finditer(pattern, text, re.I):
             value = m.group(1)
             # these ids are shipped in this corpus as UUID-shaped values
             # with only the fixed version/variant hex nibbles left non-zero
@@ -351,6 +350,20 @@ class FixturePrivacyTest(unittest.TestCase):
             ("html-entity-escaped zipcode", '&quot;zipcode&quot;:&quot;01311000&quot;'),
             ("JSON-escaped remoteAddress", '{\\"remoteAddress\\":\\"177.10.20.30\\"}'),
             ("URL-encoded cep query", 'href="/menu?cep%3D01311000"'),
+            ("mixed-case ZipCode", '{"ZipCode":"01311000"}'),
+            ("uppercase CEP", 'href="/menu?CEP=01311000"'),
+            ("mixed-case Latitude", '{"Latitude":-23.6821604}'),
+            ("3-decimal latitude", '{"latitude":-23.682}'),
+            ("lon", '{"lon":-46.875494}'),
+            ("long", '{"long":-46.875494}'),
+            ("2nd x-forwarded-for header carries the real IP", '{"h1":{"x-forwarded-for":"10.0.0.1"}},{"h2":{"x-forwarded-for":"177.10.20.30"}}'),
+            ("session_id", '{"session_id":"a1b2c3d4e5f6"}'),
+            ("x-request-id", '{"x-request-id":"a1b2c3d4e5f6"}'),
+            ("requestId", '{"requestId":"a1b2c3d4e5f6"}'),
+            ("correlation_id", '{"correlation_id":"a1b2c3d4e5f6"}'),
+            ("c_uid", '{"c_uid":"a1b2c3d4e5f6"}'),
+            ("csrfToken", '{"csrfToken":"a1b2c3d4e5f6"}'),
+            ("mixed-case SessionId", '{"SESSION_ID":"a1b2c3d4e5f6"}'),
         ]
         for label, snippet in witnesses:
             with self.subTest(motif=label):
@@ -363,6 +376,12 @@ class FixturePrivacyTest(unittest.TestCase):
                     "html-entity-escaped zipcode": "zipcode",
                     "JSON-escaped remoteAddress": "remoteAddress",
                     "URL-encoded cep query": "zipcode",
+                    "mixed-case ZipCode": "zipcode",
+                    "uppercase CEP": "zipcode",
+                    "mixed-case Latitude": "latitude",
+                    "3-decimal latitude": "latitude",
+                    "2nd x-forwarded-for header carries the real IP": "x-forwarded-for",
+                    "mixed-case SessionId": "session_id",
                 }.get(label, label)
                 self.assertIn(
                     expected_key, keys,
