@@ -137,11 +137,11 @@ ci-dessus.
 
 **A ne pas confondre avec le compteur `skipped_jobs`.**
 `EvaluationSummary.skipped_jobs` compte les jobs non notifies pendant un tick,
-pas des lignes `job_runs`. Cinq chemins l'incrementent
-(`core/evaluator.py:330, 353, 364, 373, 428`) : un envoi deja en cours pour ce
-job, rien a envoyer, refus pour capacite, fenetre deja enregistree, owner sans
-e-mail. Seul le dernier ecrit un statut (`skipped_no_email`) ; les deuxieme et
-troisieme n'ecrivent aucune ligne.
+pas des lignes `job_runs`. Cinq branches de `_run_plan_b` (`core/evaluator.py`)
+l'incrementent : un envoi deja en cours pour ce job, rien a envoyer, refus pour
+capacite, fenetre deja enregistree, owner sans e-mail. Seul le dernier ecrit un
+statut (`skipped_no_email`) ; les deuxieme et troisieme ne consomment pas la
+fenetre (retentes au tick suivant).
 
 ### Notes structurelles
 - **Piege #11162 EVITE** : les contraintes `UNIQUE` sont **inline dans le `CREATE
