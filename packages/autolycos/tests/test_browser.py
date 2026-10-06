@@ -62,15 +62,19 @@ def _marked_process_before_fetch(spawned: list):
     Spawning it from the fake's own launch/new_page instead races fetch()'s
     0.2-0.3s deadline: the worker thread can reach Popen only after the
     deadline already fired and the kill sweep found nothing, which a loaded
-    Windows host does routinely (card 5dd92731: worker Popen measured
-    0.40-0.95s after fetch() started).
+    Windows host does routinely (card 5dd92731).
+
+    Only the FIRST uuid4() draw is pinned: a second draw (say, a kill
+    targeting a freshly drawn marker instead of the one passed to Chromium)
+    gets a different id and misses the spawned process.
     """
     launch_id = uuid.uuid4()
     marker = f"{browser._LAUNCH_ID_ARG_PREFIX}{launch_id.hex}"
     spawned.append(subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)", marker]))
-    with mock.patch.object(browser, "uuid",
-                           types.SimpleNamespace(uuid4=lambda: launch_id)):
+    draws = iter([launch_id])
+    with mock.patch.object(browser, "uuid", types.SimpleNamespace(
+            uuid4=lambda: next(draws, None) or uuid.uuid4())):
         yield marker
 
 
@@ -750,6 +754,7 @@ class BrowserFetchDeferredCleanupTest(unittest.TestCase):
 
         def _launch_prev(**kwargs):  # noqa: ANN003
             chromium_prev.launch_kwargs = kwargs
+            assert _marker_from_kwargs(kwargs) == prev_spawned[0].args[-1]
             return _HangingThenUnblockedBrowser(unblock_event)
 
         chromium_prev.launch = _launch_prev
@@ -835,11 +840,12 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
         with browser._abandoned_fetch_threads_lock:
             browser._abandoned_fetch_thread_count = self._saved_abandoned_count
 
-    def _hanging_chromium(self) -> _FakeChromium:
+    def _hanging_chromium(self, spawned: list) -> _FakeChromium:
         chromium = _FakeChromium(browser_obj=None)
 
         def _launch(**kwargs):  # noqa: ANN003
             chromium.launch_kwargs = kwargs
+            assert _marker_from_kwargs(kwargs) == spawned[-1].args[-1]
             return _NeverReturningBrowser()
 
         chromium.launch = _launch  # noqa: SLF001 -- test-only override
@@ -847,7 +853,7 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
 
     def _fetch_with_frozen_step(self, gate, spawned: list,
                                  fetch_timeout_seconds: float = 0.3):
-        chromium = self._hanging_chromium()
+        chromium = self._hanging_chromium(spawned)
         fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
         raised = None
         with mock.patch.object(safety.socket, "getaddrinfo",
