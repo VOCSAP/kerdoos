@@ -30,6 +30,7 @@ from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import Principal
 from kerdoos.registry.auth_store import Argon2Hasher, SqliteAuthStore
 from kerdoos.registry.errors import ConfigError
+from kerdoos.registry import sqlite_store as config_sqlite_store
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 
@@ -750,7 +751,7 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(row["name"], "old")
             self.assertEqual(row["role"], "admin")
             version = insp.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(version, 4)
+            self.assertEqual(version, config_sqlite_store._SCHEMA_VERSION)
         finally:
             insp.close()
 
