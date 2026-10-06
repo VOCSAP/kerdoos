@@ -23,6 +23,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from autolycos.adapters import uc
 from autolycos.browser_gate import BrowserGate
 from autolycos.errors import FetchError
@@ -341,6 +343,10 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
             if foreign.poll() is None:
                 foreign.kill()
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=("accepted leak, card fcd99c55: a late UC launch can leave its "
+                "recreated autolycos-uc-* profile in /tmp; no sweep removes it"))
     def test_next_fetch_removes_profile_recreated_by_late_launch(self) -> None:
         import psutil
         from autolycos.adapters.uc import _find_patchright_chromium
@@ -827,9 +833,10 @@ class UcWebRtcEgressImageTest(unittest.TestCase):
         self.assertIn("webrtc-tcp-allocation-ready", resolver_relaxed.html)
         time.sleep(0.5)
         self.assertEqual(capture.events(), [], "WebRTC emitted direct UDP")
-        self.assertTrue(
-            tcp_capture.events(),
-            "UC with literal-IP resolution enabled missed TCP canary",
+        self.assertEqual(
+            set(tcp_capture.events()),
+            {("127.0.0.1", 3484), (local_ip, 3484)},
+            "UC with literal-IP resolution enabled missed a TCP canary",
         )
         capture.clear()
         tcp_capture.clear()

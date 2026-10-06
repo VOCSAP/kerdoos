@@ -219,7 +219,10 @@ class UcProfileCleanupTest(unittest.TestCase):
             with self.assertRaisesRegex(FetchError, "initial timeout"):
                 uc.UcFetcher(_POLICY).fetch(_MAGALU_URL)
 
-    @pytest.mark.xfail(strict=True, reason="pending operator-applied sweep")
+    @pytest.mark.xfail(
+        strict=True,
+        reason=("accepted leak, card fcd99c55: a late UC launch can leave its "
+                "recreated autolycos-uc-* profile in /tmp; no sweep removes it"))
     def test_next_fetch_removes_orphaned_profile(self) -> None:
         with tempfile.TemporaryDirectory(prefix="autolycos-uc-") as directory:
             orphan = Path(directory)

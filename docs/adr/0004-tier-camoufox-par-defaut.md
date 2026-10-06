@@ -358,10 +358,12 @@ environ 1,26 Go mesure.
   fetch. Avec ce profil mais sans `MAP * ~NOTFOUND`, le banc TURN/TCP atteint le
   canari ; avec la resolution deny-by-default active, aucun accept TCP direct n'est
   constate.
-- Un timeout reel de lancement UC, apres qu'un Chrome a demarre avec ce profil, ne
-  laisse aucun nouveau repertoire `autolycos-uc-*` apres son balayage differe. Le
-  multicast mDNS d'un candidat `.local` reste un residuel LOW : les canaris TURN ne
-  l'observent pas.
+- Residuel accepte par decision operateur : apres un timeout de lancement UC, un
+  Chrome qui demarre en retard peut recreer son repertoire `autolycos-uc-*` dans
+  `/tmp`, et rien ne le supprime. Ce profil ne porte ni navigation ni session
+  WebRTC, et le tier `uc` est deprecie. Le test image correspondant est marque
+  `xfail` strict. Le multicast mDNS d'un candidat `.local` reste un residuel LOW :
+  les canaris TURN ne l'observent pas.
 
 ### C2 -- Preferences Firefox imposees
 Une liste **explicite et figee** de preferences, fusionnee **par-dessus** toute
