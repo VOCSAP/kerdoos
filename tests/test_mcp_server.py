@@ -459,6 +459,42 @@ class HostAllowlistTest(_McpTestBase):
         self.assertEqual(response.status_code, 421)
 
 
+class ClientHostNeverReflectedWithMcpTest(_McpTestBase):
+    """Card 44561856 with MCP mounted: a client-controlled Host header must
+    never come back in a Location header, inside the SDK sub-app included."""
+
+    def test_forged_host_never_reaches_a_location_header(self) -> None:
+        for path in (f"{_METADATA_PATH}/", "/mcp/", "/mcp", "/static/"):
+            for method in ("GET", "POST"):
+                with self.subTest(method=method, path=path):
+                    response = self.client.request(
+                        method, path, headers={"Host": "evil.example"},
+                        follow_redirects=False)
+                    self.assertNotIn(
+                        "evil.example", response.headers.get("location", ""))
+
+    def test_no_router_redirects_trailing_slashes(self) -> None:
+        from starlette.routing import Mount
+
+        app = self.client.app
+        self.assertFalse(app.router.redirect_slashes)
+        inspected = 0
+        for route in app.routes:
+            router = getattr(getattr(route, "app", None), "router", None)
+            if isinstance(route, Mount) and router is not None:
+                inspected += 1
+                with self.subTest(mount=route.path):
+                    self.assertFalse(router.redirect_slashes)
+        self.assertGreaterEqual(inspected, 1, "no mounted router was inspected")
+
+    def test_resource_paths_still_answer_without_redirect(self) -> None:
+        for path in ("/mcp", "/mcp/"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self._post(_initialize(), path=path).status_code, 401)
+        self.assertEqual(self.client.get(_METADATA_PATH).status_code, 200)
+
+
 class PublicUrlWithPathTest(_McpTestBase):
     extra_env = {
         "KERDOOS_PUBLIC_URL": "http://testserver/kerdoos",

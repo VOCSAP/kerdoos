@@ -175,7 +175,9 @@ def create_app() -> FastAPI:
             "KERDOOS_LOGIN_RATE_LIMIT_MAX_ATTEMPTS=0: the /login brute-force "
             "rate limit is DISABLED for this deployment.")
 
-    app = FastAPI(title="Kerdoos", lifespan=_lifespan)
+    # Starlette's slash redirect is the only absolute URL the app would emit,
+    # and it is built from the client's Host header (card 44561856).
+    app = FastAPI(title="Kerdoos", lifespan=_lifespan, redirect_slashes=False)
     app.state.auth_service = auth_service
     app.state.app_service = app_service
     app.state.run_queue = run_queue
