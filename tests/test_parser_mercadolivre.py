@@ -52,12 +52,19 @@ class MercadoLivreRealDumpTest(unittest.TestCase):
         self.assertEqual(extract.currency, "BRL")
 
     def test_installment_price_is_never_read(self) -> None:
-        # The 10x de R$ 943,30 per-installment amount (94330) must not leak into
-        # any slot -- it has no <meta itemprop="price">, the parser anchors on
-        # the product meta only.
-        extract = _parser().extract(self.html)
-        self.assertNotEqual(extract.price_pix_cents, 94330)
-        self.assertNotEqual(extract.price_card_cents, 94330)
+        # The installment sits under its own id="price" meta, where the meta
+        # repli would read it; the JSON-LD Product must win over it.
+        html = (
+            '<link rel="canonical" href="https://www.mercadolivre.com.br/p/MLB1">'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"price":9433,'
+            '"priceCurrency":"BRL","availability":'
+            '"https://schema.org/InStock"}}</script>'
+            '<div id="price"><meta itemprop="price" content="943.30">'
+            '<span data-testid="price-part">10x de R$ 943,30</span></div>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.price_pix_cents, 943300)
+        self.assertEqual(extract.price_card_cents, 943300)
 
     def test_availability_in_stock(self) -> None:
         self.assertEqual(_parser().extract(self.html).availability,
