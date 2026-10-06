@@ -309,14 +309,12 @@ Points de conception :
 - **`load(owner)` compose** le catalogue global `sites` avec les `products`/`sources`
   du tenant -> `Registry`. Un tenant voit tous les sites du catalogue (config de
   fetch, non sensible) mais n'ajoute des produits que sur ces sites.
-- **`source_id` inclut l'owner** :
-  `make_source_id(owner, product_key, site, url) = f"{owner}:{product_key}:{site}:{sha256(url)[:12]}"`.
-  Sans owner, deux tenants au meme `product_key` collisionneraient sur la meme cle
-  d'historique. Seule modif de `registry/ports.py::make_source_id` (signature elargie).
-  **Contrat gate** : l'`owner` vient TOUJOURS du `Principal` resolu (section 6),
-  **jamais** d'un champ du body de la requete ; et `product_key` est **valide pour
-  rejeter le separateur `:`** (sinon un `product_key` malicieux pourrait fabriquer
-  un `source_id` collisionnant avec un autre tenant / une autre source).
+- **`source_id` n'inclut pas l'owner** (ADR 0006) :
+  `make_source_id(product_key, site, url) = f"{product_key}:{site}:{sha256(url)[:12]}"`.
+  L'unicite entre tenants est portee par la cle primaire composite
+  `(owner_id, source_id)` de `sources`. **Contrat gate** : l'`owner` vient
+  TOUJOURS du `Principal` resolu, jamais d'un champ du body ; un `source_id`
+  n'est jamais utilise sans lui ; `product_key` rejette le separateur `:`.
 - **Migration YAML -> SQLite** : `YamlConfigStore` n'est plus consomme au runtime.
   `kerdoos config import config/` seed le **catalogue sites** (global) ;
   `kerdoos config import --owner <id> config/` seed les **produits** d'un tenant.

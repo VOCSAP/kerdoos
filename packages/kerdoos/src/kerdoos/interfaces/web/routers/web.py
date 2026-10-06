@@ -96,7 +96,7 @@ def dashboard(
             })
         else:
             rows.append({
-                "record": rec, "product_name": rec.source_id,
+                "record": rec, "product_name": "Source retirée",
                 "site": "--", "url": None,
             })
 
@@ -145,15 +145,19 @@ def history(
     csrf: str = Depends(csrf_token_for),
 ) -> Response:
     owner = principal.owner_id
-    records = svc.get_history(owner, source_id, limit=50)
     registry = svc.list_config(owner)
-    product_name = source_id
-    site = None
+    product_name = site = None
     for product in registry.products:
         for source in product.sources:
             if source.source_id == source_id:
                 product_name = product.name or product.id
                 site = source.site
+    if site is None:
+        # Unknown, another owner's, and old owner-prefixed ids all get the
+        # same answer, which never echoes the path parameter (ADR 0006 D4).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    records = svc.get_history(owner, source_id, limit=50)
     ctx = _base(request, principal, csrf, "products")
     ctx.update(records=records, source_id=source_id,
                product_name=product_name, site=site)
@@ -571,7 +575,8 @@ def preview_notification(
     records = [latest[sid] for sid in job.source_ids if sid in latest]
     generated_at = datetime.now(_utc.utc).isoformat(timespec="seconds")
     view = build_digest_view(
-        job, records, generated_at, tier2_labels, source_urls, domain_policy)
+        job, records, generated_at, tier2_labels, source_urls, domain_policy,
+        registry.source_labels())
     # render_digest_html returns a self-contained email document. It is passed
     # to the template as a STRING and rendered inside a sandboxed <iframe
     # srcdoc="{{ preview_html }}"> -- autoescape escapes it into the attribute

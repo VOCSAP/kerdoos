@@ -123,6 +123,7 @@ class RunResult:
     records: list[ScrapeRecord]
     generated_at: str
     tier2_labels: dict[str, str] = field(default_factory=dict)
+    source_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +233,7 @@ class AppService:
             url, ctx=f"add_source(owner={owner!r}, product_key={product_key!r})",
             domain_policy=self._domain_policy,
         )
-        source_id = make_source_id(owner, product_key, site, url)
+        source_id = make_source_id(product_key, site, url)
         source = ProductSource(
             source_id=source_id, product_id=product_key, site=site, url=url)
         self._config.add_source(owner, source)
@@ -471,4 +472,5 @@ class AppService:
                 )
             records.append(record)
         return RunResult(
-            records=records, generated_at=generated_at, tier2_labels=tier2_labels)
+            records=records, generated_at=generated_at, tier2_labels=tier2_labels,
+            source_labels=registry.source_labels())

@@ -367,7 +367,7 @@ class MigrationIdempotenceTest(unittest.TestCase):
                 conn.close()
             self.assertIn("digest_jobs", tables)
             self.assertIn("digest_job_sources", tables)
-            self.assertEqual(version, 4)
+            self.assertEqual(version, 5)
 
     def test_state_migration_creates_job_runs_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

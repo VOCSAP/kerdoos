@@ -87,7 +87,7 @@ class UrlValidationChokePointTest(unittest.TestCase):
         source = self.service.add_source(
             "owner1", "aw3225qf", "kabum",
             "https://www.kabum.com.br/produto/534732/aw3225qf")
-        self.assertTrue(source.source_id.startswith("owner1:aw3225qf:kabum:"))
+        self.assertTrue(source.source_id.startswith("aw3225qf:kabum:"))
 
 
 class ConfigImportExportTest(unittest.TestCase):

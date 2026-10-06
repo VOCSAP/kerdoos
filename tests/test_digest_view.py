@@ -50,7 +50,7 @@ class FlatViewModelTest(unittest.TestCase):
         record = _record()
         view = build_digest_view(
             _job(), [record], "2026-07-13T00:00:00+00:00", {},
-            {record.source_id: "https://www.kabum.com.br/p/1"}, _POLICY,
+            {record.source_id: "https://www.kabum.com.br/p/1"}, _POLICY, {},
         )
         self.assertIsInstance(view.job_name, str)
         self.assertIsInstance(view.generated_at, str)
@@ -72,7 +72,7 @@ class DigestStalenessViewTest(unittest.TestCase):
     def test_stale_record_html_carries_the_age_not_just_generated_at(self) -> None:
         stale = _record(ts="2026-06-13T00:00:00+00:00")
         view = build_digest_view(
-            _job(), [stale], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+            _job(), [stale], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY, {},
         )
         self.assertIn("(30d ago)", view.lines[0].scraped_at)
         html = render_digest_html("default", view)
@@ -86,7 +86,7 @@ class DigestStalenessViewTest(unittest.TestCase):
         record = _record(ts="2026-07-13T00:00:00+00:00")
         view = build_digest_view(
             _job(timezone="America/Sao_Paulo"), [record],
-            "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+            "2026-07-13T00:00:00+00:00", {}, {}, _POLICY, {},
         )
         self.assertIn("2026-07-12 21:00", view.lines[0].scraped_at)
 
@@ -96,7 +96,7 @@ class HrefSsrfGuardTest(unittest.TestCase):
         record = _record()
         view = build_digest_view(
             _job(), [record], "2026-07-13T00:00:00+00:00", {},
-            {record.source_id: "https://evil.example.com/phish"}, _POLICY,
+            {record.source_id: "https://evil.example.com/phish"}, _POLICY, {},
         )
         self.assertEqual(len(view.lines), 1)
         self.assertIsNone(view.lines[0].href)
@@ -105,7 +105,7 @@ class HrefSsrfGuardTest(unittest.TestCase):
         record = _record()
         view = build_digest_view(
             _job(), [record], "2026-07-13T00:00:00+00:00", {},
-            {record.source_id: "javascript:alert(1)"}, _POLICY,
+            {record.source_id: "javascript:alert(1)"}, _POLICY, {},
         )
         self.assertEqual(len(view.lines), 1)
         self.assertIsNone(view.lines[0].href)
@@ -113,7 +113,7 @@ class HrefSsrfGuardTest(unittest.TestCase):
     def test_missing_source_url_is_none_href(self) -> None:
         record = _record()
         view = build_digest_view(
-            _job(), [record], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+            _job(), [record], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY, {},
         )
         self.assertIsNone(view.lines[0].href)
 
@@ -122,7 +122,7 @@ class HrefSsrfGuardTest(unittest.TestCase):
         url = "https://www.kabum.com.br/produto/1/x"
         view = build_digest_view(
             _job(), [record], "2026-07-13T00:00:00+00:00", {},
-            {record.source_id: url}, _POLICY,
+            {record.source_id: url}, _POLICY, {},
         )
         self.assertEqual(view.lines[0].href, url)
 
@@ -136,19 +136,38 @@ class HrefSsrfGuardTest(unittest.TestCase):
                 bad.source_id: "https://evil.example.com/phish",
             },
             _POLICY,
+            {good.source_id: "Good -- kabum", bad.source_id: "Bad -- kabum"},
         )
         self.assertEqual(len(view.lines), 2)
         by_source = {line.source_label: line for line in view.lines}
-        self.assertIsNotNone(by_source[good.source_id].href)
-        self.assertIsNone(by_source[bad.source_id].href)
+        self.assertIsNotNone(by_source["Good -- kabum"].href)
+        self.assertIsNone(by_source["Bad -- kabum"].href)
+
+
+class SourceLabelTest(unittest.TestCase):
+    def test_line_shows_the_provided_label_never_the_source_id(self) -> None:
+        record = _record()
+        view = build_digest_view(
+            _job(), [record], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+            {record.source_id: "RTX -- kabum"},
+        )
+        self.assertEqual(view.lines[0].source_label, "RTX -- kabum")
+
+    def test_record_without_label_gets_a_neutral_label(self) -> None:
+        record = _record()
+        view = build_digest_view(
+            _job(), [record], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY, {},
+        )
+        self.assertNotIn(record.source_id, view.lines[0].source_label)
 
 
 class JinjaAutoescapeTest(unittest.TestCase):
     def test_hostile_source_label_is_html_escaped_in_render(self) -> None:
-        hostile_source_id = '<script>alert(1)</script>'
-        record = _record(source_id=hostile_source_id)
+        hostile_label = '<script>alert(1)</script>'
+        record = _record()
         view = build_digest_view(
             _job(), [record], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+            {record.source_id: hostile_label},
         )
         html = render_digest_html("default", view)
         self.assertNotIn("<script>alert(1)</script>", html)
@@ -157,7 +176,7 @@ class JinjaAutoescapeTest(unittest.TestCase):
     def test_hostile_error_field_is_html_escaped_in_render(self) -> None:
         record = _record(error='<img src=x onerror=alert(1)>')
         view = build_digest_view(
-            _job(), [record], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+            _job(), [record], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY, {},
         )
         html = render_digest_html("default", view)
         self.assertNotIn("<img src=x onerror=alert(1)>", html)
@@ -166,7 +185,7 @@ class JinjaAutoescapeTest(unittest.TestCase):
     def test_hostile_job_name_is_html_escaped_in_render(self) -> None:
         job = _job(name='<script>alert(document.cookie)</script>')
         view = build_digest_view(
-            job, [], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY,
+            job, [], "2026-07-13T00:00:00+00:00", {}, {}, _POLICY, {},
         )
         html = render_digest_html("default", view)
         self.assertNotIn("<script>alert(document.cookie)</script>", html)

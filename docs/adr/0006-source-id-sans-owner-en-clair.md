@@ -81,24 +81,17 @@ anterieure garderait l'ancienne cle primaire, et chaque `add_source`
 echouerait avec `ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
 constraint`.
 
-Regle, appliquee dans `SqliteConfigStore._migrate` :
+Regle, appliquee a l'ouverture de `SqliteConfigStore`, avant toute instruction
+de schema : des que l'ancien schema est detecte par sa forme (`PRAGMA
+table_info(sources)` : `source_id` seul en cle primaire), l'ouverture leve une
+`ConfigError` nommee qui demande de recreer config.db puis de relancer
+`kerdoos config import`. Rien n'est supprime, renomme ni cree.
 
-1. Detecter l'ancien schema par sa forme (`PRAGMA table_info(sources)` :
-   `source_id` seul en cle primaire).
-2. Si `sources` et `digest_job_sources` sont **vides** : les supprimer et les
-   recreer au nouveau schema, dans une transaction. Les tables `owners`,
-   `sites`, `products`, `digest_jobs`, `sessions` et `tokens` sont conservees.
-3. Si l'une contient des lignes : lever une `ConfigError` nommee qui indique
-   la marche a suivre. Rien n'est supprime.
-
-Options ecartees :
-
-- **Recreation inconditionnelle.** Elle detruirait des sources sans
-  avertissement si l'hypothese « aucune donnee » etait fausse sur une base.
-- **Refus inconditionnel.** `config export` ouvre lui aussi config.db, donc un
-  refus bloquerait l'export ; et le YAML ne contient ni les owners, ni les
-  jobs, ni les jetons, qu'il faudrait recreer a la main alors que la base est
-  vide de sources.
+Refus inconditionnel retenu (arbitrage team-lead) : les seules bases a
+l'ancien schema sont des bases de developpement sans source, ou un `config
+export` bloque ne perd rien. La recreation des tables vides est ecartee : elle
+exige du code de suppression de table pour un cas qui n'existe pas en
+production.
 
 `_SCHEMA_VERSION` de config.db passe a 5. Celui de state.db ne bouge pas.
 
@@ -177,9 +170,8 @@ Tests obligatoires :
    `owner_id`.
 6. **404.** `/history/{sid inconnu}` et `/history/{ancien format}` renvoient
    404, corps sans le parametre de chemin.
-7. **D3.** Base a l'ancien schema et vide : recreee, owners conserves, deux
-   owners peuvent ajouter la meme source. Base a l'ancien schema avec une
-   source : `ConfigError` nommee, ligne toujours presente.
+7. **D3.** Base a l'ancien schema : `ConfigError` nommee, base intacte (table
+   et lignes inchangees).
 8. **Idempotence de l'import.** Deux `config import` successifs ne levent pas
    et ne dupliquent rien.
 
