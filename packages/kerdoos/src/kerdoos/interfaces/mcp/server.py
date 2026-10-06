@@ -136,4 +136,7 @@ def build_mcp_server(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts),
     )
+    # The SDK sub-app keeps Starlette's slash redirect, whose absolute
+    # Location is built from the client's Host header (card 44561856).
+    app.router.redirect_slashes = False
     return McpMount(server=mcp, app=app, discovery_routes=discovery_routes)
