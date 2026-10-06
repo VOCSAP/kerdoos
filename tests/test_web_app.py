@@ -61,6 +61,24 @@ class HealthTest(unittest.TestCase):
         self.assertEqual(router.select("browser")._launch_timeout_seconds, 19.0)
 
 
+class ClientHostNeverReflectedTest(unittest.TestCase):
+    """Card 44561856: a client-controlled Host header must never come back in
+    a Location header (open redirect, cache poisoning)."""
+
+    setUp = HealthTest.setUp
+
+    def test_forged_host_never_reaches_a_location_header(self) -> None:
+        client = TestClient(create_app())
+        for path in ("/login/", "/products/", "/health/", "/notifications/"):
+            for method in ("GET", "POST"):
+                with self.subTest(method=method, path=path):
+                    resp = client.request(
+                        method, path, headers={"Host": "evil.example"},
+                        follow_redirects=False)
+                    self.assertNotIn(
+                        "evil.example", resp.headers.get("location", ""))
+
+
 class DigestEvaluatorLifespanTest(unittest.TestCase):
     """ADR 0003 Decision 4/8: the intra-process evaluator lifespan task is
     opt-in (KERDOOS_DIGEST_EVALUATOR_ENABLED, default off) and refuses to
