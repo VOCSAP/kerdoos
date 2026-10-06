@@ -58,7 +58,7 @@ Tout ce qui suit est mesure sur `main` = fa23df8.
 | `run_now` | Non bloquant : `POST /run` fait `await queue.enqueue(owner_id)` ; la boucle consommatrice appelle `AppService.run_now` avec le `StaticRouter` unique | `routers/web.py:125-135` ; `core/run_queue.py` |
 | Stores config/etat | Per-op (FD3 de l'ADR 0001 section 5.1 est realise) | `app.py:4-5` |
 | Rempart role admin | `AppService.add_site` re-verifie `principal.role == "admin"` | `services.py:187-195` |
-| Validation d'URL en ecriture | `add_source` : site du catalogue, tier disponible, `validate_source_url(domain_policy)`, `make_source_id(owner, ...)` | `services.py:212-239` |
+| Validation d'URL en ecriture | `add_source` : site du catalogue, tier disponible, `validate_source_url(domain_policy)`, `make_source_id(product_key, site, url)` (ADR 0006) | `services.py:212-239` |
 | Dependance MCP | **Absente** : ni `mcp` ni `fastmcp` dans `uv.lock` ni dans le venv ; pas d'extra `[mcp]` | `packages/kerdoos/pyproject.toml:25-26` ; `uv.lock` |
 | Contrat d'imports | `TOOLS` du test statique ne contient pas `mcp` | `tests/test_import_contract.py::ImportContractTest::test_core_imports_no_third_party_tool` |
 
@@ -360,7 +360,7 @@ lead). Les tests cites sont des tests qui mordent, pas des tests de presence.
 | T1 | Serialisation de `owner_id` | view-models plats | scan des sorties |
 | T1 | Owner disabled avec token valide | `resolve_token` JOIN `state='active'` | 401 apres `state='disabled'` |
 | T2 | SSRF par `add_source` (nouvelle porte vers la config du fetcher) | `validate_source_url(domain_policy)` + catalogue admin + `ip_is_safe` au fetch | 4 URL hostiles refusees |
-| T2 | Collision de `source_id` cross-tenant | `make_source_id(owner du Principal, ...)` + rejet de `:` | `product_key="a:b"` refuse |
+| T2 | Collision de `source_id` cross-tenant | Cle primaire composite `(owner_id, source_id)` avec l'owner du Principal (ADR 0006) + rejet de `:` | `product_key="a:b"` refuse |
 | T2 | Extension de l'allowlist par un tenant | `add_site` absent du MCP | `tools/list` ne contient pas `add_site` |
 | T3 | Contournement du pin http / `ip_is_safe` / `DomainPolicy` | le tool n'a pas de parametre URL ; il enqueue, le consommateur unique fetch | identite `run_queue` ; zero import autolycos |
 | T3 | Deni de service sur la porte browser / reputation IP | coalescing + cooldown de `RunQueue` | second `run_now` coalesce |
