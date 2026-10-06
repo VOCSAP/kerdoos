@@ -16,13 +16,14 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from fastapi.testclient import TestClient
 
 from kerdoos.config import DEFAULT_MCP_MAX_SESSIONS, get_settings
 from kerdoos.core.app.auth import AuthService
 from kerdoos.core.app.services import Principal
+from kerdoos.interfaces.mcp.server import ExactMountPathMiddleware
 from kerdoos.interfaces.web.app import create_app
 from kerdoos.registry.auth_store import Argon2Hasher, SqliteAuthStore
 from kerdoos.registry.sqlite_store import SqliteConfigStore
@@ -336,6 +337,115 @@ class BearerGateTest(_McpTestBase):
             {"resource", "authorization_servers", "bearer_methods_supported"})
         self.assertNotIn(_OWNER_ID, metadata.text)
         self.assertNotIn(_OWNER_NAME, metadata.text)
+
+
+class OwnerIdNeverReachesClientTest(_McpTestBase):
+    _TRACKED_OWNER_ID = "owner-tracked-marker-4417"
+
+    def _authorization(self) -> str:
+        self._add_owner(self._TRACKED_OWNER_ID, "carol-mcp", role="admin")
+        token = self.auth.create_token(
+            Principal(self._TRACKED_OWNER_ID, "admin")).token
+        return f"Bearer {token}"
+
+    def _exercise_every_surface(self, expected_role: str = "admin") -> list:
+        authorization = self._authorization()
+        init = self._post(_initialize(), authorization=authorization)
+        session = {"mcp-protocol-version": _PROTOCOL_VERSION}
+        if "mcp-session-id" in init.headers:
+            session["mcp-session-id"] = init.headers["mcp-session-id"]
+
+        def rpc(request_id: int, method: str, params: dict):
+            return self._post(
+                {"jsonrpc": "2.0", "id": request_id, "method": method,
+                 "params": params},
+                authorization=authorization, headers=session)
+
+        initialized = self._post(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            authorization=authorization, headers=session)
+        listed = rpc(2, "tools/list", {})
+        called = rpc(3, "tools/call", {"name": "whoami", "arguments": {}})
+        unknown = rpc(4, "tools/call", {"name": "no-such-tool", "arguments": {}})
+        pinged = rpc(5, "ping", {})
+        closed = self.client.delete(
+            "/mcp", headers={"Authorization": authorization, **session},
+            follow_redirects=False)
+        anonymous = self._post(_initialize())
+        metadata = self.client.get(_METADATA_PATH)
+
+        self.assertEqual(init.status_code, 200, init.text)
+        self.assertEqual(
+            _jsonrpc_payload(called)["result"]["structuredContent"],
+            {"role": expected_role}, "the tool must really run as the owner")
+        self.assertEqual(
+            {tool["name"] for tool in _jsonrpc_payload(listed)["result"]["tools"]},
+            _EXPOSED_TOOLS)
+        failure = _jsonrpc_payload(unknown)
+        self.assertTrue(
+            "error" in failure or failure["result"].get("isError"),
+            "the unknown-tool request must exercise an error path")
+        self.assertEqual(anonymous.status_code, 401)
+        self.assertEqual(metadata.status_code, 200)
+        return [init, initialized, listed, called, unknown, pinged, closed,
+                anonymous, metadata]
+
+    def _assert_owner_id_absent(self, responses: list) -> None:
+        needle = self._TRACKED_OWNER_ID.lower()
+        leaks: list[str] = []
+        for response in responses:
+            where = (f"{response.request.method} {response.request.url.path}"
+                     f" -> {response.status_code}")
+            if needle.encode() in response.content.lower():
+                leaks.append(f"body of {where}")
+            for name, value in response.headers.items():
+                if any(needle in text.lower() for text in
+                       (name, value, unquote(value))):
+                    leaks.append(f"header {name} of {where}")
+        self.assertEqual(
+            leaks, [], "owner_id reached the MCP client through: "
+            + "; ".join(leaks))
+
+    def test_owner_id_is_absent_from_every_response_body_and_header(
+        self,
+    ) -> None:
+        responses = self._exercise_every_surface()
+        self.assertGreaterEqual(len(responses), 9)
+        self._assert_owner_id_absent(responses)
+
+    def test_assertion_catches_owner_id_injected_into_a_tool_result(
+        self,
+    ) -> None:
+        leaking = Principal(self._TRACKED_OWNER_ID, self._TRACKED_OWNER_ID)
+        with mock.patch(
+                "kerdoos.interfaces.mcp.tools.current_principal",
+                return_value=leaking):
+            responses = self._exercise_every_surface(
+                expected_role=self._TRACKED_OWNER_ID)
+        with self.assertRaisesRegex(AssertionError, "body of POST /mcp"):
+            self._assert_owner_id_absent(responses)
+
+    def test_assertion_catches_owner_id_injected_into_a_header(self) -> None:
+        original = ExactMountPathMiddleware.__call__
+        secret = self._TRACKED_OWNER_ID
+
+        for header in (b"location", b"x-trace"):
+            async def leaking_call(middleware, scope, receive, send):
+                async def leaking_send(message):
+                    if message["type"] == "http.response.start":
+                        message = dict(message, headers=[
+                            *message["headers"],
+                            (header, f"/mcp/?who={secret}".encode())])
+                    await send(message)
+                await original(middleware, scope, receive, leaking_send)
+
+            with self.subTest(header=header):
+                with mock.patch.object(
+                        ExactMountPathMiddleware, "__call__", leaking_call):
+                    responses = self._exercise_every_surface()
+                with self.assertRaisesRegex(
+                        AssertionError, f"header {header.decode()} of"):
+                    self._assert_owner_id_absent(responses)
 
 
 class HostAllowlistTest(_McpTestBase):
