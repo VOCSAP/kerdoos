@@ -130,14 +130,10 @@ donc **pas** la fenetre, retentee au tick suivant : un job qui n'a rien a envoye
 threads d'envoi orphelins atteint). Toute ligne ecrite consomme sa fenetre (cle
 primaire). La colonne est un `TEXT` sans contrainte `CHECK`.
 
-**Valeur `skipped` (nue).** Le commentaire de `JobRun.status`
-(`persistence/ports.py:66-70`) et la docstring de `update_job_run`
-(`persistence/ports.py:127`) citent une sixieme valeur, `skipped`. Elle a ete
-declaree en Phase 6a, avant que la Phase 6b ne fixe l'enumeration, et **aucun
-code ne l'ecrit** : les seules ecritures de statut sont `queued`, `running`,
-`error`, `sent` et `skipped_no_email` (`core/evaluator.py:370-427`) et le `error`
-du reaper (`persistence/sqlite_store.py:346`). `skipped` n'est donc pas un etat
-terminal a traiter : l'enumeration reelle compte les cinq valeurs ci-dessus.
+**Valeur `skipped` (nue).** Une sixieme valeur, `skipped`, a ete declaree en
+Phase 6a, avant que la Phase 6b ne fixe l'enumeration ; aucun code ne l'a jamais
+ecrite. L'enumeration du code (`JobRun.status`) est alignee sur les cinq valeurs
+ci-dessus.
 
 **A ne pas confondre avec le compteur `skipped_jobs`.**
 `EvaluationSummary.skipped_jobs` compte les jobs non notifies pendant un tick,
