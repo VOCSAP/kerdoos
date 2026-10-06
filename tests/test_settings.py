@@ -917,6 +917,18 @@ class UcLaunchTimeoutOrderingWarningTest(_SettingsTestBase):
                 "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=120.0" in message
                 for message in cm.output), cm.output)
 
+    def test_launch_timeout_at_acquire_timeout_does_not_blame_sweep_delay(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.uc_orphan_sweep_delay_seconds, 0.1)
+        self.assertEqual(len(cm.output), 1, cm.output)
+        self.assertIn("KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS=120.0 is at or past",
+                      cm.output[0])
+
     def test_same_out_of_order_value_warns_once_across_multiple_calls(
         self,
     ) -> None:

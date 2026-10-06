@@ -406,6 +406,8 @@ def _safe_uc_orphan_sweep_delay(
     if uc_launch_timeout + sweep_delay < acquire_timeout:
         return sweep_delay
     clamped = max(0.1, (acquire_timeout - uc_launch_timeout) / 2.0)
+    if uc_launch_timeout >= acquire_timeout:
+        return clamped
     logger.warning(
         "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS=%r combined with "
         "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS=%s would hold the browser gate "
