@@ -360,7 +360,7 @@ lead). Les tests cites sont des tests qui mordent, pas des tests de presence.
 | T1 | Serialisation de `owner_id` | view-models plats | scan des sorties |
 | T1 | Owner disabled avec token valide | `resolve_token` JOIN `state='active'` | 401 apres `state='disabled'` |
 | T2 | SSRF par `add_source` (nouvelle porte vers la config du fetcher) | `validate_source_url(domain_policy)` + catalogue admin + `ip_is_safe` au fetch | 4 URL hostiles refusees |
-| T2 | Collision de `source_id` cross-tenant | Cle primaire composite `(owner_id, source_id)` avec l'owner du Principal (ADR 0006) + rejet de `:` | `product_key="a:b"` refuse |
+| T2 | Collision de `source_id` cross-tenant | Cle primaire composite `(owner_id, source_id)` avec l'owner du Principal (ADR 0006). Le rejet de `:` dans `product_key` garantit en plus un format de `source_id` non ambigu | `product_key="a:b"` refuse |
 | T2 | Extension de l'allowlist par un tenant | `add_site` absent du MCP | `tools/list` ne contient pas `add_site` |
 | T3 | Contournement du pin http / `ip_is_safe` / `DomainPolicy` | le tool n'a pas de parametre URL ; il enqueue, le consommateur unique fetch | identite `run_queue` ; zero import autolycos |
 | T3 | Deni de service sur la porte browser / reputation IP | coalescing + cooldown de `RunQueue` | second `run_now` coalesce |

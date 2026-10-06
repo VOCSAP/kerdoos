@@ -51,6 +51,12 @@ class Pre0006ConfigDbTest(unittest.TestCase):
 
             self.assertEqual(_snapshot(path), before)
 
+    def test_schema_5_database_reopens_without_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.db"
+            SqliteConfigStore(path).close()
+            SqliteConfigStore(path).close()
+
 
 if __name__ == "__main__":
     unittest.main()

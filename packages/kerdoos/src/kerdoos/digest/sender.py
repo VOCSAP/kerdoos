@@ -17,13 +17,16 @@ from collections.abc import Mapping
 
 from kerdoos.digest.render import render_digest
 from kerdoos.persistence.ports import ScrapeRecord
-from kerdoos.registry.ports import DigestJob
+from kerdoos.registry.ports import ConfigStore, DigestJob
 
 logger = logging.getLogger(__name__)
 
 
 class LogDigestSender:
     """Renders the digest body and logs it at INFO instead of sending email."""
+
+    def __init__(self, config_store: ConfigStore) -> None:
+        self._config = config_store
 
     def send(
         self,
@@ -32,7 +35,8 @@ class LogDigestSender:
         generated_at: str,
         tier2_labels: Mapping[str, str],
     ) -> bool:
-        body = render_digest(records, generated_at, tier2_labels)
+        source_labels = self._config.load(job.owner_id).source_labels()
+        body = render_digest(records, generated_at, tier2_labels, source_labels)
         logger.info(
             "digest for job=%s (%s) owner=%s:\n%s",
             job.id, job.name, job.owner_id, body,
