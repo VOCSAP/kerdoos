@@ -1,9 +1,9 @@
 """PichauParser: dual-price extraction from the RSC flight, JSON-LD trap avoided.
 
-The fixture `pichau_cv700b.html` is the captured curl_cffi SSR document, so the
-scoping is stressed against the real escaped-JSON flight: the pichau_prices
-object with avista/base_price/final_price, plus a JSON-LD Offer whose price is
-the CARD price. Effective prices are volatile (invariant #4); these are the exact
+The fixture `pichau_cv700b.html` is the captured curl_cffi SSR document trimmed
+to the real escaped-JSON flight fragment (the pichau_prices object with
+avista/base_price/final_price, and stock_status) plus the JSON-LD Offer whose
+price is the CARD price. Effective prices are volatile (invariant #4); these are the exact
 values in this capture: pix (a-vista, PIX) 149.99 -> 14999, card (final_price)
 176.46 -> 17646, base_price (reference) 241.16 -> 24116 (never read).
 """
@@ -89,6 +89,17 @@ class PichauSyntheticTest(unittest.TestCase):
         extract = _parser().extract(html)
         self.assertEqual(extract.price_pix_cents, 14999)
         self.assertEqual(extract.availability, Availability.IN_STOCK)
+
+    def test_stock_status_at_captured_distance_is_read(self) -> None:
+        # In the captured flight stock_status starts 2664 chars after the
+        # pichau_prices anchor; the trimmed fixture is shorter, so this page
+        # is what holds _STOCK_WINDOW to the real gap.
+        prices = '"pichau_prices":{"avista":149.99,"final_price":176.46}'
+        html = (prices + " " * (2664 - len(prices) - 1)
+                + '"stock_status":"IN_STOCK"')
+        self.assertEqual(html.index("stock_status"), 2664)
+        self.assertEqual(_parser().extract(html).availability,
+                         Availability.IN_STOCK)
 
     def test_fail_closed_when_no_flight(self) -> None:
         with self.assertRaises(ParseError):

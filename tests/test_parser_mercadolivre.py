@@ -51,21 +51,6 @@ class MercadoLivreRealDumpTest(unittest.TestCase):
         self.assertIsNone(extract.price_card_member_cents)
         self.assertEqual(extract.currency, "BRL")
 
-    def test_installment_price_is_never_read(self) -> None:
-        # The installment sits under its own id="price" meta, where the meta
-        # repli would read it; the JSON-LD Product must win over it.
-        html = (
-            '<link rel="canonical" href="https://www.mercadolivre.com.br/p/MLB1">'
-            '<script type="application/ld+json">'
-            '{"@type":"Product","sku":"MLB1","offers":{"price":9433,'
-            '"priceCurrency":"BRL","availability":'
-            '"https://schema.org/InStock"}}</script>'
-            '<div id="price"><meta itemprop="price" content="943.30">'
-            '<span data-testid="price-part">10x de R$ 943,30</span></div>')
-        extract = _parser().extract(html)
-        self.assertEqual(extract.price_pix_cents, 943300)
-        self.assertEqual(extract.price_card_cents, 943300)
-
     def test_availability_in_stock(self) -> None:
         self.assertEqual(_parser().extract(self.html).availability,
                          Availability.IN_STOCK)
@@ -154,6 +139,21 @@ class MercadoLivreJsonLdTest(unittest.TestCase):
         extract = _parser().extract(html)
         self.assertEqual(extract.price_pix_cents, 199900)
         self.assertEqual(extract.availability, Availability.IN_STOCK)
+
+    def test_jsonld_price_wins_over_installment_meta(self) -> None:
+        # The installment sits under its own id="price" meta, where the meta
+        # repli would read it; the JSON-LD Product must win over it.
+        html = (
+            '<link rel="canonical" href="https://www.mercadolivre.com.br/p/MLB1">'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"price":9433,'
+            '"priceCurrency":"BRL","availability":'
+            '"https://schema.org/InStock"}}</script>'
+            '<div id="price"><meta itemprop="price" content="943.30">'
+            '<span data-testid="price-part">10x de R$ 943,30</span></div>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.price_pix_cents, 943300)
+        self.assertEqual(extract.price_card_cents, 943300)
 
     def test_jsonld_without_offers_price_raises_parse_error(self) -> None:
         # A Product node was found and is unambiguous, but its offers carry no

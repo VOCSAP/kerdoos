@@ -40,7 +40,7 @@ class AmazonFourPriceTest(unittest.TestCase):
         self.assertEqual(extract.currency, "BRL")
 
     def test_four_slots_are_distinct_and_present(self) -> None:
-        # Proof of row-id scoping against real density: the TWO duplicated
+        # Proof of row-id scoping on the real duplicated ids: the TWO duplicated
         # best-offer-string-cc nodes (regular vs member card) must resolve to
         # DIFFERENT values, and neither PIX slot may be None. If the scoping
         # collapsed, card_regular would equal card_member (or one would be None).
@@ -91,6 +91,36 @@ class AmazonSingleTierTest(unittest.TestCase):
         self.assertEqual(extract.price_card_cents, 209900)
         self.assertIsNone(extract.price_pix_member_cents)
         self.assertIsNone(extract.price_card_member_cents)
+
+
+class AmazonRowDistanceTest(unittest.TestCase):
+    """The trimmed fixture drops the markup between each row id and its
+    apex-pricetopay-value; these pages restore the captured gaps (6444 chars
+    for the member row, 5378 for the regular row) with neutral whitespace."""
+
+    _PIX_BLOCK = (
+        '<span class="a-price apex-pricetopay-value"><span aria-hidden="true">'
+        '<span class="a-price-whole">7.029<span class="a-price-decimal">,'
+        '</span></span><span class="a-price-fraction">05</span></span></span>')
+
+    def _row_page(self, row: str, gap: int) -> str:
+        head = f'<div id="{row}">'
+        filler = (gap - (len(head) - head.index(row))
+                  - self._PIX_BLOCK.index("apex-pricetopay-value"))
+        html = head + " " * filler + self._PIX_BLOCK + "</div>"
+        self.assertEqual(
+            html.index("apex-pricetopay-value") - html.index(row), gap)
+        return html
+
+    def test_member_pix_value_at_captured_row_distance(self) -> None:
+        html = self._row_page("apex_desktop_primeSavingsUpsellAccordionRow",
+                              6444)
+        self.assertEqual(_parser().extract(html).price_pix_member_cents,
+                         702905)
+
+    def test_regular_pix_value_at_captured_row_distance(self) -> None:
+        html = self._row_page("apex_desktop_newAccordionRow", 5378)
+        self.assertEqual(_parser().extract(html).price_pix_cents, 702905)
 
 
 class AmazonAvailabilityTest(unittest.TestCase):
