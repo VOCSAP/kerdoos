@@ -10,6 +10,7 @@ covered without a real browser. Real UC E2E is a blocking-before-prod fast-follo
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -20,7 +21,9 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -61,6 +64,30 @@ def _marker_from_kwargs(kwargs: dict) -> str:
     return next(
         arg for arg in kwargs["chromium_arg"]
         if arg.startswith(uc._LAUNCH_ID_ARG_PREFIX))
+
+
+@contextlib.contextmanager
+def _marked_process_before_fetch(spawned: list):
+    """Spawns, on the CALLING thread, a real process carrying the marker the
+    next launch will generate, and pins that marker for the duration.
+
+    Spawning it from the fake factory instead races the 0.3s launch
+    deadline: the launch thread can reach Popen only after the deadline
+    already fired and the kill sweep found nothing, which a loaded Windows
+    host does routinely (card 5dd92731).
+
+    Only the FIRST uuid4() draw is pinned: a second draw (say, a kill
+    targeting a freshly drawn marker instead of the one passed to Chrome)
+    gets a different id and misses the spawned process.
+    """
+    launch_id = uuid.uuid4()
+    marker = f"{uc._LAUNCH_ID_ARG_PREFIX}{launch_id.hex}"
+    spawned.append(subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", marker]))
+    draws = iter([launch_id])
+    with mock.patch.object(uc, "uuid", types.SimpleNamespace(
+            uuid4=lambda: next(draws, None) or uuid.uuid4())):
+        yield marker
 
 
 def _fake_uc_driver_binary() -> str:
@@ -515,6 +542,12 @@ class ChromiumArgSurvivesSeleniumBaseParsingTest(unittest.TestCase):
 _NEUTRAL_POLICY = DomainPolicy(frozenset({"example.com"}))
 
 
+# Far below the ~2s at which the abandoned launch thread's own late cleanup
+# runs: a process dead within this grace was killed by the synchronous
+# timeout passes, not rescued by that late backstop.
+_SYNC_KILL_GRACE_SECONDS = 0.5
+
+
 class UcLaunchDeadlineTest(unittest.TestCase):
     """Roadmap 65cef071: bounds the Chrome LAUNCH itself, not just navigation
     (UC_PAGE_LOAD_TIMEOUT_SECONDS only takes effect after the launch already
@@ -540,6 +573,17 @@ class UcLaunchDeadlineTest(unittest.TestCase):
         return _factory
 
     @staticmethod
+    def _sleeping_factory(sleep_seconds: float, spawned: list) -> object:
+        def _factory(**kwargs):  # noqa: ANN003
+            if _marker_from_kwargs(kwargs) != spawned[-1].args[-1]:
+                raise AssertionError("launch marker differs from the "
+                                     "pre-spawned process's marker")
+            time.sleep(sleep_seconds)
+            return _FakeDriver("<html></html>", **kwargs)
+
+        return _factory
+
+    @staticmethod
     def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -555,8 +599,8 @@ class UcLaunchDeadlineTest(unittest.TestCase):
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(
                 uc, "_load_seleniumbase",
-                return_value=self._hanging_factory(2.0, spawned),
-            ):
+                return_value=self._sleeping_factory(2.0, spawned),
+            ), _marked_process_before_fetch(spawned):
                 fetcher = uc.UcFetcher(
                     _POLICY, gate=gate, launch_timeout_seconds=0.3,
                     orphan_sweep_delay_seconds=0.1)
@@ -564,9 +608,9 @@ class UcLaunchDeadlineTest(unittest.TestCase):
                 with self.assertRaises(FetchError):
                     fetcher.fetch(_MAGALU_URL)
                 elapsed = time.monotonic() - t0
+        spawned[0].wait(timeout=_SYNC_KILL_GRACE_SECONDS)
         # Bounded by the deadline + sweep delay, not the factory's 2.0s hang.
         self.assertLess(elapsed, 1.5)
-        spawned[0].wait(timeout=5)
 
     def test_gate_released_after_a_timed_out_launch(self) -> None:
         gate = BrowserGate(max_concurrent=1)
@@ -575,19 +619,19 @@ class UcLaunchDeadlineTest(unittest.TestCase):
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(
                 uc, "_load_seleniumbase",
-                return_value=self._hanging_factory(2.0, spawned),
-            ):
+                return_value=self._sleeping_factory(2.0, spawned),
+            ), _marked_process_before_fetch(spawned):
                 fetcher = uc.UcFetcher(
                     _POLICY, gate=gate, launch_timeout_seconds=0.3,
                     orphan_sweep_delay_seconds=0.1)
                 with self.assertRaises(FetchError):
                     fetcher.fetch(_MAGALU_URL)
+            spawned[0].wait(timeout=_SYNC_KILL_GRACE_SECONDS)
             # A second acquire on the SAME gate must succeed promptly --
             # proves the slot was released, not held by the abandoned thread.
             acquired_promptly = gate._semaphore.acquire(timeout=1.0)
             self.assertTrue(acquired_promptly, "gate slot was not released")
             gate._semaphore.release()
-        spawned[0].wait(timeout=5)
 
     def test_no_zombie_process_survives_a_timed_out_launch(self) -> None:
         gate = BrowserGate(max_concurrent=1)
@@ -596,15 +640,15 @@ class UcLaunchDeadlineTest(unittest.TestCase):
                                return_value=_addrinfo("104.18.0.1")):
             with mock.patch.object(
                 uc, "_load_seleniumbase",
-                return_value=self._hanging_factory(2.0, spawned),
-            ):
+                return_value=self._sleeping_factory(2.0, spawned),
+            ), _marked_process_before_fetch(spawned):
                 fetcher = uc.UcFetcher(
                     _POLICY, gate=gate, launch_timeout_seconds=0.3,
                     orphan_sweep_delay_seconds=0.1)
                 with self.assertRaises(FetchError):
                     fetcher.fetch(_MAGALU_URL)
         proc = spawned[0]
-        proc.wait(timeout=5)
+        proc.wait(timeout=_SYNC_KILL_GRACE_SECONDS)
         self.assertIsNotNone(
             proc.poll(), "the spawned child process was not killed")
 
