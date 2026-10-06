@@ -1158,14 +1158,16 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
                     _POLICY, gate=gate, **fetcher_kwargs).fetch(
                         "https://mercadolivre.com.br/p/MLB1")
 
-    def _abandon_with_unconfirmed_kill(self, gate, release, ceiling) -> None:  # noqa: ANN001
-        chromium = _FakeChromium(browser_obj=_BlockedUntilReleasedBrowser(release))
+    def _abandon_with_unconfirmed_kill(self, gate, release, ceiling):  # noqa: ANN001, ANN202
+        blocked = _BlockedUntilReleasedBrowser(release)
+        chromium = _FakeChromium(browser_obj=blocked)
         # psutil unavailable: the kill can never be confirmed, so each
         # timed-out fetch genuinely counts against the ceiling.
         with mock.patch.dict(sys.modules, {"psutil": None}):
             with self.assertRaises(FetchError):
                 self._fetch(gate, chromium, fetch_timeout_seconds=0.2,
                             max_abandoned_fetches=ceiling)
+        return blocked
 
     def _ok_chromium(self) -> _FakeChromium:
         return _FakeChromium(
@@ -1175,13 +1177,20 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
             self) -> None:
         gate = BrowserGate(max_concurrent=1)
         release = threading.Event()
+        abandoned = []
         try:
             for _ in range(2):
-                self._abandon_with_unconfirmed_kill(gate, release, ceiling=2)
+                abandoned.append(
+                    self._abandon_with_unconfirmed_kill(gate, release, ceiling=2))
             with self.assertRaisesRegex(FetchError, "browser tier refused"):
                 self._fetch(gate, self._ok_chromium(), max_abandoned_fetches=2)
         finally:
             release.set()
+            # A worker exiting after tearDown would give its count back to
+            # the next test's freshly reset counter.
+            for blocked in abandoned:
+                for worker in blocked.workers:
+                    worker.join(timeout=_WORKER_EXIT_TIMEOUT)
 
     def test_ceiling_frees_up_once_abandoned_threads_exit(self) -> None:
         gate = BrowserGate(max_concurrent=1)
@@ -1231,7 +1240,7 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
                                 fetch_timeout_seconds=0.2)
                 self.assertEqual(self._count(), 1)
                 release.set()
-                self.assertTrue(in_backstop.wait(timeout=5),
+                self.assertTrue(in_backstop.wait(timeout=_WORKER_EXIT_TIMEOUT),
                                 "the worker never reached its late cleanup")
                 self.assertEqual(
                     self._count(), 1,
