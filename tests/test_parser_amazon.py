@@ -1,9 +1,10 @@
 """AmazonParser: 4-price extraction, tier scoping, strike exclusion, fail-closed.
 
-The primary fixture `amazon_b0cvqgsrz9.html` is the REAL captured dump (1.5 MB,
-spike/amazon_cffi.html, /dp/B0CVQGSRZ9), so the scoping is stressed against the
-true DOM density -- notably the TWO best-offer-string-cc nodes (one per tier)
-and the split-span PIX prices. Effective prices are volatile (invariant #4:
+The primary fixture `amazon_b0cvqgsrz9.html` is a real capture of /dp/B0CVQGSRZ9
+trimmed to its availability block and the first row of each tier, in document
+order: the TWO best-offer-string-cc nodes (one per tier) and the split-span PIX
+prices, with the markup between the member PIX value and the struck MSRP kept
+intact so the MSRP stays outside the PIX read window. Effective prices are volatile (invariant #4:
 read the current price, never a figee reference), so these are the exact values
 present in this capture: PIX regular R$7.181,05 (718105) / card regular
 R$7.559,00 (755900) / PIX member R$7.029,05 (702905) / card member R$7.399,00

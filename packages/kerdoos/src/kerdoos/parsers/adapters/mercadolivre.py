@@ -7,8 +7,7 @@ generations of the same listing have been observed (roadmap 35a14a39):
     price lives in a <script type="application/ld+json"> schema.org/Product
     node, under offers.price (a bare number, reais) / offers.priceCurrency /
     offers.availability (a schema.org URL, e.g. ".../InStock").
-  * Older (still the shape of the committed fixture
-    tests/fixtures/mercadolivre_mlb35045987.html): a
+  * Older: a
     <div id="price"> ... <meta itemprop="price" content="9433"> ... </div>
     block, read DOM-side.
 
