@@ -292,13 +292,16 @@ class SmtpDigestSender:
             for _product, source, _site in registry.iter_sources()
         }
 
+        source_labels = registry.source_labels()
+
         view = build_digest_view(
             job, records, generated_at, dict(tier2_labels), source_urls,
-            self._domain_policy,
+            self._domain_policy, source_labels,
         )
         html_body = render_digest_html(job.template_id, view)
         text_body = _clean_header_block(
-            render_digest(records, generated_at, dict(tier2_labels)))
+            render_digest(
+                records, generated_at, dict(tier2_labels), source_labels))
 
         message = EmailMessage()
         message["Subject"] = _clean_header(f"Kerdoos digest: {job.name}")

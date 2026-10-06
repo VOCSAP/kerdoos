@@ -57,17 +57,73 @@ class ConfigTenancyTest(_TenancyTestBase):
         self.assertEqual(len(registry1.products), 1)
         self.assertEqual(len(registry2.products), 0)
 
-    def test_add_source_owner_scoped_and_source_id_distinct(self) -> None:
+    def test_two_owners_following_the_same_url_each_keep_their_source(
+            self) -> None:
+        from kerdoos.core.domain import Availability, ScrapeStatus
+        from kerdoos.persistence.ports import ScrapeRecord
+
+        sources = {}
         for owner in ("owner1", "owner2"):
             self.service.add_product(owner, ProductSpec("aw3225qf"))
-            self.service.add_source(
+            sources[owner] = self.service.add_source(
                 owner, "aw3225qf", "kabum",
                 "https://www.kabum.com.br/produto/1/a")
-        reg1 = self.service.list_config("owner1")
-        reg2 = self.service.list_config("owner2")
-        id1 = reg1.products[0].sources[0].source_id
-        id2 = reg2.products[0].sources[0].source_id
-        self.assertNotEqual(id1, id2)
+        sid = sources["owner1"].source_id
+        self.assertEqual(sources["owner2"].source_id, sid)
+        for owner in ("owner1", "owner2"):
+            registry = self.service.list_config(owner)
+            self.assertEqual(
+                [s.source_id for s in registry.products[0].sources], [sid])
+
+        for owner, cents in (("owner1", 100), ("owner2", 200)):
+            self.state.record(owner, ScrapeRecord(
+                source_id=sid, ts="2026-07-08T00:00:00+00:00",
+                status=ScrapeStatus.OK, price_pix_cents=cents,
+                price_card_cents=cents, currency="BRL",
+                availability=Availability.IN_STOCK, method="http", error=None,
+            ))
+        self.assertEqual(
+            [r.price_pix_cents for r in self.service.get_history("owner1", sid)],
+            [100])
+        self.assertEqual(
+            [r.price_pix_cents for r in self.service.get_history("owner2", sid)],
+            [200])
+
+        self.service.remove_source("owner1", sid)
+        self.assertEqual(
+            self.service.list_config("owner1").products[0].sources, ())
+        self.assertEqual(
+            [s.source_id
+             for s in self.service.list_config("owner2").products[0].sources],
+            [sid])
+
+    def test_job_cannot_link_another_owners_source(self) -> None:
+        import sqlite3
+
+        from kerdoos.core.app.services import DigestJobSpec
+
+        self.service.add_product("owner1", ProductSpec("aw3225qf"))
+        source = self.service.add_source(
+            "owner1", "aw3225qf", "kabum",
+            "https://www.kabum.com.br/produto/1/a")
+        job = self.service.create_job(
+            Principal(owner_id="owner2", role="user"),
+            DigestJobSpec(name="j", frequency_kind="daily",
+                          source_ids=(source.source_id,)))
+        self.assertEqual(job.source_ids, ())
+        self.assertFalse(
+            self.service.add_job_source("owner2", job.id, source.source_id))
+        self.assertEqual(self.service.get_job("owner2", job.id).source_ids, ())
+
+        conn = sqlite3.connect(Path(self._tmp.name) / "config.db")
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO digest_job_sources (owner_id, job_id, source_id)"
+                    " VALUES (?, ?, ?)", ("owner2", job.id, source.source_id))
+        finally:
+            conn.close()
 
     def test_remove_source_cannot_cross_tenant(self) -> None:
         self.service.add_product("owner1", ProductSpec("aw3225qf"))
@@ -148,7 +204,7 @@ class ConfigTenancyTest(_TenancyTestBase):
         source = self.service.add_source(
             "owner1", "aw3225qf", "freshsite",
             "https://www.fresh-domain.com.br/produto/1/a")
-        self.assertTrue(source.source_id.startswith("owner1:aw3225qf:freshsite:"))
+        self.assertTrue(source.source_id.startswith("aw3225qf:freshsite:"))
 
     def test_add_source_still_rejects_domain_outside_catalogue(self) -> None:
         # ip_is_safe / the catalogue itself remain the guard: a domain that
@@ -178,7 +234,7 @@ class StateTenancyTest(_TenancyTestBase):
         from kerdoos.core.domain import Availability, ScrapeStatus
         from kerdoos.persistence.ports import ScrapeRecord
 
-        sid = make_source_id("owner1", "aw3225qf", "kabum", "https://x")
+        sid = make_source_id("aw3225qf", "kabum", "https://x")
         record = ScrapeRecord(
             source_id=sid, ts="2026-07-08T00:00:00+00:00", status=ScrapeStatus.OK,
             price_pix_cents=100, price_card_cents=110, currency="BRL",

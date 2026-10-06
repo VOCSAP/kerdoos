@@ -27,29 +27,22 @@ _OWNER = "owner1"
 
 class SourceIdTest(unittest.TestCase):
     def test_source_id_is_deterministic(self) -> None:
-        # Same (owner, product, site, url) quadruple -> same id, always.
-        self.assertEqual(make_source_id(_OWNER, "aw3225qf", "kabum", _URL),
-                         make_source_id(_OWNER, "aw3225qf", "kabum", _URL))
-        self.assertTrue(
-            make_source_id(_OWNER, "aw3225qf", "kabum", _URL)
-            .startswith(f"{_OWNER}:aw3225qf:kabum:"))
+        # Same (product, site, url) triple -> same id, always.
+        self.assertEqual(make_source_id("aw3225qf", "kabum", _URL),
+                         make_source_id("aw3225qf", "kabum", _URL))
+        self.assertRegex(
+            make_source_id("aw3225qf", "kabum", _URL),
+            r"^aw3225qf:kabum:[0-9a-f]{12}$")
 
     def test_url_is_part_of_identity(self) -> None:
         # N2: two DIFFERENT urls of the same product/site are distinct sources.
-        a = make_source_id(_OWNER, "aw3225qf", "kabum", _URL)
-        b = make_source_id(_OWNER, "aw3225qf", "kabum", _URL2)
-        self.assertNotEqual(a, b)
-
-    def test_owner_is_part_of_identity(self) -> None:
-        # Two tenants with the SAME product_key/site/url get distinct ids
-        # (tenancy isolation, not just a display prefix).
-        a = make_source_id("owner1", "aw3225qf", "kabum", _URL)
-        b = make_source_id("owner2", "aw3225qf", "kabum", _URL)
+        a = make_source_id("aw3225qf", "kabum", _URL)
+        b = make_source_id("aw3225qf", "kabum", _URL2)
         self.assertNotEqual(a, b)
 
     def test_product_key_rejects_colon(self) -> None:
         with self.assertRaises(ValueError):
-            make_source_id(_OWNER, "aw:3225qf", "kabum", _URL)
+            make_source_id("aw:3225qf", "kabum", _URL)
 
 
 class SqliteStoreTest(unittest.TestCase):
@@ -68,7 +61,7 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.close()
 
     def test_record_and_history_roundtrip(self) -> None:
-        sid = make_source_id(_OWNER, "aw3225qf", "kabum", _URL)
+        sid = make_source_id("aw3225qf", "kabum", _URL)
         self.store.record(_OWNER, _record(sid, "2026-07-06T00:00:00+00:00", 755800))
         self.store.record(_OWNER, _record(sid, "2026-07-06T01:00:00+00:00", 749900))
         history = self.store.history(_OWNER, sid)

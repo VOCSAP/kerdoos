@@ -27,6 +27,7 @@ from kerdoos.persistence.ports import JobRun
 from kerdoos.persistence.sqlite_store import SqliteStateStore
 from kerdoos.registry.domain_policy import CatalogueDomainPolicy
 from kerdoos.registry.ports import SiteConfig
+from kerdoos.registry import sqlite_store as config_sqlite_store
 from kerdoos.registry.sqlite_store import SqliteConfigStore
 
 _SITE = SiteConfig(
@@ -367,7 +368,7 @@ class MigrationIdempotenceTest(unittest.TestCase):
                 conn.close()
             self.assertIn("digest_jobs", tables)
             self.assertIn("digest_job_sources", tables)
-            self.assertEqual(version, 4)
+            self.assertEqual(version, config_sqlite_store._SCHEMA_VERSION)
 
     def test_state_migration_creates_job_runs_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

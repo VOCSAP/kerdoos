@@ -26,6 +26,8 @@ def format_cents(cents: int | None) -> str:
 
 _MAX_ERROR_LEN = 160
 
+UNKNOWN_SOURCE_LABEL = "(removed source)"
+
 
 def _sanitize_error(error: str) -> str:
     """Neutralize a scrape-derived error before it enters a digest line.
@@ -98,15 +100,19 @@ def render_digest(
     records: list[ScrapeRecord],
     generated_at: str,
     tier2_labels: Mapping[str, str] | None = None,
+    source_labels: Mapping[str, str] | None = None,
 ) -> str:
     """Build the aggregated digest body from the run's scrape records.
 
     tier2_labels maps a record's source_id to the label for its second price
-    tier (e.g. "Prime"). It is DATA passed by the caller (the CLI, which holds
-    both the Registry and the records); the digest never imports the registry,
-    keeping the core->registry boundary clean.
+    tier (e.g. "Prime"); source_labels maps it to the "{product} -- {site}"
+    label printed in place of the source_id. Both are DATA passed by the
+    caller (the CLI, which holds both the Registry and the records); the
+    digest never imports the registry, keeping the core->registry boundary
+    clean.
     """
     labels = tier2_labels or {}
+    names = source_labels or {}
     counts = {status: 0 for status in ScrapeStatus}
     lines: list[str] = []
     lines.append("Kerdoos daily digest")
@@ -119,7 +125,8 @@ def render_digest(
         detail = _price_field(record, labels.get(record.source_id))
         avail = record.availability.value
         scraped_at = _scraped_at_label(record.ts, generated_at)
-        line = (f"[{record.status.value:>13}] {record.source_id}  "
+        name = names.get(record.source_id, UNKNOWN_SOURCE_LABEL)
+        line = (f"[{record.status.value:>13}] {name}  "
                 f"{detail}  availability={avail}  {scraped_at}")
         if record.error:
             line += f"  ({_sanitize_error(record.error)})"

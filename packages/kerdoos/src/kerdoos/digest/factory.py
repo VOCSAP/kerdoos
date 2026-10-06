@@ -36,14 +36,14 @@ def build_sender(
             "KERDOOS_SMTP_HOST is not set: falling back to LogDigestSender "
             "(digest bodies are logged, not emailed)."
         )
-        return LogDigestSender()
+        return LogDigestSender(config_store)
 
     if not settings.smtp_from:
         logger.warning(
             "KERDOOS_SMTP_HOST is set but KERDOOS_SMTP_FROM is not: falling "
             "back to LogDigestSender."
         )
-        return LogDigestSender()
+        return LogDigestSender(config_store)
 
     email_lookup = SqliteAuthStore(config_db_path or settings.config_db).get_email
     smtp_timeout_seconds = _safe_smtp_timeout(

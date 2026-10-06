@@ -11,7 +11,8 @@ Schema (ADR 0001 S4):
   sites(name PK, fetcher, domain, tier2_label, subresource_domains, parser_*)
                                                                   -- GLOBAL catalogue, no owner_id (Q3)
   products(owner_id, product_key, name, PRIMARY KEY(owner_id, product_key))
-  sources(source_id PK, owner_id, product_key, site, url,
+  sources(source_id, owner_id, product_key, site, url,
+          PRIMARY KEY(owner_id, source_id),
           UNIQUE(owner_id, product_key, site, url))
     FK sources.(owner_id, product_key) -> products.(owner_id, product_key)
     FK sources.site -> sites.name
@@ -46,7 +47,7 @@ from .ports import (
     parse_job_options,
 )
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 # owners auth columns added in Phase 3 (ADR 0001 S6). email/role/state already
 # existed in Phase 1; password_hash + created_at are added here. On a fresh DB
@@ -56,6 +57,41 @@ _OWNERS_AUTH_COLUMNS = (
     ("password_hash", "TEXT"),   # Argon2id hash, NULL = no password (WebUI SSO/none)
     ("created_at", "TEXT"),      # ISO-8601 UTC, set at owner creation
 )
+
+# source_id is unique only within an owner (ADR 0006), hence the composite
+# keys: a PRIMARY KEY on source_id alone would make the second owner's
+# add_source a silent ON CONFLICT no-op.
+_SOURCES_DDL = """
+CREATE TABLE IF NOT EXISTS sources (
+    source_id    TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,
+    product_key  TEXT NOT NULL,
+    site         TEXT NOT NULL,
+    url          TEXT NOT NULL,
+    PRIMARY KEY (owner_id, source_id),
+    UNIQUE (owner_id, product_key, site, url),
+    FOREIGN KEY (owner_id, product_key) REFERENCES products (owner_id, product_key),
+    FOREIGN KEY (site) REFERENCES sites (name)
+);
+"""
+
+# owner_id is carried here too (not just derivable via a join to
+# digest_jobs) so every read/write can filter it INLINE, same discipline as
+# `sources` -- no cross-DB FK exists to state.db's job_runs (ADR 0003 T2),
+# but this table stays entirely inside config.db so the FK to digest_jobs
+# and sources IS safe to declare. The composite FK also forbids linking a job
+# to another owner's source.
+_DIGEST_JOB_SOURCES_DDL = """
+CREATE TABLE IF NOT EXISTS digest_job_sources (
+    owner_id   TEXT NOT NULL,
+    job_id     TEXT NOT NULL,
+    source_id  TEXT NOT NULL,
+    PRIMARY KEY (job_id, source_id),
+    FOREIGN KEY (job_id) REFERENCES digest_jobs (id) ON DELETE CASCADE,
+    FOREIGN KEY (owner_id, source_id)
+        REFERENCES sources (owner_id, source_id) ON DELETE CASCADE
+);
+"""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS owners (
@@ -87,16 +123,7 @@ CREATE TABLE IF NOT EXISTS products (
     PRIMARY KEY (owner_id, product_key)
 );
 
-CREATE TABLE IF NOT EXISTS sources (
-    source_id    TEXT PRIMARY KEY,
-    owner_id     TEXT NOT NULL,
-    product_key  TEXT NOT NULL,
-    site         TEXT NOT NULL,
-    url          TEXT NOT NULL,
-    UNIQUE (owner_id, product_key, site, url),
-    FOREIGN KEY (owner_id, product_key) REFERENCES products (owner_id, product_key),
-    FOREIGN KEY (site) REFERENCES sites (name)
-);
+""" + _SOURCES_DDL + """
 
 -- Phase 6a (ADR 0003 S4). UNIQUE(owner_id, name) is safe INLINE here (unlike
 -- the owners identity indexes in _migrate()) because this table is BRAND NEW
@@ -115,21 +142,7 @@ CREATE TABLE IF NOT EXISTS digest_jobs (
     created_at     TEXT,
     UNIQUE (owner_id, name)
 );
-
--- owner_id is carried here too (not just derivable via a join to
--- digest_jobs) so every read/write can filter it INLINE, same discipline as
--- `sources` -- no cross-DB FK exists to state.db's job_runs (ADR 0003 T2),
--- but this table stays entirely inside config.db so the FK to digest_jobs
--- and sources IS safe to declare.
-CREATE TABLE IF NOT EXISTS digest_job_sources (
-    owner_id   TEXT NOT NULL,
-    job_id     TEXT NOT NULL,
-    source_id  TEXT NOT NULL,
-    PRIMARY KEY (job_id, source_id),
-    FOREIGN KEY (job_id)    REFERENCES digest_jobs (id) ON DELETE CASCADE,
-    FOREIGN KEY (source_id) REFERENCES sources (source_id) ON DELETE CASCADE
-);
-"""
+""" + _DIGEST_JOB_SOURCES_DDL
 
 
 def _site_to_row(site: SiteConfig) -> tuple:
@@ -179,6 +192,7 @@ class SqliteConfigStore:
         # Schema + migration run ONCE here on a dedicated connection.
         self._path = str(db_path)
         with self._op() as conn:
+            self._reject_pre_0006_sources(conn)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
             self._migrate(conn)
@@ -233,6 +247,22 @@ class SqliteConfigStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_email "
             "ON owners(email) WHERE email IS NOT NULL")
         conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    def _reject_pre_0006_sources(self, conn: sqlite3.Connection) -> None:
+        """ADR 0006 D3. CREATE TABLE IF NOT EXISTS leaves a pre-existing
+        `sources` on its single-column key, on which every add_source would
+        fail; such a config.db is refused before any statement alters it."""
+        primary_key = [
+            row["name"]
+            for row in sorted(
+                conn.execute("PRAGMA table_info(sources)").fetchall(),
+                key=lambda r: r["pk"])
+            if row["pk"]
+        ]
+        if primary_key == ["source_id"]:
+            raise ConfigError(
+                "config.db predates schema 5 (source_id without owner); "
+                "recreate it: remove the file and run `kerdoos config import`.")
 
     def _reject_duplicate_identities(self, conn: sqlite3.Connection) -> None:
         dup_names = [
@@ -353,7 +383,7 @@ class SqliteConfigStore:
                 """
                 INSERT INTO sources (source_id, owner_id, product_key, site, url)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(source_id) DO NOTHING
+                ON CONFLICT(owner_id, source_id) DO NOTHING
                 """,
                 (source.source_id, owner, source.product_id, source.site,
                  source.url),

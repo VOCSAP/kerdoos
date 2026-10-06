@@ -25,7 +25,12 @@ from dataclasses import dataclass
 from autolycos.errors import SSRFError
 from autolycos.safety import DomainPolicy, check_scheme_and_domain
 
-from kerdoos.digest.render import _price_field, _sanitize_error, _scraped_at_label
+from kerdoos.digest.render import (
+    UNKNOWN_SOURCE_LABEL,
+    _price_field,
+    _sanitize_error,
+    _scraped_at_label,
+)
 from kerdoos.persistence.ports import ScrapeRecord
 from kerdoos.registry.ports import DigestJob
 
@@ -67,18 +72,21 @@ def build_digest_view(
     tier2_labels: dict[str, str],
     source_urls: dict[str, str],
     domain_policy: DomainPolicy,
+    source_labels: dict[str, str],
 ) -> DigestView:
     """Flatten job + records into a DigestView of plain strings only.
 
-    tier2_labels and source_urls are both keyed by source_id -- the same
-    convention core/evaluator.py's _collect_job_digest and
-    AppService.run_now already use for tier2_labels.
+    tier2_labels, source_urls and source_labels are all keyed by source_id --
+    the same convention core/evaluator.py's _collect_job_digest and
+    AppService.run_now already use for tier2_labels. The source_id itself is
+    never rendered.
     """
     lines: list[DigestLineView] = []
     for record in records:
         error = _sanitize_error(record.error) if record.error else None
         lines.append(DigestLineView(
-            source_label=record.source_id,
+            source_label=source_labels.get(
+                record.source_id, UNKNOWN_SOURCE_LABEL),
             status_label=record.status.value,
             price_line=_price_field(record, tier2_labels.get(record.source_id)),
             availability_label=record.availability.value,

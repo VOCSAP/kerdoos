@@ -127,7 +127,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         result = composition.service.run_now(args.owner)
     finally:
         composition.close()
-    print(render_digest(result.records, result.generated_at, result.tier2_labels))
+    print(render_digest(result.records, result.generated_at, result.tier2_labels,
+                        result.source_labels))
     return 0
 
 

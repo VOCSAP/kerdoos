@@ -39,12 +39,14 @@ class DigestAggregationTest(unittest.TestCase):
                  availability=Availability.UNKNOWN, method=None,
                  error="challenged (http 403)"),
         ]
-        body = render_digest(records, "2026-07-06T00:00:00+00:00")
+        labels = {"a:kabum:1": "A -- kabum", "b:kabum:2": "B -- kabum",
+                  "c:kabum:3": "C -- kabum"}
+        body = render_digest(records, "2026-07-06T00:00:00+00:00", None, labels)
         # Invariant #8: ONE body, every source present, with a summary line.
         self.assertEqual(body.count("Kerdoos daily digest"), 1)
-        self.assertIn("a:kabum:1", body)
-        self.assertIn("b:kabum:2", body)
-        self.assertIn("c:kabum:3", body)
+        for source_id, label in labels.items():
+            self.assertIn(label, body)
+            self.assertNotIn(source_id, body)
         self.assertIn("sources: 3", body)
         self.assertIn("ok=1", body)
         self.assertIn("unavailable=1", body)

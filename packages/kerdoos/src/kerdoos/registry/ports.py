@@ -6,12 +6,12 @@ Config (sites + products/sources) is read via ConfigStore.load(owner); mutation
 never accidentally receives write authority. One concrete adapter
 (SqliteConfigStore) implements both.
 
-A source's id is DERIVED deterministically (owner + product_key + site + url
-digest) rather than authored, so the same (owner, product_key, site, url)
-quadruple always maps to the same StateStore history key (spec #2). owner is
-folded into the id so two tenants using the same product_key never collide on
-the same history key -- it must always come from the resolved Principal/an
-explicit trusted param, never from a request body field.
+A source's id is DERIVED deterministically (product_key + site + url digest)
+rather than authored, so the same triple always maps to the same StateStore
+history key (spec #2). The id is unique only within an owner (ADR 0006): every
+store keys a source by (owner, source_id), and that owner must always come
+from the resolved Principal/an explicit trusted param, never from a request
+body field.
 
 sites is a GLOBAL, admin-only catalogue (no owner_id): a regular tenant can
 only add sources that reference an already-admin-approved site, never invent
@@ -51,7 +51,7 @@ class SiteConfig:
 
 @dataclass(frozen=True, slots=True)
 class ProductSource:
-    source_id: str        # deterministic over (owner, product_id, site, url)
+    source_id: str        # deterministic over (product_id, site, url), per owner
     product_id: str
     site: str
     url: str
@@ -80,6 +80,16 @@ class Registry:
                         f"site {source.site!r}"
                     )
                 yield product, source, site
+
+    def source_labels(self) -> dict[str, str]:
+        """source_id -> "{product} -- {site}", the label shown to a reader in
+        place of the source_id. Built from products, so a dangling site
+        reference never raises."""
+        return {
+            source.source_id: f"{product.name or product.id} -- {source.site}"
+            for product in self.products
+            for source in product.sources
+        }
 
 
 # -- Digest jobs (ADR 0003, Phase 6a) ---------------------------------------
@@ -236,18 +246,18 @@ def validate_product_key(product_key: str) -> None:
         raise ValueError(f"product_key must not contain ':': {product_key!r}")
 
 
-def make_source_id(owner: str, product_key: str, site: str, url: str) -> str:
-    """Deterministic id over the (owner, product_key, site, url) quadruple.
+def make_source_id(product_key: str, site: str, url: str) -> str:
+    """Deterministic id over the (product_key, site, url) triple.
 
-    owner is folded in FIRST so two different tenants using the identical
-    product_key/site/url never collide on the same StateStore history key.
-    The url is folded in as a short stable digest, so two DIFFERENT urls of
-    the same product/site are distinct sources (no silent collision), while
-    the same quadruple always maps to the same id.
+    The id identifies a source WITHIN one owner only (ADR 0006): two owners
+    following the same url share it, so it must never be used without the
+    owner. It reaches the client (URLs, HTML), which is why owner_id is not
+    part of it. The url is folded in as a short stable digest, so two
+    DIFFERENT urls of the same product/site are distinct sources.
     """
     validate_product_key(product_key)
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
-    return f"{owner}:{product_key}:{site}:{digest}"
+    return f"{product_key}:{site}:{digest}"
 
 
 @runtime_checkable

@@ -192,9 +192,7 @@ class OwnerIdNeverSerializedTest(_WebAuthTestBase):
 
 
 class OwnerIdNeverRenderedInHtmlTest(_WebAuthTestBase):
-    """Invariant 10 on the HTML surface. The accounts own no source: a
-    source_id embeds owner_id, so a sourced account would put it in the
-    page through links unrelated to the identity display under test."""
+    """Invariant 10 on the HTML surface, for accounts without sources."""
 
     _OWNER_ID = "owner-7f3a9c"
     _HTML = {"Accept": "text/html"}
@@ -224,6 +222,152 @@ class OwnerIdNeverRenderedInHtmlTest(_WebAuthTestBase):
         self._add_owner(self._OWNER_ID, "root", "s3cret", role="admin")
         self._html_login("root", "s3cret")
         self._assert_pages_omit_owner_id(("/", "/profile", "/admin"))
+
+
+class _CapturingSMTP:
+    sent: list = []
+
+    def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
+        pass
+
+    def __enter__(self) -> "_CapturingSMTP":
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+    def starttls(self, context=None) -> None:
+        pass
+
+    def send_message(self, message) -> None:
+        _CapturingSMTP.sent.append(message)
+
+
+class OwnerIdNeverExposedWithSourcesTest(_WebAuthTestBase):
+    """Invariant 10 (ADR 0006) for an account seeded through the real
+    add_source with one source, one scrape and one job: source ids reach
+    links, forms, URLs and the digest, so none of them may carry owner_id."""
+
+    _OWNER_ID = "3f9c2a7b1d4e"
+    _HTML = {"Accept": "text/html"}
+    _URL = "https://www.kabum.com.br/produto/534732/aw3225qf"
+
+    def setUp(self) -> None:
+        super().setUp()
+        from autolycos.router import StaticRouter
+
+        from kerdoos.core.app.services import (
+            AppService, DigestJobSpec, Principal, ProductSpec,
+        )
+        from kerdoos.core.domain import Availability, ScrapeStatus
+        from kerdoos.parsers.factory import build_parser
+        from kerdoos.parsers.ports import ParserSpec
+        from kerdoos.persistence.ports import ScrapeRecord
+        from kerdoos.persistence.sqlite_store import SqliteStateStore
+        from kerdoos.registry.domain_policy import CatalogueDomainPolicy
+        from kerdoos.registry.ports import SiteConfig
+
+        self._add_owner(self._OWNER_ID, "alice", "s3cret")
+        self.config = SqliteConfigStore(self.config_db)
+        self.state = SqliteStateStore(self.state_db)
+        self.addCleanup(self.state.close)
+        self.domain_policy = CatalogueDomainPolicy(self.config)
+        service = AppService(
+            self.config, self.state, StaticRouter(self.domain_policy),
+            self.domain_policy, build_parser)
+        self.config.add_site(SiteConfig(
+            name="kabum", fetcher="http", domain="kabum.com.br",
+            parser=ParserSpec(kind="statejson", pix="a", card="b",
+                              availability="c")))
+        service.add_product(self._OWNER_ID, ProductSpec("aw3225qf", name="RTX"))
+        self.source = service.add_source(
+            self._OWNER_ID, "aw3225qf", "kabum", self._URL)
+        self.record = ScrapeRecord(
+            source_id=self.source.source_id, ts="2026-07-13T00:00:00+00:00",
+            status=ScrapeStatus.OK, price_pix_cents=755800,
+            price_card_cents=755800, currency="BRL",
+            availability=Availability.IN_STOCK, method="http", error=None)
+        self.state.record(self._OWNER_ID, self.record)
+        self.job = service.create_job(
+            Principal(owner_id=self._OWNER_ID, role="user"),
+            DigestJobSpec(name="daily", frequency_kind="daily",
+                          source_ids=(self.source.source_id,)))
+
+        resp = self.client.post(
+            "/auth/login", data={"identifier": "alice", "password": "s3cret"},
+            headers=self._HTML)
+        self.assertEqual(resp.status_code, 200)
+
+    def _assert_omits_owner_id(self, resp) -> None:
+        self.assertNotIn(self._OWNER_ID, resp.text)
+        for name, value in resp.headers.items():
+            self.assertNotIn(self._OWNER_ID, value, f"header {name}")
+
+    def test_pages_with_sources_never_carry_owner_id(self) -> None:
+        paths = (
+            "/", "/products", "/notifications",
+            f"/history/{self.source.source_id}",
+            f"/notifications/{self.job.id}/preview",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertNotIn(self._OWNER_ID, path)
+                resp = self.client.get(
+                    path, headers=self._HTML, follow_redirects=False)
+                self.assertEqual(resp.status_code, 200)
+                self._assert_omits_owner_id(resp)
+
+    def test_preview_labels_the_source_with_product_and_site(self) -> None:
+        resp = self.client.get(
+            f"/notifications/{self.job.id}/preview", headers=self._HTML)
+        self.assertIn("RTX -- kabum", resp.text)
+
+    def test_digest_email_never_carries_owner_id(self) -> None:
+        from kerdoos.digest.smtp_sender import SmtpDigestSender, SmtpSettings
+
+        _CapturingSMTP.sent.clear()
+        sender = SmtpDigestSender(
+            self.config, self.domain_policy, lambda owner: "alice@example.com",
+            SmtpSettings(host="smtp.example.com", port=587,
+                         from_addr="digest@example.com"))
+        with mock.patch("kerdoos.digest.smtp_sender.smtplib.SMTP",
+                        _CapturingSMTP):
+            self.assertTrue(sender.send(
+                self.job, [self.record], "2026-07-13T00:00:00+00:00", {}))
+
+        message = _CapturingSMTP.sent[0]
+        html = message.get_body(preferencelist=("html",)).get_content()
+        text = message.get_body(preferencelist=("plain",)).get_content()
+        for body in (html, text):
+            self.assertIn("RTX -- kabum", body)
+            self.assertNotIn(self._OWNER_ID, body)
+        self.assertNotIn(self._OWNER_ID, message.as_string())
+
+    def test_unknown_and_owner_prefixed_history_ids_are_404(self) -> None:
+        for sid in ("aw3225qf:kabum:000000000000",
+                    f"{self._OWNER_ID}:{self.source.source_id}"):
+            with self.subTest(sid=sid):
+                resp = self.client.get(f"/history/{sid}", headers=self._HTML)
+                self.assertEqual(resp.status_code, 404)
+                self.assertNotIn(sid, resp.text)
+                self.assertNotIn(self._OWNER_ID, resp.text)
+
+
+class TemplatesNeverNameOwnerIdTest(unittest.TestCase):
+    def test_no_template_references_owner_id(self) -> None:
+        from pathlib import Path
+
+        import kerdoos.digest
+        import kerdoos.interfaces.web
+
+        roots = [Path(kerdoos.interfaces.web.__file__).parent / "templates",
+                 Path(kerdoos.digest.__file__).parent / "templates"]
+        templates = [p for root in roots for p in root.rglob("*.html")]
+        self.assertTrue(templates)
+        for template in templates:
+            with self.subTest(template=template.name):
+                self.assertNotIn(
+                    "owner_id", template.read_text(encoding="utf-8"))
 
 
 class LogoutTest(_WebAuthTestBase):
