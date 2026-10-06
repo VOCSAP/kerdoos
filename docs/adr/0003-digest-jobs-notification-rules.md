@@ -130,6 +130,23 @@ donc **pas** la fenetre, retentee au tick suivant : un job qui n'a rien a envoye
 threads d'envoi orphelins atteint). Toute ligne ecrite consomme sa fenetre (cle
 primaire). La colonne est un `TEXT` sans contrainte `CHECK`.
 
+**Valeur `skipped` (nue).** Le commentaire de `JobRun.status`
+(`persistence/ports.py:66-70`) et la docstring de `update_job_run`
+(`persistence/ports.py:127`) citent une sixieme valeur, `skipped`. Elle a ete
+declaree en Phase 6a, avant que la Phase 6b ne fixe l'enumeration, et **aucun
+code ne l'ecrit** : les seules ecritures de statut sont `queued`, `running`,
+`error`, `sent` et `skipped_no_email` (`core/evaluator.py:370-427`) et le `error`
+du reaper (`persistence/sqlite_store.py:346`). `skipped` n'est donc pas un etat
+terminal a traiter : l'enumeration reelle compte les cinq valeurs ci-dessus.
+
+**A ne pas confondre avec le compteur `skipped_jobs`.**
+`EvaluationSummary.skipped_jobs` compte les jobs non notifies pendant un tick,
+pas des lignes `job_runs`. Cinq chemins l'incrementent
+(`core/evaluator.py:330, 353, 364, 373, 428`) : un envoi deja en cours pour ce
+job, rien a envoyer, refus pour capacite, fenetre deja enregistree, owner sans
+e-mail. Seul le dernier ecrit un statut (`skipped_no_email`) ; les deuxieme et
+troisieme n'ecrivent aucune ligne.
+
 ### Notes structurelles
 - **Piege #11162 EVITE** : les contraintes `UNIQUE` sont **inline dans le `CREATE
   TABLE`** de tables NEUVES (aucune ligne pre-existante). Le piege "CREATE UNIQUE
