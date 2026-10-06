@@ -63,11 +63,10 @@ class JobRun:
     # re-fires on every tick.
     window_start: str
     fired_at: str                 # ISO-8601 UTC, when the evaluator actually ran this
-    # 'queued' | 'running' | 'sent' | 'skipped' | 'skipped_no_email' | 'error'
-    # (Phase 6a persisted only 'sent'/'skipped'/'error'; Phase 6b adds
-    # 'queued'/'running' as the evaluator's own in-flight states -- see
-    # StateStore.has_active_job_run -- and 'skipped_no_email' for an owner
-    # without an email at send time, ADR 0003 Decision 9).
+    # 'queued' | 'running' (transient), then 'sent' | 'error' | 'skipped_no_email'
+    # 'queued'/'running' are the evaluator's own in-flight states (see
+    # StateStore.has_active_job_run); 'skipped_no_email' is an owner without
+    # an email at send time (ADR 0003 Decision 9).
     status: str
     sent_at: str | None = None
     error: str | None = None
@@ -124,7 +123,7 @@ class StateStore(Protocol):
     ) -> bool:
         """Transition an EXISTING (job_id, window_start) row's status
         (Phase 6b lifecycle -- ADR 0003 architect finding #6, e.g.
-        'queued' -> 'running' -> 'sent'/'skipped'/'error'). Returns True if a
+        'queued' -> 'running' -> 'sent'/'error'/'skipped_no_email'). Returns True if a
         row was found and updated, False if no row exists for that
         (job_id, window_start) pair (never raises on a missing row)."""
         ...
