@@ -73,6 +73,7 @@ _SMTP_ENV_VARS = (
 _WARN_ONCE_LATCHES = (
     "_browser_fetch_timeout_below_launch_warned",
     "_browser_fetch_timeout_above_acquire_warned",
+    "_uc_launch_timeout_at_or_above_acquire_warned",
     "_uc_fetch_timeout_below_navigation_warned",
     "_uc_fetch_timeout_above_acquire_warned",
     "_camoufox_fetch_timeout_below_navigation_warned",
@@ -902,6 +903,47 @@ class UcFetchTimeoutOrderingWarningTest(_SettingsTestBase):
             get_settings()
             get_settings()
         self.assertEqual(spy.call_count, 1)
+
+
+class UcLaunchTimeoutOrderingWarningTest(_SettingsTestBase):
+    def test_launch_timeout_at_acquire_timeout_warns(self) -> None:
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.uc_launch_timeout_seconds, 120.0)
+        self.assertTrue(
+            any("KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS=120.0 is at or past "
+                "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=120.0" in message
+                for message in cm.output), cm.output)
+
+    def test_launch_timeout_at_acquire_timeout_does_not_blame_sweep_delay(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        with self.assertLogs("kerdoos.config", level="WARNING") as cm:
+            settings = get_settings()
+        self.assertEqual(settings.uc_orphan_sweep_delay_seconds, 0.1)
+        self.assertEqual(len(cm.output), 1, cm.output)
+        self.assertIn("KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS=120.0 is at or past",
+                      cm.output[0])
+
+    def test_same_out_of_order_value_warns_once_across_multiple_calls(
+        self,
+    ) -> None:
+        os.environ["KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS"] = "120"
+        os.environ["KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS"] = "120"
+        logger = logging.getLogger("kerdoos.config")
+        with mock.patch.object(logger, "warning") as spy:
+            get_settings()
+            get_settings()
+            get_settings()
+        warnings = [
+            call for call in spy.call_args_list
+            if "is at or past" in call.args[0]
+        ]
+        self.assertEqual(len(warnings), 1)
 
 
 class BrowserMaxAbandonedFetchesFloorTest(_SettingsTestBase):

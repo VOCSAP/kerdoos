@@ -299,5 +299,27 @@ class CompositionRootUcFetchTimeoutTest(unittest.TestCase):
                 composition.close()
 
 
+class CompositionRootLaunchTimeoutTest(unittest.TestCase):
+    def test_launch_timeout_env_vars_reach_the_selected_fetchers(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS": "31",
+            "KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS": "19",
+        }):
+            with tempfile.TemporaryDirectory() as tmp:
+                d = Path(tmp)
+                composition = cli._build_app_service(
+                    str(d / "config.db"), str(d / "state.db"),
+                    settings=cli.get_settings())
+                try:
+                    self.assertEqual(
+                        composition.router.select("uc")._launch_timeout_seconds,
+                        31.0)
+                    self.assertEqual(
+                        composition.router.select("browser")._launch_timeout_seconds,
+                        19.0)
+                finally:
+                    composition.close()
+
+
 if __name__ == "__main__":
     unittest.main()

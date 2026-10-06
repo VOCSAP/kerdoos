@@ -401,11 +401,15 @@ def _safe_uc_orphan_sweep_delay(
     uc._launch_with_deadline), so an unbounded delay holds up every other
     caller waiting on that gate. A value that would make a single timed-out
     launch occupy the gate for at least as long as the gate's own acquire
-    timeout degrades to a clamped safe value with a warning, mirroring
-    digest.factory._safe_smtp_timeout's discipline."""
+    timeout degrades to a clamped safe value, mirroring
+    digest.factory._safe_smtp_timeout's discipline. The clamp warns only
+    when uc_launch_timeout < acquire_timeout; otherwise it is silent, the
+    launch-timeout startup warning already covering that configuration."""
     if uc_launch_timeout + sweep_delay < acquire_timeout:
         return sweep_delay
     clamped = max(0.1, (acquire_timeout - uc_launch_timeout) / 2.0)
+    if uc_launch_timeout >= acquire_timeout:
+        return clamped
     logger.warning(
         "KERDOOS_UC_ORPHAN_SWEEP_DELAY_SECONDS=%r combined with "
         "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS=%s would hold the browser gate "
@@ -495,6 +499,21 @@ def _camoufox_budget_message(warning: BudgetWarning) -> _Message:
         warning.acquire_timeout_seconds)
 
 
+def _warn_if_uc_launch_timeout_at_or_above_acquire_timeout(
+    launch_timeout_seconds: float, acquire_timeout_seconds: float,
+) -> None:
+    global _uc_launch_timeout_at_or_above_acquire_warned
+    if (launch_timeout_seconds >= acquire_timeout_seconds
+            and not _uc_launch_timeout_at_or_above_acquire_warned):
+        logger.warning(
+            "KERDOOS_UC_LAUNCH_TIMEOUT_SECONDS=%s is at or past "
+            "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS=%s -- a timed-out UC "
+            "launch can occupy the shared browser gate longer than another "
+            "caller is willing to wait.",
+            launch_timeout_seconds, acquire_timeout_seconds)
+        _uc_launch_timeout_at_or_above_acquire_warned = True
+
+
 def _warn_once_per_condition(
     warnings: list[BudgetWarning], latches: Mapping[str, str],
     message: Callable[[BudgetWarning], _Message],
@@ -515,6 +534,7 @@ def _warn_once_per_condition(
 
 _browser_fetch_timeout_below_launch_warned = False
 _browser_fetch_timeout_above_acquire_warned = False
+_uc_launch_timeout_at_or_above_acquire_warned = False
 _uc_fetch_timeout_below_navigation_warned = False
 _uc_fetch_timeout_above_acquire_warned = False
 _camoufox_fetch_timeout_below_navigation_warned = False
@@ -532,6 +552,8 @@ def get_settings() -> Settings:
         "KERDOOS_BROWSER_ACQUIRE_TIMEOUT_SECONDS",
         float(DEFAULT_BROWSER_ACQUIRE_TIMEOUT_SECONDS), float,
         lambda v: v > 0)
+    _warn_if_uc_launch_timeout_at_or_above_acquire_timeout(
+        uc_launch_timeout_seconds, browser_acquire_timeout_seconds)
     browser_fetch_timeout_seconds = _env_number(
         "KERDOOS_BROWSER_FETCH_TIMEOUT_SECONDS",
         DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS, float, lambda v: v > 0)
