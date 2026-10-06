@@ -401,8 +401,10 @@ def _safe_uc_orphan_sweep_delay(
     uc._launch_with_deadline), so an unbounded delay holds up every other
     caller waiting on that gate. A value that would make a single timed-out
     launch occupy the gate for at least as long as the gate's own acquire
-    timeout degrades to a clamped safe value with a warning, mirroring
-    digest.factory._safe_smtp_timeout's discipline."""
+    timeout degrades to a clamped safe value, mirroring
+    digest.factory._safe_smtp_timeout's discipline. The clamp warns only
+    when uc_launch_timeout < acquire_timeout; otherwise it is silent, the
+    launch-timeout startup warning already covering that configuration."""
     if uc_launch_timeout + sweep_delay < acquire_timeout:
         return sweep_delay
     clamped = max(0.1, (acquire_timeout - uc_launch_timeout) / 2.0)
