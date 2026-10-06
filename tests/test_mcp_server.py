@@ -478,11 +478,14 @@ class ClientHostNeverReflectedWithMcpTest(_McpTestBase):
 
         app = self.client.app
         self.assertFalse(app.router.redirect_slashes)
+        inspected = 0
         for route in app.routes:
             router = getattr(getattr(route, "app", None), "router", None)
             if isinstance(route, Mount) and router is not None:
+                inspected += 1
                 with self.subTest(mount=route.path):
                     self.assertFalse(router.redirect_slashes)
+        self.assertGreaterEqual(inspected, 1, "no mounted router was inspected")
 
     def test_resource_paths_still_answer_without_redirect(self) -> None:
         for path in ("/mcp", "/mcp/"):
