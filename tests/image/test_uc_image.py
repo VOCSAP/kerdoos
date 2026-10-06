@@ -394,16 +394,19 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
                      "_find_patchright_chromium",
                      return_value=_find_patchright_chromium(),
                  ):
-                with self.assertRaisesRegex(FetchError, "uc launch exceeded"):
+                try:
                     fetcher.fetch("https://example.com/")
-            self.assertTrue(
-                profile_received.wait(timeout=30.0),
-                "timed-out launch never received a temporary profile",
-            )
-            self.assertFalse(
-                Path(profile_paths[0]).exists(),
-                "temporary profile survived the fetch timeout",
-            )
+                except FetchError as exc:
+                    if "uc launch exceeded" not in str(exc):
+                        raise RuntimeError(
+                            f"fetch failed without a launch timeout: {exc}") from exc
+                else:
+                    raise RuntimeError("fetch did not hit the launch timeout")
+            if not profile_received.wait(timeout=30.0):
+                raise RuntimeError(
+                    "timed-out launch never received a temporary profile")
+            if Path(profile_paths[0]).exists():
+                raise RuntimeError("temporary profile survived the fetch timeout")
             start_driver.set()
             if not profile_process_seen.wait(timeout=30.0):
                 raise RuntimeError(
@@ -425,7 +428,8 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
             if not active:
                 break
             time.sleep(0.5)
-        self.assertFalse(active, "late Chrome remained after driver quit")
+        if active:
+            raise RuntimeError("late Chrome remained after driver quit")
 
         directories = set(Path(tempfile.gettempdir()).glob("autolycos-uc-*")) - baseline
         if not directories:
@@ -448,7 +452,8 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
              ):
             result = fetcher.fetch("https://example.com/")
 
-        self.assertEqual(result.status, 200)
+        if result.status != 200:
+            raise RuntimeError(f"next fetch returned status {result.status}")
         leaked = set(Path(tempfile.gettempdir()).glob("autolycos-uc-*")) - baseline
         self.assertEqual(leaked, set(), f"profiles leaked: {leaked}")
 
