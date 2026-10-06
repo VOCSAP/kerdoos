@@ -3,9 +3,10 @@
 The fixture `pichau_cv700b.html` is the captured curl_cffi SSR document trimmed
 to the real escaped-JSON flight fragment (the pichau_prices object with
 avista/base_price/final_price, and stock_status) plus the JSON-LD Offer whose
-price is the CARD price. Effective prices are volatile (invariant #4); these are the exact
-values in this capture: pix (a-vista, PIX) 149.99 -> 14999, card (final_price)
-176.46 -> 17646, base_price (reference) 241.16 -> 24116 (never read).
+price is the CARD price. Effective prices are volatile (invariant #4); these
+are the exact values in this capture: pix (a-vista, PIX) 149.99 -> 14999,
+card (final_price) 176.46 -> 17646, base_price (reference) 241.16 -> 24116
+(never read).
 """
 
 from __future__ import annotations
@@ -94,10 +95,11 @@ class PichauSyntheticTest(unittest.TestCase):
         # In the captured flight stock_status starts 2664 chars after the
         # pichau_prices anchor; the trimmed fixture is shorter, so this page
         # is what holds _STOCK_WINDOW to the real gap.
-        prices = '"pichau_prices":{"avista":149.99,"final_price":176.46}'
-        html = (prices + " " * (2664 - len(prices) - 1)
-                + '"stock_status":"IN_STOCK"')
+        prices = r'pichau_prices\":{\"avista\":149.99,\"final_price\":176.46}'
+        status = r'\"stock_status\":\"IN_STOCK\"'
+        html = prices + " " * (2664 - len(prices) - 2) + status
         self.assertEqual(html.index("stock_status"), 2664)
+        self.assertEqual(html.index("IN_STOCK") + len("IN_STOCK"), 2689)
         self.assertEqual(_parser().extract(html).availability,
                          Availability.IN_STOCK)
 
