@@ -11,6 +11,7 @@ CONNECT/pin behavior is covered in test_ssrf.py.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import socket
@@ -18,7 +19,9 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -49,6 +52,26 @@ def _marker_from_kwargs(kwargs: dict) -> str:
     return next(
         arg for arg in kwargs["args"]
         if arg.startswith(browser._LAUNCH_ID_ARG_PREFIX))
+
+
+@contextlib.contextmanager
+def _marked_process_before_fetch(spawned: list):
+    """Spawns, on the CALLING thread, a real process carrying the marker the
+    next fetch() will generate, and pins that marker for the duration.
+
+    Spawning it from the fake's own launch/new_page instead races fetch()'s
+    0.2-0.3s deadline: the worker thread can reach Popen only after the
+    deadline already fired and the kill sweep found nothing, which a loaded
+    Windows host does routinely (card 5dd92731: worker Popen measured
+    0.40-0.95s after fetch() started).
+    """
+    launch_id = uuid.uuid4()
+    marker = f"{browser._LAUNCH_ID_ARG_PREFIX}{launch_id.hex}"
+    spawned.append(subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", marker]))
+    with mock.patch.object(browser, "uuid",
+                           types.SimpleNamespace(uuid4=lambda: launch_id)):
+        yield marker
 
 
 class LooksChallengedTest(unittest.TestCase):
@@ -656,43 +679,12 @@ class BrowserLaunchGenericExceptionTest(unittest.TestCase):
         gate._semaphore.release()
 
 
-class _HangingBrowser:
-    """A launched Chromium standing in: new_page() never returns (mirrors
-    the roadmap d8b7b8fd measurement -- a real frozen Chromium blocks
-    new_page() indefinitely), after spawning a REAL child process tagged
-    with the fetch's own marker so the kill mechanism is proven against a
-    genuine OS process, not asserted from reading psutil's API alone.
-    """
-
-    def __init__(self, marker: str, spawned: list) -> None:
-        self._marker = marker
-        self._spawned = spawned
-        self.closed = False
-
-    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
-        return self
-
-    def route(self, pattern, handler) -> None:  # noqa: ANN001
-        pass
-
-    def route_web_socket(self, pattern, handler) -> None:  # noqa: ANN001
-        pass
-
-    def new_page(self):  # noqa: ANN201
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)", self._marker])
-        self._spawned.append(proc)
-        threading.Event().wait()  # never set: blocks this thread forever
-
-    def close(self) -> None:
-        self.closed = True
-
-
 class _NeverReturningBrowser:
-    """A launched Chromium standing in: new_page() blocks forever WITHOUT
-    spawning any real OS process -- used only where the process side of
-    the kill is irrelevant to what is being tested (e.g. psutil itself
-    being unavailable, roadmap d8b7b8fd).
+    """A launched Chromium standing in: new_page() blocks forever (mirrors
+    the roadmap d8b7b8fd measurement -- a real frozen Chromium blocks
+    new_page() indefinitely). Spawns no process itself: a test that needs
+    the kill proven against a genuine OS process creates it beforehand with
+    _marked_process_before_fetch.
     """
 
     def new_context(self, **kwargs):  # noqa: ANN003, ANN201
@@ -720,10 +712,7 @@ class _HangingThenUnblockedBrowser:
     on the sibling uc-tier card 6521bbce.
     """
 
-    def __init__(self, marker: str, spawned: list,
-                 unblock_event: threading.Event) -> None:
-        self._marker = marker
-        self._spawned = spawned
+    def __init__(self, unblock_event: threading.Event) -> None:
         self._unblock_event = unblock_event
 
     def new_context(self, **kwargs):  # noqa: ANN003, ANN201
@@ -736,9 +725,6 @@ class _HangingThenUnblockedBrowser:
         pass
 
     def new_page(self):  # noqa: ANN201
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)", self._marker])
-        self._spawned.append(proc)
         self._unblock_event.wait(timeout=10)
         raise RuntimeError("connection reset (simulated post-kill unblock)")
 
@@ -764,9 +750,7 @@ class BrowserFetchDeferredCleanupTest(unittest.TestCase):
 
         def _launch_prev(**kwargs):  # noqa: ANN003
             chromium_prev.launch_kwargs = kwargs
-            marker = _marker_from_kwargs(kwargs)
-            return _HangingThenUnblockedBrowser(
-                marker, prev_spawned, unblock_event)
+            return _HangingThenUnblockedBrowser(unblock_event)
 
         chromium_prev.launch = _launch_prev
         fake_pw_prev = lambda: _FakePW(chromium_prev)  # noqa: E731
@@ -776,7 +760,8 @@ class BrowserFetchDeferredCleanupTest(unittest.TestCase):
             with mock.patch.object(browser, "_load_playwright",
                                    return_value=fake_pw_prev), \
                  mock.patch.object(browser, "_load_stealth",
-                                   return_value=_FakeStealth):
+                                   return_value=_FakeStealth), \
+                 _marked_process_before_fetch(prev_spawned):
                 fetcher_prev = browser.BrowserFetcher(
                     _POLICY, gate=gate, fetch_timeout_seconds=0.2)
                 with self.assertRaises(FetchError):
@@ -850,20 +835,19 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
         with browser._abandoned_fetch_threads_lock:
             browser._abandoned_fetch_thread_count = self._saved_abandoned_count
 
-    def _hanging_chromium(self, spawned: list) -> _FakeChromium:
+    def _hanging_chromium(self) -> _FakeChromium:
         chromium = _FakeChromium(browser_obj=None)
 
         def _launch(**kwargs):  # noqa: ANN003
             chromium.launch_kwargs = kwargs
-            marker = _marker_from_kwargs(kwargs)
-            return _HangingBrowser(marker, spawned)
+            return _NeverReturningBrowser()
 
         chromium.launch = _launch  # noqa: SLF001 -- test-only override
         return chromium
 
     def _fetch_with_frozen_step(self, gate, spawned: list,
                                  fetch_timeout_seconds: float = 0.3):
-        chromium = self._hanging_chromium(spawned)
+        chromium = self._hanging_chromium()
         fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
         raised = None
         with mock.patch.object(safety.socket, "getaddrinfo",
@@ -871,7 +855,8 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
             with mock.patch.object(browser, "_load_playwright",
                                    return_value=fake_sync_playwright), \
                  mock.patch.object(browser, "_load_stealth",
-                                   return_value=_FakeStealth):
+                                   return_value=_FakeStealth), \
+                 _marked_process_before_fetch(spawned):
                 fetcher = browser.BrowserFetcher(
                     _POLICY, gate=gate,
                     fetch_timeout_seconds=fetch_timeout_seconds)
