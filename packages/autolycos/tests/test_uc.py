@@ -575,7 +575,9 @@ class UcLaunchDeadlineTest(unittest.TestCase):
     @staticmethod
     def _sleeping_factory(sleep_seconds: float, spawned: list) -> object:
         def _factory(**kwargs):  # noqa: ANN003
-            assert _marker_from_kwargs(kwargs) == spawned[-1].args[-1]
+            if _marker_from_kwargs(kwargs) != spawned[-1].args[-1]:
+                raise AssertionError("launch marker differs from the "
+                                     "pre-spawned process's marker")
             time.sleep(sleep_seconds)
             return _FakeDriver("<html></html>", **kwargs)
 

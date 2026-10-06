@@ -754,7 +754,9 @@ class BrowserFetchDeferredCleanupTest(unittest.TestCase):
 
         def _launch_prev(**kwargs):  # noqa: ANN003
             chromium_prev.launch_kwargs = kwargs
-            assert _marker_from_kwargs(kwargs) == prev_spawned[0].args[-1]
+            if _marker_from_kwargs(kwargs) != prev_spawned[0].args[-1]:
+                raise AssertionError("launch marker differs from the "
+                                     "pre-spawned process's marker")
             return _HangingThenUnblockedBrowser(unblock_event)
 
         chromium_prev.launch = _launch_prev
@@ -845,7 +847,9 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
 
         def _launch(**kwargs):  # noqa: ANN003
             chromium.launch_kwargs = kwargs
-            assert _marker_from_kwargs(kwargs) == spawned[-1].args[-1]
+            if _marker_from_kwargs(kwargs) != spawned[-1].args[-1]:
+                raise AssertionError("launch marker differs from the "
+                                     "pre-spawned process's marker")
             return _NeverReturningBrowser()
 
         chromium.launch = _launch  # noqa: SLF001 -- test-only override
