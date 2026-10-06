@@ -191,6 +191,41 @@ class OwnerIdNeverSerializedTest(_WebAuthTestBase):
             self.client.get("/admin/whoami"), "admin")
 
 
+class OwnerIdNeverRenderedInHtmlTest(_WebAuthTestBase):
+    """Invariant 10 on the HTML surface. The accounts own no source: a
+    source_id embeds owner_id, so a sourced account would put it in the
+    page through links unrelated to the identity display under test."""
+
+    _OWNER_ID = "owner-7f3a9c"
+    _HTML = {"Accept": "text/html"}
+
+    def _html_login(self, identifier: str, password: str) -> None:
+        resp = self.client.post(
+            "/auth/login",
+            data={"identifier": identifier, "password": password},
+            headers=self._HTML)
+        self.assertEqual(resp.status_code, 200)
+
+    def _assert_pages_omit_owner_id(self, paths) -> None:
+        for path in paths:
+            with self.subTest(path=path):
+                resp = self.client.get(path, headers=self._HTML)
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("text/html", resp.headers["content-type"])
+                self.assertNotIn(self._OWNER_ID, resp.text)
+
+    def test_user_pages_never_render_owner_id(self) -> None:
+        self._add_owner(self._OWNER_ID, "alice", "s3cret")
+        self._html_login("alice", "s3cret")
+        self._assert_pages_omit_owner_id(
+            ("/", "/products", "/profile", "/notifications"))
+
+    def test_admin_pages_never_render_owner_id(self) -> None:
+        self._add_owner(self._OWNER_ID, "root", "s3cret", role="admin")
+        self._html_login("root", "s3cret")
+        self._assert_pages_omit_owner_id(("/", "/profile", "/admin"))
+
+
 class LogoutTest(_WebAuthTestBase):
     def test_logout_clears_cookie_and_revokes_session(self) -> None:
         self._add_owner("o1", "alice", "s3cret")
