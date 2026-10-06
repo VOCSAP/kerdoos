@@ -1,7 +1,7 @@
 """TerabyteParser: dual-price extraction on the REAL SSR dump, skip-trap ids.
 
-The fixture `terabyte_40561.html` is the captured curl_cffi SSR document (195 KB,
-/produto/40561), so the scoping is stressed against the real duplicated ids: the
+The fixture `terabyte_40561.html` is the captured curl_cffi SSR document of
+/produto/40561 trimmed to its price block, which keeps the real duplicated ids: the
 EMPTY first #valParc (top sticky bar), the hidden '#valVista R$ 000,00' template,
 the adjacent 12x installment span, and the struck reference. Effective prices are
 volatile (invariant #4); these are the exact values in this capture: pix (a vista
@@ -88,6 +88,20 @@ class TerabyteSyntheticTest(unittest.TestCase):
             + "<span>filler</span>" * 300   # push the cross-sell out of window
             + '<div class="cross-sell">Outro produto: avise-me, sem estoque</div>'
         )
+        self.assertEqual(_parser().extract(html).availability,
+                         Availability.IN_STOCK)
+
+    def test_in_stock_tooltip_at_captured_distance_is_read(self) -> None:
+        # In the capture the tooltip's "no estoque" starts 896 chars before
+        # id="valVista"; the trimmed fixture is shorter, so this page is what
+        # holds _AVAIL_BEFORE to the real gap.
+        tooltip = '<span title="Produto disponivel no estoque."></span>'
+        price = '<p id="valVista">R$ 749,09</p>'
+        gap = len(tooltip) - tooltip.index("no estoque")
+        html = (tooltip + " " * (896 - gap - price.index('id="valVista"'))
+                + price)
+        self.assertEqual(
+            html.index('id="valVista"') - html.index("no estoque"), 896)
         self.assertEqual(_parser().extract(html).availability,
                          Availability.IN_STOCK)
 

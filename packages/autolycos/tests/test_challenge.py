@@ -1,10 +1,12 @@
 """autolycos.challenge.looks_challenged: tightened markers, regression-locked.
 
 The shared heuristic drives the core retry loop for every tier, so it must NOT
-false-positive on healthy pages that legitimately embed Google reCAPTCHA v3 or
-Cloudflare's passive telemetry script, yet MUST still catch a real interstitial.
-Known challenge walls are excluded by name; every other committed HTML fixture
-is asserted non-challenged as a regression lock.
+false-positive on healthy pages that legitimately embed Google reCAPTCHA v3,
+Cloudflare's passive telemetry script, an Akamai-served asset or a robots meta,
+yet MUST still catch a real interstitial. The committed fixtures are trimmed to
+what the parsers read and carry none of that noise, so synthetic healthy pages
+hold the false-positive lock. Known challenge walls are excluded by name; every
+other committed HTML fixture is still asserted non-challenged.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ class MercadoLivreCaptchaWallTest(unittest.TestCase):
     def test_captcha_wall_index_is_challenged(self) -> None:
         html = (_FIXTURES / "mercadolivre_captcha_wall_camoufox.html").read_text(
             encoding="utf-8", errors="replace")
+        self.assertGreaterEqual(len(html), 1500)
         self.assertTrue(looks_challenged(200, html))
 
     def test_account_verification_wall_remains_challenged(self) -> None:
@@ -131,6 +134,15 @@ class BroadMarkersRemovedTest(unittest.TestCase):
         page = ('<html><body>' + "content " * 400 +
                 '<script src="/cdn-cgi/challenge-platform/h/g/scripts/jsd/main.js">'
                 '</script></body></html>')
+        self.assertFalse(looks_challenged(200, page))
+
+    def test_noisy_healthy_page_is_not_challenged(self) -> None:
+        page = ('<html><head>'
+                '<meta name="robots" content="index,follow">'
+                '<meta name="googlebot" content="index">'
+                '<link rel="preconnect" href="https://assets.akamaized.net">'
+                '<script src="/cdn-cgi/scripts/email-decode.min.js"></script>'
+                '</head><body>' + "content " * 400 + '</body></html>')
         self.assertFalse(looks_challenged(200, page))
 
 

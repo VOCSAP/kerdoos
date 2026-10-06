@@ -1,26 +1,18 @@
-"""MercadoLivreParser: single-price extraction on the REAL rendered dump.
+"""MercadoLivreParser: single-price extraction on real captures.
 
-The fixture `mercadolivre_mlb35045987.html` is the captured spike render (1.3 MB,
-spike/MercadoLivre_render.html, /p/MLB35045987), so the scoping is stressed
-against the true DOM density: the single <meta itemprop="price" content="9433">
-under id="price", the SECOND data-testid="price-part" (10x de R$ 943,30
-installment) and dozens of recommended-product andes-money-amount spans. The
-effective price is volatile (invariant #4), so this is the exact value present
-in this capture: R$ 9.433 -> 943300 cents. The 10x installment (943,30 -> 94330)
-must NEVER be read.
-
-`mercadolivre_mlb35045987_camoufox.html` is a later capture (roadmap 35a14a39)
-of the SAME listing where ML dropped the id="price"/meta itemprop="price" block
-entirely: the effective price now lives only in a <script
-type="application/ld+json"> schema.org/Product node (offers.price). Session/
-device identifiers (d2id, csrf token, request/correlation/tracking ids) were
-replaced with fixed placeholders before committing; the product data (sku,
-price, reviews) is untouched.
+`mercadolivre_mlb35045987.html` and `mercadolivre_mlb35045987_camoufox.html` are
+two captures of /p/MLB35045987 trimmed to their canonical link and their JSON-LD
+nodes. Each carries exactly one schema.org Product whose sku matches the
+canonical id, so the parser reads offers.price on the JSON-LD path; the
+id="price"/meta itemprop="price" repli is exercised by the synthetic tests only.
+The effective price is volatile (invariant #4), so these are the exact values
+present in each capture: R$ 9.433 -> 943300 cents and R$ 9.434 -> 943400 cents.
 
 `mercadolivre_captcha_wall_camoufox.html` is the captcha wall the camoufox tier
-received at HTTP 200 instead of the listing; looks_challenged does not flag it,
-so the parser is the only net and must fail closed. Its tracking id was
-replaced with a fixed placeholder.
+received at HTTP 200 instead of the listing, trimmed to the stylesheet link
+carrying the captcha-wall-index marker; the parser must fail closed on it. It is
+padded above autolycos.challenge's 1500-byte floor on purpose: below it the
+short-body rule alone flags the wall, and a lost marker would go unnoticed.
 """
 
 from __future__ import annotations
@@ -58,14 +50,6 @@ class MercadoLivreRealDumpTest(unittest.TestCase):
         self.assertIsNone(extract.price_pix_member_cents)
         self.assertIsNone(extract.price_card_member_cents)
         self.assertEqual(extract.currency, "BRL")
-
-    def test_installment_price_is_never_read(self) -> None:
-        # The 10x de R$ 943,30 per-installment amount (94330) must not leak into
-        # any slot -- it has no <meta itemprop="price">, the parser anchors on
-        # the product meta only.
-        extract = _parser().extract(self.html)
-        self.assertNotEqual(extract.price_pix_cents, 94330)
-        self.assertNotEqual(extract.price_card_cents, 94330)
 
     def test_availability_in_stock(self) -> None:
         self.assertEqual(_parser().extract(self.html).availability,
@@ -155,6 +139,21 @@ class MercadoLivreJsonLdTest(unittest.TestCase):
         extract = _parser().extract(html)
         self.assertEqual(extract.price_pix_cents, 199900)
         self.assertEqual(extract.availability, Availability.IN_STOCK)
+
+    def test_jsonld_price_wins_over_installment_meta(self) -> None:
+        # The installment sits under its own id="price" meta, where the meta
+        # repli would read it; the JSON-LD Product must win over it.
+        html = (
+            '<link rel="canonical" href="https://www.mercadolivre.com.br/p/MLB1">'
+            '<script type="application/ld+json">'
+            '{"@type":"Product","sku":"MLB1","offers":{"price":9433,'
+            '"priceCurrency":"BRL","availability":'
+            '"https://schema.org/InStock"}}</script>'
+            '<div id="price"><meta itemprop="price" content="943.30">'
+            '<span data-testid="price-part">10x de R$ 943,30</span></div>')
+        extract = _parser().extract(html)
+        self.assertEqual(extract.price_pix_cents, 943300)
+        self.assertEqual(extract.price_card_cents, 943300)
 
     def test_jsonld_without_offers_price_raises_parse_error(self) -> None:
         # A Product node was found and is unambiguous, but its offers carry no

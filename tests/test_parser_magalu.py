@@ -8,11 +8,10 @@ volatile (invariant #4); this capture: pix (bestPrice.totalAmount) and card
 (price) are both 9433 reais -> 943300 cents.
 
 `magalu_bab5438g3h_camoufox.html` and `magalu_238968700_camoufox.html` are
-camoufox-tier renders whose request identifiers (x-forwarded-for, cookie,
-rua.trans, ak.rid, ak.cport) were replaced with fixed placeholders. The first
-carries distinct pix and card prices, so a swapped or misdirected path cannot
-pass. The second is an unavailable item: its offer has no bestPrice, and its
-JSON-LD still claims InStock at the list price, which the parser must ignore.
+camoufox-tier renders. The first carries distinct pix and card prices, so a
+swapped or misdirected path cannot pass. The second is an unavailable item:
+its offer has no bestPrice, and its JSON-LD still claims InStock at the list
+price, which the parser must ignore.
 """
 
 from __future__ import annotations

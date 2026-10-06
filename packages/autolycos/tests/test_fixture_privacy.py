@@ -26,6 +26,7 @@ import re
 import tempfile
 import unittest
 import urllib.parse
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURES_DIR = ROOT / "tests" / "fixtures"
@@ -55,14 +56,7 @@ LATLON_KEYS = ("latitude", "longitude", "lat", "lng", "lon", "long")
 
 # (filename, key) -> the one value that key is allowed to carry in that
 # file. Never applies to the same key in a different file.
-EXCEPTIONS: dict[tuple[str, str], str] = {
-    ("magalu_238968700_camoufox.html", "ak.gh"): "2.17.42.146",
-    ("magalu_bab5438g3h_camoufox.html", "ak.gh"): "2.17.42.146",
-    ("magalu_bab5438g3h_camoufox.html", "zipcode"): "92990000",
-    ("magalu_uc.html", "zipcode"): "92990000",
-    # public HQ address, JSON-LD Organization block, not a visitor CEP.
-    ("terabyte_40561.html", "zipcode"): "80030-001",
-}
+EXCEPTIONS: dict[tuple[str, str], str] = {}
 
 
 def _is_public_ipv4(value: str) -> bool:
@@ -422,27 +416,34 @@ class FixturePrivacyTest(unittest.TestCase):
                     f"{label} must not be flagged, found {violations!r}")
 
     def test_exception_does_not_apply_outside_its_own_file(self) -> None:
-        snippet = '{"ak.gh":"2.17.42.146"}'
-        self.assertEqual(
-            find_violations(snippet, "magalu_238968700_camoufox.html"), [],
-            "ak.gh=2.17.42.146 is exempted in its own file")
-        self.assertEqual(
-            find_violations(snippet, "some_other_site_dump.html"),
-            [("ak.gh", "2.17.42.146")],
-            "the same value in a file NOT on the exception list must still "
-            "be flagged -- an exception is per (file, key), never global")
+        snippet = '{"ak.gh":"93.184.216.34"}'
+        with mock.patch.dict(EXCEPTIONS, {
+                ("exempted_site_dump.html", "ak.gh"): "93.184.216.34"}):
+            self.assertEqual(
+                find_violations(snippet, "exempted_site_dump.html"), [],
+                "ak.gh=93.184.216.34 is exempted in its own file")
+            self.assertEqual(
+                find_violations(snippet, "some_other_site_dump.html"),
+                [("ak.gh", "93.184.216.34")],
+                "the same value in a file NOT on the exception list must "
+                "still be flagged -- an exception is per (file, key), never "
+                "global")
 
     def test_zipcode_exception_matches_the_exact_value_not_a_prefix(self) -> None:
-        self.assertEqual(
-            find_violations('{"postalCode":"80030-001"}', "terabyte_40561.html"),
-            [],
-            "80030-001 is the vendor's own exempted HQ address (JSON-LD "
-            "Organization block)")
-        self.assertEqual(
-            find_violations('{"postalCode":"80030-999"}', "terabyte_40561.html"),
-            [("zipcode", "80030-999")],
-            "a different CEP sharing the same 80030 prefix must still be "
-            "flagged -- the exception matches the exact value, not a prefix")
+        with mock.patch.dict(EXCEPTIONS, {
+                ("exempted_site_dump.html", "zipcode"): "01311-000"}):
+            self.assertEqual(
+                find_violations('{"postalCode":"01311-000"}',
+                                "exempted_site_dump.html"),
+                [],
+                "01311-000 is the exempted value in its own file")
+            self.assertEqual(
+                find_violations('{"postalCode":"01311-999"}',
+                                "exempted_site_dump.html"),
+                [("zipcode", "01311-999")],
+                "a different CEP sharing the same 01311 prefix must still be "
+                "flagged -- the exception matches the exact value, not a "
+                "prefix")
 
     def test_no_identifying_value_in_the_current_fixtures(self) -> None:
         report = scan_directory(FIXTURES_DIR)

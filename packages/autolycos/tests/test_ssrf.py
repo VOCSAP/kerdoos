@@ -235,9 +235,10 @@ class RfcOutOfBandCharacterTest(unittest.TestCase):
         safety.check_scheme_and_domain(self._BASE + "'x", _POLICY)
 
     def test_real_stored_product_urls_still_accepted(self) -> None:
-        # Every one of these is a REAL captured product URL from this repo's
-        # test fixtures (never a synthetic example) -- a regression here
-        # would break the fetch-time gate for every currently-working site.
+        # Every one of these is a REAL product URL of a supported site, as
+        # captured for the test fixtures (never a synthetic example) -- a
+        # regression here would break the fetch-time gate for every
+        # currently-working site.
         real_urls = [
             "https://www.kabum.com.br/produto/534732/monitor-gamer-alienware-32-4k-qd-oled-aw3225qf",
             "https://www.amazon.com.br/Monitor-Gamer-Alienware-QD-OLED-AW3225QF/dp/B0CVQGSRZ9",
