@@ -148,6 +148,54 @@ class UdpCapture:
             listener.recvfrom(4096)
 
 
+class TcpCapture:
+    def __init__(self) -> None:
+        self._events: list[tuple[str, int]] = []
+        self._listener: socket.socket | None = None
+        self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("0.0.0.0", 3484))
+        self._listener.listen()
+        self._listener.settimeout(0.1)
+        self._thread = threading.Thread(target=self._listen, daemon=True)
+        self._thread.start()
+        time.sleep(0.2)
+
+    def close(self) -> None:
+        self._closed.set()
+        if self._listener is not None:
+            self._listener.close()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._events.clear()
+
+    def events(self) -> list[tuple[str, int]]:
+        with self._lock:
+            return list(self._events)
+
+    def _listen(self) -> None:
+        if self._listener is None:
+            return
+        while not self._closed.is_set():
+            try:
+                connection, _ = self._listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with self._lock:
+                self._events.append(connection.getsockname())
+            connection.close()
+
+
 def lan_ip() -> str:
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -167,10 +215,25 @@ def webrtc_page(lan_ip: str) -> bytes:
     {{urls: "stun:{lan_ip}:3480"}},
     {{urls: "stun:169.254.169.254:3481"}},
     {{urls: "turn:10.0.0.1:3482?transport=udp", username: "u", credential: "p"}},
+    {{urls: "turn:127.0.0.1:3484?transport=tcp", username: "u", credential: "p"}},
+    {{urls: "turn:{lan_ip}:3484?transport=tcp", username: "u", credential: "p"}},
   ]}});
   pc.createDataChannel("probe");
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  const tcpPc = new RTCPeerConnection({{
+    iceServers: [
+      {{urls: "turn:127.0.0.1:3484?transport=tcp", username: "u", credential: "p"}},
+      {{urls: "turn:{lan_ip}:3484?transport=tcp", username: "u", credential: "p"}},
+    ],
+    iceTransportPolicy: "relay",
+  }});
+  tcpPc.createDataChannel("tcp-probe");
+  const tcpOffer = await tcpPc.createOffer();
+  await tcpPc.setLocalDescription(tcpOffer);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  document.body.insertAdjacentHTML(
+      "beforeend", '<p id="webrtc-tcp-allocation-ready">ready</p>');
   let sdp = offer.sdp.trimEnd()
       + "\\r\\na=candidate:1 1 udp 2130706431 127.0.0.1 3479 typ host\\r\\n"
       + "a=candidate:2 1 udp 2130706430 {lan_ip} 3483 typ host\\r\\n";
