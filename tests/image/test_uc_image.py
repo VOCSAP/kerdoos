@@ -345,6 +345,7 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
 
     @pytest.mark.xfail(
         strict=True,
+        raises=AssertionError,
         reason=("accepted leak, card fcd99c55: a late UC launch can leave its "
                 "recreated autolycos-uc-* profile in /tmp; no sweep removes it"))
     def test_next_fetch_removes_profile_recreated_by_late_launch(self) -> None:
@@ -404,10 +405,9 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
                 "temporary profile survived the fetch timeout",
             )
             start_driver.set()
-            self.assertTrue(
-                profile_process_seen.wait(timeout=30.0),
-                "late launch never started Chrome with the temporary profile",
-            )
+            if not profile_process_seen.wait(timeout=30.0):
+                raise RuntimeError(
+                    "late launch never started Chrome with the temporary profile")
         finally:
             start_driver.set()
 
@@ -428,14 +428,17 @@ class UcOrphanCleanupImageTest(unittest.TestCase):
         self.assertFalse(active, "late Chrome remained after driver quit")
 
         directories = set(Path(tempfile.gettempdir()).glob("autolycos-uc-*")) - baseline
-        self.assertTrue(directories, "late launch did not recreate a profile")
+        if not directories:
+            raise RuntimeError("late launch did not recreate a profile")
 
         contents = {
             path.relative_to(directory)
             for directory in directories
             for path in directory.rglob("*")
         }
-        self.assertTrue(contents, "late Chrome recreated an empty profile")
+        if not contents:
+            raise RuntimeError(
+                "late Chrome recreated its profile without the Chrome skeleton")
 
         with mock.patch.object(uc, "validate_target", return_value=target), \
              mock.patch.object(

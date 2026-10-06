@@ -221,6 +221,7 @@ class UcProfileCleanupTest(unittest.TestCase):
 
     @pytest.mark.xfail(
         strict=True,
+        raises=AssertionError,
         reason=("accepted leak, card fcd99c55: a late UC launch can leave its "
                 "recreated autolycos-uc-* profile in /tmp; no sweep removes it"))
     def test_next_fetch_removes_orphaned_profile(self) -> None:
