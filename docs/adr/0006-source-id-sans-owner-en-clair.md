@@ -1,6 +1,7 @@
 # ADR 0006 -- source_id sans owner_id
 
-- **Statut** : PROPOSED (2026-10-06, revision 2), carte roadmap `02843ecd`
+- **Statut** : ACCEPTED (2026-10-06, valide par l'operateur), carte roadmap `02843ecd`
+- **Historique** : PROPOSED le 2026-10-06 (revision 2, owner retire du `source_id`)
 - **Amende** : ADR 0001, lignes 312-319 (format de `make_source_id`)
 - **Invariant concerne** : 10 (`owner_id` jamais serialise vers le client)
 
