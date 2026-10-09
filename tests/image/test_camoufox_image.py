@@ -29,6 +29,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.request import urlopen
 
 import pytest
@@ -192,6 +193,46 @@ class CamoufoxPinnedConnectTest(_ImageGatedCase):
             proxy.dials, [],
             f"the proxy dialed {proxy.dials} despite the pin resolving to "
             "a non-global address")
+
+
+class CamoufoxPageRequestedDisallowedHostTest(_ImageGatedCase):
+    """validate_target only screens the URL handed to fetch(). A request the
+    PAGE makes to a non-allowlisted host must be refused by the proxy on its
+    CONNECT authority alone, before any resolution of that name."""
+
+    def test_page_fetch_to_a_disallowed_host_is_refused_unresolved(
+            self) -> None:
+        real_getaddrinfo = socket.getaddrinfo
+        looked_up: list[str] = []
+        looked_up_lock = threading.Lock()
+
+        def _spy(host, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            with looked_up_lock:
+                looked_up.append(str(host).lower().rstrip("."))
+            return real_getaddrinfo(host, *args, **kwargs)
+
+        result: dict = {}
+
+        def _probe(page) -> None:  # noqa: ANN001
+            result["outcome"] = page.evaluate(
+                "() => fetch('https://evil.example.org/', {mode: 'no-cors'})"
+                ".then(() => 'RESOLVED').catch(e => 'THREW:' + e.message)")
+
+        with mock.patch.object(socket, "getaddrinfo", side_effect=_spy):
+            proxy = _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=8,
+                               fetch_timeout_seconds=20)
+
+        # Positive control for the spy: validate_target resolves the
+        # allowlisted primary host through the very same function.
+        self.assertIn("example.com", looked_up)
+        self.assertIn(
+            "CONNECT evil.example.org:443", proxy.heads,
+            f"the page's request never reached the proxy: {proxy.heads}")
+        self.assertNotIn(
+            "evil.example.org", looked_up,
+            f"the disallowed host was resolved: {looked_up}")
+        self.assertEqual(proxy.dials, [])
+        self.assertTrue(result["outcome"].startswith("THREW"), result)
 
 
 class _NoTrafficDialPinningProxy(_RecordingPinningProxy):
@@ -1107,22 +1148,84 @@ class CamoufoxSpecialAddressTargetsTest(_ImageGatedCase):
 
 
 class CamoufoxDisabledBrowserApisTest(_ImageGatedCase):
+    # WebTransport and navigator.serviceWorker are [SecureContext]: in an
+    # insecure page they are undefined whatever the prefs, so the context
+    # is read in the same evaluate. The about:blank of a new page is not a
+    # secure context in Firefox, hence the https navigation first.
+    _SECURE_URL = "https://example.com/"
+    _API_TYPES_JS = (
+        "() => ({secure: isSecureContext, rtc: typeof RTCPeerConnection, "
+        "webTransport: typeof WebTransport, "
+        "serviceWorker: typeof navigator.serviceWorker})")
+
+    def _goto_secure(self, page) -> Exception | None:  # noqa: ANN001
+        try:
+            page.goto(self._SECURE_URL, wait_until="load", timeout=15_000)
+        except Exception as exc:  # noqa: BLE001 -- reported by the caller
+            return exc
+        return None
+
+    def _fail_without_egress(self, exc: Exception) -> None:
+        self.fail(f"F8 needs HTTPS egress to example.com: {exc}")
+
     def test_rtc_webtransport_serviceworker_are_undefined(self) -> None:
         result: dict = {}
 
         def _probe(page) -> None:  # noqa: ANN001
-            result["types"] = page.evaluate(
-                "() => ({rtc: typeof RTCPeerConnection, "
-                "webTransport: typeof WebTransport, "
-                "serviceWorker: typeof navigator.serviceWorker})")
+            result["goto_error"] = self._goto_secure(page)
+            if result["goto_error"] is None:
+                result["types"] = page.evaluate(self._API_TYPES_JS)
 
         _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=8,
-                   fetch_timeout_seconds=20)
+                   fetch_timeout_seconds=30)
+        if result["goto_error"] is not None:
+            self._fail_without_egress(result["goto_error"])
         self.assertEqual(result["types"], {
+            "secure": True,
             "rtc": "undefined",
             "webTransport": "undefined",
             "serviceWorker": "undefined",
         })
+
+    def test_the_same_probe_sees_the_apis_once_their_prefs_are_on(
+            self) -> None:
+        """Positive control: an unproxied launch with the three frozen
+        switches turned back on, same page kind, same evaluate."""
+        camoufox_cls, default_addons = camoufox._load_camoufox()
+        upstream = {a.name: a for a in default_addons}
+        kwargs = dict(
+            headless=True, executable_path=camoufox.CAMOUFOX_EXECUTABLE_PATH,
+            ff_version=camoufox._ready_firefox_major(
+                camoufox.CAMOUFOX_EXECUTABLE_PATH,
+                camoufox.CAMOUFOX_BROWSER_VERSION),
+            i_know_what_im_doing=True, geoip=False,
+            exclude_addons=[upstream[n]
+                            for n in camoufox._EXCLUDED_DEFAULT_ADDONS
+                            if n in upstream],
+            # Direct and online, whatever the environment's system proxy
+            # or link state says.
+            firefox_user_prefs={**camoufox.merged_firefox_prefs(),
+                                "network.proxy.type": 0,
+                                "network.manage-offline-status": False,
+                                "media.peerconnection.enabled": True,
+                                "network.webtransport.enabled": True,
+                                "dom.serviceWorkers.enabled": True},
+            timeout=camoufox.CAMOUFOX_LAUNCH_TIMEOUT_SECONDS * 1000)
+        with camoufox_cls(**kwargs) as browser:
+            # Same context options as CamoufoxFetcher._render.
+            context = browser.new_context(service_workers="block")
+            try:
+                page = context.new_page()
+                goto_error = self._goto_secure(page)
+                types = (None if goto_error is not None
+                         else page.evaluate(self._API_TYPES_JS))
+            finally:
+                context.close()
+        if goto_error is not None:
+            self._fail_without_egress(goto_error)
+        self.assertEqual(types["secure"], True, types)
+        self.assertNotIn("undefined", (types["rtc"], types["webTransport"],
+                                       types["serviceWorker"]), types)
 
 
 # Appended to a throwaway copy of camoufox.cfg (an autoconfig file, so it runs
@@ -1134,12 +1237,14 @@ var _kerdoosPrefKeys = %(keys)s;
 function _kerdoosWrite(text) {
   var Ci = Components.interfaces, Cc = Components.classes;
   var f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
-  f.initWithPath(%(path)s);
+  f.initWithPath(%(path)s + ".tmp");
   var s = Cc["@mozilla.org/network/file-output-stream;1"]
     .createInstance(Ci.nsIFileOutputStream);
   s.init(f, 0x02 | 0x08 | 0x20, 420, 0);
   s.write(text, text.length);
   s.close();
+  // Same-directory rename: the reader never sees a half-written snapshot.
+  f.moveTo(null, %(name)s);
 }
 function _kerdoosPrefSnapshot() {
   var Ci = Components.interfaces, Cc = Components.classes;
@@ -1189,6 +1294,7 @@ class CamoufoxEffectivePrefsTest(_ImageGatedCase):
                 cfg.write(_EFFECTIVE_PREFS_SNAPSHOT_JS % {
                     "keys": json.dumps(sorted(camoufox.FROZEN_FIREFOX_PREFS)),
                     "path": json.dumps(str(snapshot)),
+                    "name": json.dumps(snapshot.name),
                 })
 
             def _probe(page) -> None:  # noqa: ANN001
@@ -1580,6 +1686,72 @@ class CamoufoxBinaryProvenanceTest(_ImageGatedCase):
             self.skipTest(
                 "GitHub did not publish a digest for this asset (TOFU, "
                 "matches the Dockerfile's own documented trust model)")
+
+    def test_every_zip_member_is_installed_unchanged_from_the_pinned_zip(
+            self) -> None:
+        """ADR 0004 T4-9: libxul.so, omni.ja and camoufox.cfg carry the
+        behaviour, not just camoufox-bin. The zip is checked against the
+        Dockerfile's own pin, then every member against /opt/camoufox."""
+        import hashlib
+        import io
+        import stat
+        import zipfile
+
+        dockerfile = Path(__file__).resolve().parent.parent.parent / "Dockerfile"
+        if not dockerfile.is_file():
+            if os.environ.get("KERDOOS_IMAGE_ONLINE") == "1":
+                self.fail("KERDOOS_IMAGE_ONLINE=1 but the Dockerfile is not "
+                          "mounted next to tests/ -- the pin cannot be read")
+            self.skipTest("Dockerfile not mounted next to tests/")
+        text = dockerfile.read_text(encoding="utf-8")
+        pin = re.search(r"^ARG CAMOUFOX_SHA256=([0-9a-f]{64})\s*$", text, re.M)
+        asset_url = re.search(r"^ARG CAMOUFOX_ASSET_URL=(\S+)\s*$", text, re.M)
+        self.assertIsNotNone(pin, "no CAMOUFOX_SHA256 pin in the Dockerfile")
+        self.assertIsNotNone(asset_url, "no CAMOUFOX_ASSET_URL in the Dockerfile")
+
+        with urlopen(asset_url.group(1), timeout=90) as resp:
+            zip_bytes = resp.read()
+        self.assertEqual(hashlib.sha256(zip_bytes).hexdigest(), pin.group(1),
+                         "the downloaded asset does not match the pin")
+
+        install = Path(camoufox.CAMOUFOX_EXECUTABLE_PATH).parent
+        mismatches: dict[str, str] = {}
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            members = [info for info in zf.infolist() if not info.is_dir()]
+            for info in members:
+                target = install / info.filename
+                data = zf.read(info)
+                if stat.S_ISLNK(info.external_attr >> 16):
+                    if not target.is_symlink() or \
+                            os.readlink(target) != data.decode("utf-8"):
+                        mismatches[info.filename] = "symlink differs"
+                elif not target.is_file() or target.is_symlink():
+                    mismatches[info.filename] = "missing"
+                elif hashlib.sha256(target.read_bytes()).digest() != \
+                        hashlib.sha256(data).digest():
+                    mismatches[info.filename] = "content differs"
+                if info.filename in mismatches:
+                    continue
+                # A file the browser runs or loads must not be replaceable
+                # by a non-root process. Symlink modes are always 0777.
+                st = os.lstat(target)
+                if st.st_uid != 0:
+                    mismatches[info.filename] = f"owned by uid {st.st_uid}"
+                elif not stat.S_ISLNK(st.st_mode) and \
+                        st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    mismatches[info.filename] = (
+                        f"group/other writable ({stat.filemode(st.st_mode)})")
+        member_names = {info.filename for info in members}
+        # Positive control: the comparison really walked the members that
+        # carry the behaviour, not an empty or partial listing.
+        for carrier in ("camoufox-bin", "libxul.so", "omni.ja", "camoufox.cfg"):
+            self.assertIn(carrier, member_names)
+        self.assertEqual(mismatches, {})
+        installed = {p.relative_to(install).as_posix()
+                     for p in install.rglob("*")
+                     if p.is_file() or p.is_symlink()}
+        # version.json is written by the Dockerfile after extraction.
+        self.assertEqual(installed - member_names, {"version.json"})
 
 
 class DockerfileDefaultTargetTest(unittest.TestCase):
