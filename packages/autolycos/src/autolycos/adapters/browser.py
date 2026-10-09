@@ -282,7 +282,15 @@ def _kill_and_wait(procs: list) -> bool:  # type: ignore[type-arg]
             proc.kill()
         except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
             pass
-    _gone, alive = psutil.wait_procs(procs, timeout=_KILL_WAIT_SECONDS)
+    try:
+        _gone, alive = psutil.wait_procs(procs, timeout=_KILL_WAIT_SECONDS)
+    except (psutil.Error, OSError) as exc:
+        # psutil's pidfd wait raises EINVAL once a dead process's pid has
+        # been reused by another process's thread; only ESRCH falls back.
+        logger.warning(
+            "browser tier: could not confirm the death of %s: %r",
+            [proc.pid for proc in procs], exc)
+        return False
     return not alive
 
 

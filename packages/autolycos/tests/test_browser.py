@@ -1368,7 +1368,7 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
             100, ["node", "/venv/patchright/driver/package/cli.js", "run-driver"])
         return chromium, driver
 
-    def _fetch(self, browser_obj, tree, **fetcher_kwargs):  # noqa: ANN001, ANN003, ANN202
+    def _fetch(self, browser_obj, tree, wait_procs=None, **fetcher_kwargs):  # noqa: ANN001, ANN003, ANN202
         fake_sync_playwright = lambda: _FakePW(_FakeChromium(browser_obj))  # noqa: E731
         chromium, driver = tree
 
@@ -1387,7 +1387,8 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
              mock.patch.object(browser, "_launch_process_tree",
                                side_effect=_launch_tree), \
              mock.patch.object(psutil, "wait_procs",
-                               side_effect=lambda procs, timeout: (procs, [])):
+                               side_effect=wait_procs or (
+                                   lambda procs, timeout: (procs, []))):
             return browser.BrowserFetcher(
                 _POLICY, gate=BrowserGate(max_concurrent=1),
                 **fetcher_kwargs).fetch("https://mercadolivre.com.br/p/MLB1")
@@ -1437,6 +1438,23 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
         self.unblock.set()
         page.worker.join(timeout=_WORKER_EXIT_TIMEOUT)
         self.assertEqual(self._count(), 0)
+
+    def test_crash_cleanup_survives_a_wait_that_raises(self) -> None:
+        """psutil's pidfd wait raises EINVAL when a dead process's pid has
+        already been reused by another process's thread (measured in the
+        image): the caller must still get its FetchError."""
+        import errno
+
+        chromium, driver = self._tree(chromium_unblocks=True)
+        page = _CrashDuringReadPage(self.unblock)
+
+        def _wait_procs(procs, timeout):  # noqa: ANN001
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+        with self.assertRaisesRegex(FetchError, "renderer crashed"):
+            self._fetch(_FakeBrowser(page), (chromium, driver),
+                        wait_procs=_wait_procs, fetch_timeout_seconds=20.0)
+        self.assertTrue(chromium.killed)
 
     def test_deadline_kill_of_a_frozen_fetch_still_takes_the_driver(
             self) -> None:
