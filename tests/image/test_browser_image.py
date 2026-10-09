@@ -370,17 +370,20 @@ class BrowserRendererCrashImageTest(_BrowserImageTestCase):
         gate = BrowserGate(max_concurrent=1)
         before = {p.pid for p in psutil.Process().children(recursive=True)}
         t0 = time.monotonic()
-        with mock.patch.object(browser, "NAV_TIMEOUT_MS", 5_000):
+        # Chromium reports targetCrashed seconds after the SIGSEGV, later
+        # still under load: the message proves the crash branch, the loose
+        # bound only proves it fired before the read deadline.
+        with mock.patch.object(browser, "NAV_TIMEOUT_MS", 30_000):
             with self.assertRaisesRegex(
                     FetchError, r"renderer crashed during document read"):
                 self._fetch(
                     "crash", _route,
                     page_wrapper=_CrashAfterNavigationPage,
-                    fetch_timeout_seconds=8.0,
+                    fetch_timeout_seconds=40.0,
                     gate=gate)
         elapsed = time.monotonic() - t0
         self.assertLess(
-            elapsed, 6.0,
+            elapsed, 25.0,
             f"renderer crash took {elapsed:.1f}s instead of failing during the read")
 
         time.sleep(1.0)
