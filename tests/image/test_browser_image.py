@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import socket
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -394,6 +395,58 @@ class BrowserRendererCrashImageTest(_BrowserImageTestCase):
 
         result = self._fetch("recovered", _route, gate=gate)
         self.assertEqual(result.status, 200)
+
+
+class BrowserLongLivedProcessImageTest(_BrowserImageTestCase):
+    """Card 963a777e: in one long-lived process, renderer crashes must not
+    leave fetch threads behind (a thread stranded in patchright's sync loop
+    by a killed driver spins for good and slows every later fetch)."""
+
+    # Measured on the same image: 1.1-2.4s per normal fetch with no stranded
+    # thread, 7.2-8.0s with two of them.
+    _NORMAL_FETCH_BOUND_SECONDS = 4.0
+
+    def test_crashes_leave_no_fetch_thread_and_normal_fetches_stay_fast(
+            self) -> None:
+        import psutil
+
+        def _route(route) -> None:  # noqa: ANN001
+            route.fulfill(
+                status=200, content_type="text/html",
+                body="<html><body>" + "x" * (4 * 1024 * 1024) +
+                     "</body></html>")
+
+        gate = BrowserGate(max_concurrent=1)
+        threads_before = set(threading.enumerate())
+        with mock.patch.object(browser, "NAV_TIMEOUT_MS", 30_000):
+            for _ in range(4):
+                with self.assertRaisesRegex(
+                        FetchError, r"renderer crashed during document read"):
+                    self._fetch("crash", _route,
+                                page_wrapper=_CrashAfterNavigationPage,
+                                fetch_timeout_seconds=40.0, gate=gate)
+                drivers = [
+                    p for p in psutil.Process().children(recursive=True)
+                    if p.is_running()
+                    and "patchright" in " ".join(p.cmdline())]
+                self.assertEqual(drivers, [],
+                                 f"a patchright driver outlived its fetch: {drivers}")
+
+        durations = []
+        for _ in range(4):
+            t0 = time.monotonic()
+            result = self._fetch("recovered", _route, gate=gate,
+                                 fetch_timeout_seconds=40.0)
+            durations.append(time.monotonic() - t0)
+            self.assertEqual(result.status, 200)
+
+        stranded = [t for t in threading.enumerate()
+                    if t not in threads_before and t.is_alive()]
+        self.assertEqual(stranded, [],
+                         f"fetch thread(s) still alive after the crashes: {stranded}")
+        self.assertLess(
+            max(durations), self._NORMAL_FETCH_BOUND_SECONDS,
+            f"normal fetches after the crashes took {durations}")
 
 
 class BrowserPopupImageTest(_BrowserImageTestCase):

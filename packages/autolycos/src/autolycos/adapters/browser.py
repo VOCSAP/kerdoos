@@ -176,8 +176,7 @@ def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
     is patchright's own Node driver process (cmdline contains
     "patchright"), and all of their descendants (zygote/renderer/gpu/
     utility children, which do not carry the marker in their own argv).
-    Only ever called from _kill_launch_processes, which already confirmed
-    psutil is importable -- no ImportError guard needed here.
+    Only called once psutil is known importable (no ImportError guard here).
     """
     import psutil
 
@@ -249,12 +248,60 @@ def _kill_launch_processes(marker: str) -> bool:
             proc.kill()
         except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
             pass
-    _gone, alive = psutil.wait_procs(tree, timeout=_KILL_WAIT_SECONDS)
+    try:
+        _gone, alive = psutil.wait_procs(tree, timeout=_KILL_WAIT_SECONDS)
+    except (psutil.Error, OSError) as exc:
+        # Same pid-reuse EINVAL as in _kill_and_wait: unconfirmed, so the
+        # caller counts the fetch (fail-closed).
+        logger.warning(
+            "browser tier: could not confirm the death of the process tree "
+            "tagged %s: %r", marker, exc)
+        return False
     if alive:
         logger.warning(
             "browser tier: %d process(es) tagged %s survived SIGKILL + "
             "%.1fs wait: %s", len(alive), marker, _KILL_WAIT_SECONDS,
             [(p.pid, p.name()) for p in alive])
+    return not alive
+
+
+def _split_driver(procs: list) -> tuple[list, list]:  # type: ignore[type-arg]
+    """(Chromium's own processes, patchright's Node driver) of a tree."""
+    chromium, driver = [], []
+    for proc in procs:
+        try:
+            is_driver = "patchright" in " ".join(proc.cmdline())
+        except Exception:  # noqa: BLE001 -- psutil.Error / race with process exit
+            is_driver = False
+        (driver if is_driver else chromium).append(proc)
+    return chromium, driver
+
+
+def _kill_and_wait(procs: list) -> bool:  # type: ignore[type-arg]
+    """SIGKILL `procs`, wait up to _KILL_WAIT_SECONDS; True iff none survives.
+    Only called once psutil is known importable."""
+    import psutil
+
+    if not procs:
+        return True
+    for proc in procs:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
+            pass
+    try:
+        _gone, alive = psutil.wait_procs(procs, timeout=_KILL_WAIT_SECONDS)
+    except (psutil.Error, OSError) as exc:
+        # psutil's pidfd wait raises EINVAL once a dead process's pid has
+        # been reused by another process's thread; only ESRCH falls back.
+        logger.warning(
+            "browser tier: could not confirm the death of %s: %r",
+            [proc.pid for proc in procs], exc)
+        return False
+    if alive:
+        logger.warning(
+            "browser tier: %d process(es) survived SIGKILL + %.1fs wait: %s",
+            len(alive), _KILL_WAIT_SECONDS, [(p.pid, p.name()) for p in alive])
     return not alive
 
 
@@ -359,6 +406,35 @@ class BrowserFetcher:
                 and urldefrag(final_url).url != urldefrag(document_uri).url):
             raise FetchError("final document URI does not match page URL")
 
+    @staticmethod
+    def _release_crashed_fetch(marker: str, run_thread: threading.Thread,
+                               deadline: float, count_abandoned) -> None:  # type: ignore[no-untyped-def]
+        """A crashed renderer has already taken the page down: once Chromium
+        is killed, patchright's driver fails the pending call and the fetch
+        thread unwinds by itself. Killing the driver under that thread
+        instead leaves it spinning in patchright's sync loop for good (card
+        963a777e). The driver is identified BEFORE Chromium dies (it is only
+        found as Chromium's parent), and killed only if the thread has not
+        exited within the grace; that thread is then counted until restart."""
+        try:
+            import psutil  # noqa: F401
+        except Exception:  # noqa: BLE001 -- any import failure, not just missing
+            if not _kill_launch_processes(marker):
+                count_abandoned()
+            return
+        chromium, driver = _split_driver(_launch_process_tree(marker))
+        _kill_and_wait(chromium)
+        grace = max(0.0, min(deadline - time.monotonic(), _KILL_WAIT_SECONDS))
+        run_thread.join(timeout=grace)
+        if run_thread.is_alive():
+            logger.warning(
+                "browser tier: fetch thread for %s still running %.1fs after "
+                "the renderer crash; killing its driver, the thread stays "
+                "counted as abandoned until the process restarts",
+                marker, grace)
+            _kill_and_wait(driver)
+            count_abandoned()
+
     def fetch(self, url: str) -> FetchResult:
         # SSRF guard runs FIRST, before importing/using Playwright, so a
         # non-allowlisted or rebinding target is refused even if the optional
@@ -377,8 +453,9 @@ class BrowserFetcher:
             # a resource-exhaustion refusal.
             logger.error(
                 "browser tier: refusing new fetch, %d abandoned fetch(es) "
-                "at or above ceiling %d", abandoned_now,
-                self._max_abandoned_fetches)
+                "at or above ceiling %d; a fetch thread left behind a killed "
+                "driver never exits, only a process restart clears it",
+                abandoned_now, self._max_abandoned_fetches)
             raise FetchError(
                 f"browser tier refused: {abandoned_now} abandoned fetch(es) "
                 f"not yet resolved (ceiling {self._max_abandoned_fetches})")
@@ -548,9 +625,8 @@ class BrowserFetcher:
                 run_thread.join(timeout=min(remaining, 0.1))
                 if (run_thread.is_alive() and reading_document.is_set()
                         and renderer_crashed.is_set() and _claim()):
-                    killed_cleanly = _kill_launch_processes(marker)
-                    if not killed_cleanly:
-                        _count_abandoned()
+                    self._release_crashed_fetch(
+                        marker, run_thread, deadline, _count_abandoned)
                     raise FetchError("renderer crashed during document read")
                 if (run_thread.is_alive() and reading_document.is_set()
                         and time.monotonic() >= read_deadline["value"]
