@@ -677,7 +677,11 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             "    i_know_what_im_doing=True, geoip=False,\n"
             "    exclude_addons=[upstream[n] for n in cfx._EXCLUDED_DEFAULT_ADDONS\n"
             "                    if n in upstream],\n"
-            "    firefox_user_prefs=cfx.merged_firefox_prefs(),\n"
+            # Direct and online, whatever the environment's system proxy
+            # or link state says.
+            "    firefox_user_prefs={**cfx.merged_firefox_prefs(),\n"
+            "                        'network.proxy.type': 0,\n"
+            "                        'network.manage-offline-status': False},\n"
             "    timeout=cfx.CAMOUFOX_LAUNCH_TIMEOUT_SECONDS * 1000)\n"
             "with camoufox_cls(**kwargs) as browser:\n"
             "    page = browser.new_context().new_page()\n"
@@ -1119,6 +1123,106 @@ class CamoufoxDisabledBrowserApisTest(_ImageGatedCase):
             "webTransport": "undefined",
             "serviceWorker": "undefined",
         })
+
+
+# Appended to a throwaway copy of camoufox.cfg (an autoconfig file, so it runs
+# privileged). It runs before the profile's user prefs are read, hence a
+# repeating timer: the snapshot read from the page probe postdates startup.
+# A failure inside the timer is written to the snapshot as "__error__".
+_EFFECTIVE_PREFS_SNAPSHOT_JS = """
+var _kerdoosPrefKeys = %(keys)s;
+function _kerdoosWrite(text) {
+  var Ci = Components.interfaces, Cc = Components.classes;
+  var f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+  f.initWithPath(%(path)s);
+  var s = Cc["@mozilla.org/network/file-output-stream;1"]
+    .createInstance(Ci.nsIFileOutputStream);
+  s.init(f, 0x02 | 0x08 | 0x20, 420, 0);
+  s.write(text, text.length);
+  s.close();
+}
+function _kerdoosPrefSnapshot() {
+  var Ci = Components.interfaces, Cc = Components.classes;
+  var p = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefBranch);
+  var out = {};
+  _kerdoosPrefKeys.forEach(function (k) {
+    var t = p.getPrefType(k), v = null;
+    if (t == p.PREF_BOOL) v = p.getBoolPref(k);
+    else if (t == p.PREF_INT) v = p.getIntPref(k);
+    else if (t == p.PREF_STRING) v = p.getStringPref(k);
+    out[k] = [v, p.prefIsLocked(k)];
+  });
+  return out;
+}
+var _kerdoosPrefTimer = Components.classes["@mozilla.org/timer;1"]
+  .createInstance(Components.interfaces.nsITimer);
+_kerdoosPrefTimer.initWithCallback({notify: function () {
+  try {
+    _kerdoosWrite(JSON.stringify(_kerdoosPrefSnapshot()));
+  } catch (e) {
+    _kerdoosWrite(JSON.stringify({"__error__": String(e)}));
+  }
+}}, 300, Components.interfaces.nsITimer.TYPE_REPEATING_SLACK);
+"""
+
+
+# libpref's SetupTelemetryPref sets and locks this one at startup (true on a
+# non-official "default"-channel build); no pref of any kind can override it.
+_LOCKED_BY_FIREFOX = frozenset({"toolkit.telemetry.enabled"})
+
+
+class CamoufoxEffectivePrefsTest(_ImageGatedCase):
+    """firefox_user_prefs only TRANSMITS the frozen prefs: a lockPref or a
+    defaultPref in the shipped camoufox.cfg would silently win. This reads
+    the effective value of every frozen key inside a Camoufox launched
+    through the production fetch() path, from a copy of the install whose
+    camoufox.cfg only gains the snapshot writer."""
+
+    def test_every_frozen_pref_is_effective_in_the_running_browser(
+            self) -> None:
+        binary = Path(camoufox.CAMOUFOX_EXECUTABLE_PATH)
+        with tempfile.TemporaryDirectory(prefix="kerdoos-prefs-") as tmp:
+            copy = Path(tmp) / "camoufox"
+            shutil.copytree(binary.parent, copy, symlinks=True)
+            snapshot = Path(tmp) / "prefs.json"
+            with open(copy / "camoufox.cfg", "a", encoding="utf-8") as cfg:
+                cfg.write(_EFFECTIVE_PREFS_SNAPSHOT_JS % {
+                    "keys": json.dumps(sorted(camoufox.FROZEN_FIREFOX_PREFS)),
+                    "path": json.dumps(str(snapshot)),
+                })
+
+            def _probe(page) -> None:  # noqa: ANN001
+                deadline = time.monotonic() + 10.0
+                while not snapshot.exists() and time.monotonic() < deadline:
+                    page.wait_for_timeout(200)
+                page.wait_for_timeout(1000)
+
+            _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=8,
+                       fetch_timeout_seconds=30,
+                       executable_path=str(copy / binary.name))
+            self.assertTrue(snapshot.exists(),
+                            "the autoconfig snapshot writer never ran")
+            observed = json.loads(snapshot.read_text(encoding="utf-8"))
+
+        self.assertNotIn("__error__", observed, observed)
+        frozen = dict(camoufox.FROZEN_FIREFOX_PREFS)
+        self.assertEqual(sorted(observed), sorted(frozen))
+        self.assertEqual(
+            {key: observed[key][1] for key in _LOCKED_BY_FIREFOX},
+            {key: True for key in _LOCKED_BY_FIREFOX},
+            "an exempted pref is no longer locked by Firefox: drop its "
+            "exemption so its frozen value is enforced")
+        mismatches = {
+            key: {"effective": observed[key][0], "frozen": frozen[key],
+                  "locked": observed[key][1]}
+            for key in frozen if key not in _LOCKED_BY_FIREFOX
+            # Typed: False == 0 in Python, a bool pref read where an int is
+            # frozen (or the reverse) must still count as a mismatch.
+            if (type(observed[key][0]), observed[key][0])
+            != (type(frozen[key]), frozen[key])}
+        self.assertEqual(
+            mismatches, {},
+            "frozen prefs not effective in the running browser")
 
 
 class CamoufoxAllowedVsDisallowedChannelTest(_ImageGatedCase):
