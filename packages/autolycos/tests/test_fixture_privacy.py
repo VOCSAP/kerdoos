@@ -7,8 +7,8 @@ so a leak here ships even if the kerdoos-side copy is clean.
 Exceptions are per (file, key) only, never global, so a legitimate public
 value in one fixture cannot blanket-whitelist the same key elsewhere.
 
-`scan_directory` reads every occurrence through 3 views of the same bytes
-(raw, HTML-entity-unescaped, JSON-quote-unescaped + URL-unquoted) because a
+`scan_directory` reads every occurrence through 4 views of the same bytes
+(raw, HTML-entity-unescaped, JSON-quote-unescaped + URL-unquoted, JS-unicode-separators-decoded) because a
 value can hide from the raw-text regexes behind `&quot;` or a `\"` escape
 without ceasing to be the same identifying value once decoded.
 
@@ -113,11 +113,14 @@ def _apply_exception(filename: str, key: str, value: str,
 
 
 def _views(text: str) -> list[str]:
-    """3 decodings of the same bytes: a value can hide from the raw-text
-    regexes behind an HTML entity (`&quot;`) or a JSON/URL escape (`\\"`,
-    `%22`) without ceasing to be the same identifying value once decoded."""
+    """4 decodings of the same bytes: a value can hide from the raw-text
+    regexes behind an HTML entity (`&quot;`), a JSON/URL escape (`\\"`,
+    `%22`) or a JS unicode escape of a query separator (`\\u0026`, `\\u003d`)
+    without ceasing to be the same identifying value once decoded."""
     json_unescaped = urllib.parse.unquote(text.replace('\\"', '"'))
-    return [text, html.unescape(text), json_unescaped]
+    js_separators = re.sub(r"\\u003d", "=", re.sub(r"\\u0026", "&", text, flags=re.I),
+                           flags=re.I)
+    return [text, html.unescape(text), json_unescaped, js_separators]
 
 
 def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
@@ -258,7 +261,7 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
 
 
 def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
-    """Every (key, value) pair that looks identifying in ANY of the 3
+    """Every (key, value) pair that looks identifying in ANY of the 4
     decodings of `text` (see `_views`), after applying the (filename, key)
     exception table. `filename` is the bare name the exception table is
     keyed on, not a path."""
@@ -383,6 +386,9 @@ class FixturePrivacyTest(unittest.TestCase):
             ("URL-encoded c_uid query", 'href="/x?c_uid%3Da1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
             ("html-entity-escaped c_uid query", 'href="/x?id=1&amp;c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
             ("uppercase C_UID query", 'href="/x?C_UID=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("JS-escaped separator in an href", 'href="/x?id=1\\u0026c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("JS-escaped separator in a JSON url", '"url":"https:\\/\\/x?id=1\\u0026c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("JS-escaped equals sign", 'href="/x?c_uid\\u003da1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
         ]
         for label, snippet in witnesses:
             with self.subTest(motif=label):
@@ -408,6 +414,9 @@ class FixturePrivacyTest(unittest.TestCase):
                     "URL-encoded c_uid query": "c_uid",
                     "html-entity-escaped c_uid query": "c_uid",
                     "uppercase C_UID query": "c_uid",
+                    "JS-escaped separator in an href": "c_uid",
+                    "JS-escaped separator in a JSON url": "c_uid",
+                    "JS-escaped equals sign": "c_uid",
                 }.get(label, label)
                 self.assertIn(
                     expected_key, keys,
@@ -446,6 +455,7 @@ class FixturePrivacyTest(unittest.TestCase):
             ("empty c_uid query value", 'href="/x?c_uid=&id=1"'),
             ("JS assignment of requestId, not a query", 'a.requestId=a.requestId||b.ue_id,function(){return n}'),
             ("JS strict comparison on d2id", 'if(p.d2id===cachedId)return;const x=1'),
+            ("neutralised UUID behind a JS-escaped separator", 'href="/x?id=1\\u0026c_uid=00000000-0000-4000-8000-000000000009"'),
         ]
         for label, snippet in witnesses:
             with self.subTest(case=label):
