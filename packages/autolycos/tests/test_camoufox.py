@@ -962,7 +962,7 @@ class _FrozenBrowser:
         raise RuntimeError("browser connection closed")
 
 
-class LivenessTest(_WiringBase):
+class _FrozenFetchBase(_WiringBase):
     def setUp(self) -> None:
         super().setUp()
         self.release = threading.Event()
@@ -996,6 +996,8 @@ class LivenessTest(_WiringBase):
                         late_sweep_seconds=0.2)
         return time.monotonic() - t0
 
+
+class LivenessTest(_FrozenFetchBase):
     def test_frozen_fetch_fails_at_the_deadline_with_its_process_dead(self) -> None:
         fake = self._frozen(lambda marker: (marker,))
         elapsed = self._fetch_frozen(fake, BrowserGate(max_concurrent=1))
@@ -1111,6 +1113,73 @@ class LivenessTest(_WiringBase):
         fake = self._frozen()
         with mock.patch.dict(sys.modules, {"psutil": None}):
             self._fetch_frozen(fake, BrowserGate(max_concurrent=1))
+
+
+class _FrozenUntilFirefoxDies:
+    """new_context() spawns a marked Firefox stand-in and a driver stand-in,
+    then blocks until the Firefox one is dead, as a real pending call does
+    until the driver sees its browser go. Records whether the driver was
+    still alive at that moment."""
+
+    def __init__(self, marker: str, spawned: list, record: dict) -> None:
+        self._marker = marker
+        self._spawned = spawned
+        self._record = record
+
+    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
+        firefox = _sleeper(self._marker, "-profile",
+                           "/tmp/playwright_firefoxdev_profile-x")
+        driver = _sleeper("/venv/playwright/driver/node", "cli.js", "run-driver")
+        self._spawned.extend([firefox, driver])
+        self._record["worker"] = threading.current_thread()
+        deadline = time.monotonic() + 30
+        while firefox.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self._record["firefox_dead"] = firefox.poll() is not None
+        self._record["driver_alive_when_firefox_died"] = driver.poll() is None
+        raise RuntimeError("browser connection closed")
+
+
+class DeadlineSparesTheDriverTest(_FrozenFetchBase):
+    """Card 963a777e-bis: killing the playwright driver under a fetch thread
+    still inside the sync API leaves that thread spinning forever. At the
+    deadline Firefox alone is killed; the driver goes only if the thread
+    outlives the grace. Firefox's own -profile path carries "playwright",
+    so the driver is told apart by "run-driver" only."""
+
+    def test_deadline_kills_firefox_and_spares_the_driver_while_the_thread_lives(
+            self) -> None:
+        record: dict = {}
+        fake = _FakeCamoufox(lambda kwargs: _FrozenUntilFirefoxDies(
+            _marker(kwargs), self.spawned, record))
+        with self.assertRaises(FetchError):
+            self._fetch(fake, gate=BrowserGate(max_concurrent=1),
+                        fetch_timeout_seconds=0.5, late_sweep_seconds=5.0)
+        self.assertTrue(record.get("firefox_dead"),
+                        "Firefox was not killed at the deadline")
+        self.assertTrue(
+            record.get("driver_alive_when_firefox_died"),
+            "the driver was killed together with Firefox, under a live "
+            "fetch thread")
+        self.assertFalse(record["worker"].is_alive(),
+                         "fetch returned while its own fetch thread was alive")
+
+    def test_thread_stuck_past_the_grace_gets_its_driver_killed(self) -> None:
+        def _enter(kwargs):  # noqa: ANN001, ANN202
+            marker = _marker(kwargs)
+
+            def _spawn() -> None:
+                self.spawned.append(_sleeper(marker))
+                self.spawned.append(_sleeper(
+                    "/venv/playwright/driver/node", "cli.js", "run-driver"))
+
+            return _FrozenBrowser(_spawn, self.release)
+
+        self._fetch_frozen(_FakeCamoufox(_enter), BrowserGate(max_concurrent=1))
+        self.assertIsNotNone(self.spawned[0].poll(), "Firefox survived")
+        self.assertIsNotNone(self.spawned[1].poll(),
+                             "the driver of a stuck fetch thread survived")
+        self.assertEqual(cfx._abandoned_fetch_thread_count, 1)
 
 
 if __name__ == "__main__":

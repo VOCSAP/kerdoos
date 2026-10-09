@@ -329,6 +329,16 @@ def _cmdline_carries(proc, token: str) -> bool:  # type: ignore[no-untyped-def]
         return False
 
 
+def _is_driver(proc) -> bool:  # type: ignore[no-untyped-def]
+    """The playwright driver, told apart by its `run-driver` argument:
+    Firefox's own `-profile /tmp/playwright_firefoxdev_profile-*` carries
+    _DRIVER_CMDLINE_TOKEN too."""
+    try:
+        return "run-driver" in proc.cmdline()
+    except Exception:  # noqa: BLE001 -- psutil.Error / race with process exit
+        return False
+
+
 def _snapshot_descendant_pids() -> frozenset[int] | None:
     try:
         import psutil
@@ -637,8 +647,22 @@ class CamoufoxFetcher:
                 "camoufox tier: psutil is unavailable, cannot kill the process "
                 "tree of launch %s", marker)
             return
-        _kill_processes(_launch_process_tree(marker, pids_before))
+        # Killing the playwright driver under a thread still inside the sync
+        # API leaves it spinning for good (cards 963a777e, 963a777e-bis);
+        # with Firefox gone the driver fails the pending call and the thread
+        # unwinds by itself (measured). The second pass then takes the
+        # driver too: harmless once the thread has exited, the escalation
+        # if it has not.
+        _kill_processes(
+            [p for p in _launch_process_tree(marker, pids_before)
+             if not _is_driver(p)])
         run_thread.join(timeout=self._late_sweep_seconds)
+        if run_thread.is_alive():
+            logger.warning(
+                "camoufox tier: fetch thread for %s still running %.1fs after "
+                "its Firefox was killed; killing its driver, the thread stays "
+                "counted as abandoned until it exits", marker,
+                self._late_sweep_seconds)
         _kill_processes(_launch_process_tree(marker, pids_before))
 
     def fetch(self, url: str) -> FetchResult:

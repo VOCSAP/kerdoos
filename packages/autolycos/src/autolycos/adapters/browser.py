@@ -266,11 +266,13 @@ def _kill_launch_processes(marker: str) -> bool:
 
 
 def _split_driver(procs: list) -> tuple[list, list]:  # type: ignore[type-arg]
-    """(Chromium's own processes, patchright's Node driver) of a tree."""
+    """(Chromium's own processes, patchright's Node driver) of a tree. The
+    driver is told apart by its `run-driver` argument: an install path need
+    not say "patchright", and Chromium's profile path says "playwright"."""
     chromium, driver = [], []
     for proc in procs:
         try:
-            is_driver = "patchright" in " ".join(proc.cmdline())
+            is_driver = "run-driver" in proc.cmdline()
         except Exception:  # noqa: BLE001 -- psutil.Error / race with process exit
             is_driver = False
         (driver if is_driver else chromium).append(proc)
@@ -407,15 +409,20 @@ class BrowserFetcher:
             raise FetchError("final document URI does not match page URL")
 
     @staticmethod
-    def _release_crashed_fetch(marker: str, run_thread: threading.Thread,
-                               deadline: float, count_abandoned) -> None:  # type: ignore[no-untyped-def]
-        """A crashed renderer has already taken the page down: once Chromium
-        is killed, patchright's driver fails the pending call and the fetch
-        thread unwinds by itself. Killing the driver under that thread
-        instead leaves it spinning in patchright's sync loop for good (card
-        963a777e). The driver is identified BEFORE Chromium dies (it is only
-        found as Chromium's parent), and killed only if the thread has not
-        exited within the grace; that thread is then counted until restart."""
+    def _remaining_grace(deadline: float) -> float:
+        return max(0.0, min(deadline - time.monotonic(), _KILL_WAIT_SECONDS))
+
+    @staticmethod
+    def _release_stuck_fetch(marker: str, run_thread: threading.Thread,
+                             grace: float, count_abandoned, cause: str) -> None:  # type: ignore[no-untyped-def]
+        """Once Chromium is killed, patchright's driver fails the pending call
+        and the fetch thread unwinds by itself, whether the renderer crashed
+        or Chromium was frozen (measured, cards 963a777e and 963a777e-bis).
+        Killing the driver under that thread instead leaves it spinning in
+        patchright's sync loop for good. The driver is identified BEFORE
+        Chromium dies (it is only found as Chromium's parent), and killed
+        only if the thread has not exited within `grace`; that thread is
+        then counted until restart."""
         try:
             import psutil  # noqa: F401
         except Exception:  # noqa: BLE001 -- any import failure, not just missing
@@ -424,14 +431,12 @@ class BrowserFetcher:
             return
         chromium, driver = _split_driver(_launch_process_tree(marker))
         _kill_and_wait(chromium)
-        grace = max(0.0, min(deadline - time.monotonic(), _KILL_WAIT_SECONDS))
         run_thread.join(timeout=grace)
         if run_thread.is_alive():
             logger.warning(
                 "browser tier: fetch thread for %s still running %.1fs after "
-                "the renderer crash; killing its driver, the thread stays "
-                "counted as abandoned until the process restarts",
-                marker, grace)
+                "%s; killing its driver, the thread stays counted as "
+                "abandoned until the process restarts", marker, grace, cause)
             _kill_and_wait(driver)
             count_abandoned()
 
@@ -625,29 +630,24 @@ class BrowserFetcher:
                 run_thread.join(timeout=min(remaining, 0.1))
                 if (run_thread.is_alive() and reading_document.is_set()
                         and renderer_crashed.is_set() and _claim()):
-                    self._release_crashed_fetch(
-                        marker, run_thread, deadline, _count_abandoned)
+                    self._release_stuck_fetch(
+                        marker, run_thread, self._remaining_grace(deadline),
+                        _count_abandoned, "the renderer crash")
                     raise FetchError("renderer crashed during document read")
                 if (run_thread.is_alive() and reading_document.is_set()
                         and time.monotonic() >= read_deadline["value"]
                         and _claim()):
-                    killed_cleanly = _kill_launch_processes(marker)
-                    if not killed_cleanly:
-                        _count_abandoned()
+                    self._release_stuck_fetch(
+                        marker, run_thread, self._remaining_grace(deadline),
+                        _count_abandoned, "the document read budget")
                     raise FetchError("rendered document read exceeded its budget")
             if run_thread.is_alive() and _claim():
-                killed_cleanly = _kill_launch_processes(marker)
-                if not killed_cleanly:
-                    # Only a CONFIRMED-still-alive process tree counts
-                    # against the ceiling: once _kill_launch_processes
-                    # returns True, this fetch holds no OS resources
-                    # anymore, regardless of whether the abandoned Python
-                    # thread itself ever notices and returns. Incrementing
-                    # unconditionally at the deadline would turn a
-                    # resource-leak safety net into a permanent refusal
-                    # after enough confirmed-clean freezes (roadmap
-                    # d8b7b8fd).
-                    _count_abandoned()
+                # The fetch budget is spent here, so the grace cannot come
+                # out of it: worst case fetch_timeout + _KILL_WAIT_SECONDS,
+                # as when this branch waited on the kill of the whole tree.
+                self._release_stuck_fetch(
+                    marker, run_thread, _KILL_WAIT_SECONDS, _count_abandoned,
+                    "the fetch deadline")
                 raise FetchError(
                     f"browser fetch exceeded {self._fetch_timeout_seconds}s "
                     "total timeout")
