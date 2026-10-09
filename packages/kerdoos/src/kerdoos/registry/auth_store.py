@@ -216,6 +216,22 @@ class SqliteAuthStore:
     ) -> float | None:
         if self._login_rate_limit_max_attempts <= 0:
             return None
+        # A blocked identifier is answered from a read alone: one write per
+        # request on a flooded identifier holds config.db's writer lock
+        # against session and config writes ("database is locked").
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT failure_count, window_start FROM login_attempts "
+                "WHERE identifier_key = ? AND window_start > ?",
+                (identifier_key,
+                 now - self._login_rate_limit_window_seconds)).fetchone()
+        finally:
+            conn.close()
+        if (row is not None
+                and row["failure_count"] >= self._login_rate_limit_max_attempts):
+            return self._login_rate_limit_window_seconds - (
+                now - row["window_start"])
         conn = self._connect()
         try:
             conn.execute(
