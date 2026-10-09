@@ -339,44 +339,59 @@ def _snapshot_descendant_pids() -> frozenset[int] | None:
         return None
 
 
-def _launch_process_tree(  # type: ignore[no-untyped-def]
+def _launch_tree_parts(  # type: ignore[no-untyped-def]
     marker: str, pids_before: frozenset[int] | None,
-) -> list:
-    """This launch's processes: the Firefox carrying `marker`, its playwright
-    driver parent, and, when `pids_before` is given, any driver or Camoufox
-    process born since that snapshot (the only way to reach a launch killed
-    before Firefox existed). Pass `pids_before` only while this fetch holds a
-    single-flight gate. Descendants of all of them are included."""
+) -> tuple[list, list]:
+    """(Firefox side, driver) of this launch. Firefox side: the Firefox
+    carrying `marker`, and, when `pids_before` is given, any driver or
+    Camoufox process born since that snapshot (the only way to reach a
+    launch killed before Firefox existed), with all their descendants. Pass
+    `pids_before` only while this fetch holds a single-flight gate. Driver:
+    only the PARENT of a marked process carrying playwright's exact
+    `run-driver` argument -- never a descendant, whose argv a compromised
+    content process controls, and never by _DRIVER_CMDLINE_TOKEN, which
+    Firefox's own `-profile /tmp/playwright_firefoxdev_profile-*` carries."""
     import psutil
 
     try:
         candidates = psutil.Process(os.getpid()).children(recursive=True)
     except psutil.Error:
-        return []
+        return [], []
     roots = [p for p in candidates if _cmdline_carries(p, marker)]
-    for proc in list(roots):
+    drivers: dict[int, object] = {}
+    for proc in roots:
         try:
             parent = proc.parent()
+            if parent is not None and "run-driver" in parent.cmdline():
+                drivers[parent.pid] = parent
         except psutil.Error:
             continue
-        if parent is not None and _cmdline_carries(parent, _DRIVER_CMDLINE_TOKEN):
-            roots.append(parent)
     if pids_before is not None:
-        known = {p.pid for p in roots}
+        known = {p.pid for p in roots} | set(drivers)
         roots.extend(
             p for p in candidates
             if p.pid not in pids_before and p.pid not in known
             and (_cmdline_carries(p, _DRIVER_CMDLINE_TOKEN)
                  or _cmdline_carries(p, _BROWSER_CMDLINE_TOKEN)))
-    tree: dict[int, object] = {}
-    for root in roots:
-        tree[root.pid] = root
+    firefox: dict[int, object] = {}
+    for root in roots + list(drivers.values()):
+        if root.pid not in drivers:
+            firefox[root.pid] = root
         try:
             for descendant in root.children(recursive=True):
-                tree[descendant.pid] = descendant
+                if descendant.pid not in drivers:
+                    firefox[descendant.pid] = descendant
         except psutil.Error:
             continue
-    return list(tree.values())
+    return list(firefox.values()), list(drivers.values())
+
+
+def _launch_process_tree(  # type: ignore[no-untyped-def]
+    marker: str, pids_before: frozenset[int] | None,
+) -> list:
+    """Every process of this launch, driver included."""
+    firefox, driver = _launch_tree_parts(marker, pids_before)
+    return firefox + driver
 
 
 def _kill_processes(procs) -> bool:  # type: ignore[no-untyped-def]
@@ -391,7 +406,14 @@ def _kill_processes(procs) -> bool:  # type: ignore[no-untyped-def]
             proc.kill()
         except psutil.Error:
             pass
-    _gone, alive = psutil.wait_procs(procs, timeout=KILL_WAIT_SECONDS)
+    try:
+        _gone, alive = psutil.wait_procs(procs, timeout=KILL_WAIT_SECONDS)
+    except (psutil.Error, OSError) as exc:
+        # psutil's pidfd wait raises EINVAL once a dead process's pid has
+        # been reused by another process's thread; only ESRCH falls back.
+        logger.warning("camoufox tier: could not confirm the death of %s: %r",
+                       [p.pid for p in procs], exc)
+        return False
     if alive:
         logger.warning(
             "camoufox tier: %d process(es) survived SIGKILL + %.1fs wait: %s",
@@ -637,9 +659,25 @@ class CamoufoxFetcher:
                 "camoufox tier: psutil is unavailable, cannot kill the process "
                 "tree of launch %s", marker)
             return
-        _kill_processes(_launch_process_tree(marker, pids_before))
+        # Killing the playwright driver under a thread still inside the sync
+        # API leaves it spinning for good (cards 963a777e, 963a777e-bis);
+        # with Firefox gone the driver fails the pending call and the thread
+        # unwinds by itself (measured). The second pass then takes the
+        # driver too: harmless once the thread has exited, the escalation
+        # if it has not. The driver is captured before Firefox dies: it is
+        # only found as the marked Firefox's parent.
+        firefox, driver = _launch_tree_parts(marker, pids_before)
+        _kill_processes(firefox)
         run_thread.join(timeout=self._late_sweep_seconds)
-        _kill_processes(_launch_process_tree(marker, pids_before))
+        if run_thread.is_alive():
+            logger.warning(
+                "camoufox tier: fetch thread for %s still running %.1fs after "
+                "its Firefox was killed; killing its driver, the thread stays "
+                "counted as abandoned until it exits", marker,
+                self._late_sweep_seconds)
+        second_pass = {p.pid: p for p in _launch_process_tree(marker, pids_before)}
+        second_pass.update((p.pid, p) for p in driver)
+        _kill_processes(list(second_pass.values()))
 
     def fetch(self, url: str) -> FetchResult:
         validate_target(url, self._domain_policy)

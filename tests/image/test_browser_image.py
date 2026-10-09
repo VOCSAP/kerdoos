@@ -449,6 +449,65 @@ class BrowserLongLivedProcessImageTest(_BrowserImageTestCase):
             f"normal fetches after the crashes took {durations}")
 
 
+class _FreezeChromiumBeforeGotoPage:
+    """SIGSTOPs this launch's top-level Chromium right before navigating."""
+
+    def __init__(self, page) -> None:  # noqa: ANN001
+        self._page = page
+
+    def __getattr__(self, name):  # noqa: ANN204
+        return getattr(self._page, name)
+
+    def goto(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        import signal
+
+        import psutil
+
+        for process in psutil.Process().children(recursive=True):
+            cmdline = process.cmdline()
+            if (cmdline and "chrome" in cmdline[0]
+                    and not any(arg.startswith("--type=") for arg in cmdline)):
+                os.kill(process.pid, signal.SIGSTOP)
+        return self._page.goto(*args, **kwargs)
+
+
+class BrowserFrozenAtDeadlineImageTest(_BrowserImageTestCase):
+    """Card 963a777e-bis: a Chromium frozen until the fetch deadline is
+    killed alone; the fetch thread unwinds by itself, nothing is left behind
+    and the next fetch of the same process stays fast."""
+
+    _NORMAL_FETCH_BOUND_SECONDS = 4.0
+
+    def test_frozen_chromium_leaves_no_thread_no_process_and_a_fast_next_fetch(
+            self) -> None:
+        import psutil
+
+        def _route(route) -> None:  # noqa: ANN001
+            route.fulfill(status=200, content_type="text/html",
+                          body="<html><body>ok</body></html>")
+
+        gate = BrowserGate(max_concurrent=1)
+        threads_before = set(threading.enumerate())
+        with self.assertRaisesRegex(FetchError, r"total timeout"):
+            self._fetch("frozen", _route,
+                        page_wrapper=_FreezeChromiumBeforeGotoPage,
+                        fetch_timeout_seconds=8.0, gate=gate)
+
+        stranded = [t for t in threading.enumerate()
+                    if t not in threads_before and t.is_alive()]
+        self.assertEqual(stranded, [],
+                         f"fetch thread(s) still alive after the deadline: {stranded}")
+        leftover = [p for p in psutil.Process().children(recursive=True)
+                    if p.is_running()]
+        self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
+
+        t0 = time.monotonic()
+        result = self._fetch("recovered", _route, gate=gate,
+                             fetch_timeout_seconds=40.0)
+        self.assertEqual(result.status, 200)
+        self.assertLess(time.monotonic() - t0, self._NORMAL_FETCH_BOUND_SECONDS)
+
+
 class BrowserPopupImageTest(_BrowserImageTestCase):
     def test_page_opening_eight_popups_gets_them_refused_and_releases_gate(
             self) -> None:

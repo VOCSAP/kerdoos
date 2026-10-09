@@ -386,6 +386,50 @@ class LivenessSigstopTest(unittest.TestCase):
                     leftover, [],
                     f"attempt {attempt}: lingering process(es): {leftover}")
 
+    # Measured on the image: 2.0-3.6s per normal fetch.
+    _NORMAL_FETCH_BOUND_SECONDS = 10.0
+
+    def test_frozen_firefox_leaves_no_fetch_thread_and_a_fast_next_fetch(
+            self) -> None:
+        """Card 963a777e-bis: Firefox killed alone at the deadline lets the
+        fetch thread unwind by itself, instead of a thread left spinning
+        against a killed driver."""
+        import threading
+
+        import psutil
+
+        gate = BrowserGate(max_concurrent=1)
+        original_render = cfx.CamoufoxFetcher._render
+        before = frozenset(
+            p.pid for p in psutil.Process().children(recursive=True))
+        threads_before = set(threading.enumerate())
+
+        def _frozen_render(self_fetcher, browser, url):  # noqa: ANN001
+            self._freeze_new_firefox(before)
+            return original_render(self_fetcher, browser, url)
+
+        # Three in a row: with the driver killed under the thread, a
+        # stranded thread was measured on one frozen fetch out of two.
+        with mock.patch.object(cfx.CamoufoxFetcher, "_render", _frozen_render):
+            for _ in range(3):
+                with self.assertRaisesRegex(FetchError, "total timeout"):
+                    cfx.CamoufoxFetcher(
+                        _NEUTRAL_POLICY, gate=gate,
+                        fetch_timeout_seconds=5.0).fetch("https://example.com/")
+
+        stranded = [t for t in threading.enumerate()
+                    if t not in threads_before and t.is_alive()]
+        self.assertEqual(stranded, [],
+                         f"fetch thread(s) still alive after the deadline: {stranded}")
+        leftover = [p for p in psutil.Process().children(recursive=True)
+                    if p.pid not in before and p.is_running()]
+        self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
+
+        t0 = time.monotonic()
+        cfx.CamoufoxFetcher(_NEUTRAL_POLICY, gate=gate).fetch(
+            "https://example.com/")
+        self.assertLess(time.monotonic() - t0, self._NORMAL_FETCH_BOUND_SECONDS)
+
 
 class RealFetchMemoryFootprintTest(unittest.TestCase):
     """Card 5438dd0b measurement: peak RSS of one real, end-to-end fetch
