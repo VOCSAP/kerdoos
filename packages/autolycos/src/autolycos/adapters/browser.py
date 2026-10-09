@@ -49,6 +49,9 @@ _WEBRTC_IP_HANDLING_POLICY_NAMES = (
     "--webrtc-ip-handling-policy",
     "--force-webrtc-ip-handling-policy",
 )
+# Refuses window.open and every other popup before it gets a renderer:
+# a burst of popups can SEGV chrome-headless-shell.
+_BLOCK_POPUPS_ARG = "--block-new-web-contents"
 
 _CAPPED_HTML_JS = (
     "cap => { const h = document.documentElement.outerHTML;"
@@ -98,7 +101,7 @@ def _browser_launch_args(args: Iterable[str]) -> list[str]:
     filtered = strip_dangerous_browser_args(args)
     return [
         arg for arg in filtered if not _is_webrtc_ip_handling_policy(arg)
-    ] + [_WEBRTC_IP_HANDLING_POLICY]
+    ] + [_WEBRTC_IP_HANDLING_POLICY, _BLOCK_POPUPS_ARG]
 
 
 _HOSTNAME_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")

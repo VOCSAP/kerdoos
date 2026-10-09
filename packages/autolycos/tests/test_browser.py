@@ -397,13 +397,12 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         # pin flag; the proxy does the pinning at the network layer).
         proxy_server = chromium.launch_kwargs["proxy"]["server"]
         self.assertTrue(proxy_server.startswith("http://127.0.0.1:"))
-        self.assertEqual(len(chromium.launch_kwargs["args"]), 2)
         self.assertTrue(
             chromium.launch_kwargs["args"][0].startswith(
                 browser._LAUNCH_ID_ARG_PREFIX))
         self.assertEqual(
-            chromium.launch_kwargs["args"][1],
-            browser._WEBRTC_IP_HANDLING_POLICY)
+            set(chromium.launch_kwargs["args"][1:]),
+            {browser._WEBRTC_IP_HANDLING_POLICY, browser._BLOCK_POPUPS_ARG})
         for a in chromium.launch_kwargs["args"]:
             self.assertNotIn("--host-resolver-rules", a)
         # Phase 2b: JS stealth was applied to the rendered page.
@@ -512,6 +511,14 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         page = _FakePage("blocked", 503)
         result, _, _ = self._run(page)
         self.assertTrue(result.challenged)
+
+
+class PopupBlockSwitchTest(unittest.TestCase):
+    def test_launch_args_carry_the_popup_block_switch(self) -> None:
+        self.assertIn(
+            browser._BLOCK_POPUPS_ARG,
+            browser._browser_launch_args(
+                [f"{browser._LAUNCH_ID_ARG_PREFIX}x"]))
 
 
 class SubResourceGateTest(unittest.TestCase):
