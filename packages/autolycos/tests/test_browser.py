@@ -1295,6 +1295,166 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
             release.set()
 
 
+class _FakeProc:
+    """psutil.Process stand-in for _launch_process_tree's result."""
+
+    def __init__(self, pid: int, cmdline: list[str], on_kill=None) -> None:  # noqa: ANN001
+        self.pid = pid
+        self._cmdline = cmdline
+        self._on_kill = on_kill
+        self.killed = False
+
+    def cmdline(self) -> list[str]:
+        return self._cmdline
+
+    def name(self) -> str:
+        return self._cmdline[0]
+
+    def kill(self) -> None:
+        self.killed = True
+        if self._on_kill is not None:
+            self._on_kill()
+
+
+class _CrashDuringReadPage(_FakePage):
+    """The renderer crash fires while the document is being read; the read
+    then stays blocked until `unblock` is set, as a real call does until
+    Chromium's death reaches patchright's driver."""
+
+    def __init__(self, unblock: threading.Event) -> None:
+        super().__init__("<html>x</html>", 200)
+        self._unblock = unblock
+        self.worker: threading.Thread | None = None
+
+    def wait_for_function(self, expression, arg, timeout):  # noqa: ANN001
+        self.worker = threading.current_thread()
+        self._event_handlers["crash"](self)
+        self._unblock.wait(timeout=30)
+        raise RuntimeError("Target page, context or browser has been closed")
+
+
+class _SlowCloseBrowser(_FakeBrowser):
+    def __init__(self, page: _FakePage, close_seconds: float) -> None:
+        super().__init__(page)
+        self._close_seconds = close_seconds
+
+    def close(self) -> None:
+        time.sleep(self._close_seconds)
+        super().close()
+
+
+class BrowserCrashBranchCleanupTest(unittest.TestCase):
+    """Card 963a777e: killing patchright's Node driver under a fetch thread
+    still inside the sync API leaves that thread spinning in _sync forever,
+    which slows every later fetch of a long-lived process. On a renderer
+    crash Chromium dies on its own; the driver is left to notice."""
+
+    def setUp(self) -> None:
+        with browser._abandoned_fetch_threads_lock:
+            self._saved_abandoned_count = browser._abandoned_fetch_thread_count
+            browser._abandoned_fetch_thread_count = 0
+        self.unblock = threading.Event()
+        self.addCleanup(self.unblock.set)
+
+    def tearDown(self) -> None:
+        with browser._abandoned_fetch_threads_lock:
+            browser._abandoned_fetch_thread_count = self._saved_abandoned_count
+
+    def _tree(self, chromium_unblocks: bool) -> tuple[_FakeProc, _FakeProc]:
+        chromium = _FakeProc(
+            101, ["chrome", f"{browser._LAUNCH_ID_ARG_PREFIX}x"],
+            on_kill=self.unblock.set if chromium_unblocks else None)
+        driver = _FakeProc(
+            100, ["node", "/venv/patchright/driver/package/cli.js", "run-driver"])
+        return chromium, driver
+
+    def _fetch(self, browser_obj, tree, **fetcher_kwargs):  # noqa: ANN001, ANN003, ANN202
+        fake_sync_playwright = lambda: _FakePW(_FakeChromium(browser_obj))  # noqa: E731
+        chromium, driver = tree
+
+        def _launch_tree(marker: str) -> list:
+            # The driver is only reachable as the parent of a Chromium that
+            # still carries the marker: once Chromium is dead, nothing is.
+            return [] if chromium.killed else [chromium, driver]
+
+        import psutil
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")), \
+             mock.patch.object(browser, "_load_playwright",
+                               return_value=fake_sync_playwright), \
+             mock.patch.object(browser, "_load_stealth",
+                               return_value=_FakeStealth), \
+             mock.patch.object(browser, "_launch_process_tree",
+                               side_effect=_launch_tree), \
+             mock.patch.object(psutil, "wait_procs",
+                               side_effect=lambda procs, timeout: (procs, [])):
+            return browser.BrowserFetcher(
+                _POLICY, gate=BrowserGate(max_concurrent=1),
+                **fetcher_kwargs).fetch("https://mercadolivre.com.br/p/MLB1")
+
+    def _count(self) -> int:
+        with browser._abandoned_fetch_threads_lock:
+            return browser._abandoned_fetch_thread_count
+
+    def test_crash_kills_chromium_but_not_the_patchright_driver(self) -> None:
+        chromium, driver = self._tree(chromium_unblocks=True)
+        page = _CrashDuringReadPage(self.unblock)
+        with self.assertRaisesRegex(FetchError, "renderer crashed"):
+            self._fetch(_FakeBrowser(page), (chromium, driver),
+                        fetch_timeout_seconds=20.0)
+        self.assertTrue(chromium.killed, "Chromium's own tree was not killed")
+        self.assertFalse(
+            driver.killed,
+            "the patchright driver was killed under a live fetch thread")
+
+    def test_crash_returns_only_once_the_fetch_thread_has_exited(self) -> None:
+        chromium, driver = self._tree(chromium_unblocks=True)
+        page = _CrashDuringReadPage(self.unblock)
+        with self.assertRaisesRegex(FetchError, "renderer crashed"):
+            self._fetch(_SlowCloseBrowser(page, close_seconds=0.5),
+                        (chromium, driver), fetch_timeout_seconds=20.0)
+        self.assertIsNotNone(page.worker)
+        self.assertFalse(
+            page.worker.is_alive(),
+            "fetch returned (and released the gate) while its own fetch "
+            "thread was still running")
+        self.assertEqual(self._count(), 0)
+
+    def test_crash_with_a_fetch_thread_that_never_exits_counts_it(self) -> None:
+        chromium, driver = self._tree(chromium_unblocks=False)
+        page = _CrashDuringReadPage(self.unblock)
+        t0 = time.monotonic()
+        with self.assertRaisesRegex(FetchError, "renderer crashed"):
+            self._fetch(_FakeBrowser(page), (chromium, driver),
+                        fetch_timeout_seconds=20.0)
+        self.assertLess(time.monotonic() - t0, 20.0,
+                        "the grace for the fetch thread is not bounded")
+        self.assertTrue(page.worker.is_alive())
+        self.assertEqual(
+            self._count(), 1,
+            "a fetch thread still alive after the crash cleanup is invisible "
+            "to the abandoned-fetch ceiling")
+        self.unblock.set()
+        page.worker.join(timeout=_WORKER_EXIT_TIMEOUT)
+        self.assertEqual(self._count(), 0)
+
+    def test_deadline_kill_of_a_frozen_fetch_still_takes_the_driver(
+            self) -> None:
+        """Only a crash leaves the driver able to notice on its own; a
+        frozen browser can only be released by killing the driver too."""
+        chromium, driver = self._tree(chromium_unblocks=False)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        blocked = _BlockedUntilReleasedBrowser(release)
+        with self.assertRaisesRegex(FetchError, "total timeout"):
+            self._fetch(blocked, (chromium, driver), fetch_timeout_seconds=0.3)
+        self.assertTrue(chromium.killed)
+        self.assertTrue(driver.killed)
+        release.set()
+        for worker in blocked.workers:
+            worker.join(timeout=_WORKER_EXIT_TIMEOUT)
+
+
 class StaticRouterBrowserLaunchTimeoutTest(unittest.TestCase):
     """Roadmap b3213f3c: KERDOOS_BROWSER_LAUNCH_TIMEOUT_SECONDS is injected
     by the kerdoos composition root through StaticRouter/_make_browser --
