@@ -688,11 +688,6 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             "print('CONTROL:done')\n"
         )
         stdout, log_text = _run_traced(script, timeout=90.0)
-        self.assertIn("RESULT:FetchError", stdout, stdout)
-        self.assertIn(
-            "NS_ERROR_PROXY_CONNECTION_REFUSED", stdout,
-            f"the proxy was not refused at connect time, so the failover "
-            f"condition was never reached: {stdout}")
         self.assertIn("CONTROL:done", stdout, stdout)
         all_ips = _non_loopback_egress_ips(log_text)
         self.assertIn(
@@ -710,6 +705,11 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             firefox_egress - {_DIRECT_CONTROL_IP}, set(),
             "Firefox made a non-loopback connection while its proxy was "
             f"refusing connections: {firefox_egress}")
+        self.assertIn("RESULT:FetchError", stdout, stdout)
+        self.assertIn(
+            "NS_ERROR_PROXY_CONNECTION_REFUSED", stdout,
+            f"the proxy was not refused at connect time, so the failover "
+            f"condition was never reached: {stdout}")
 
 
 class CamoufoxAntiRebindingTest(_ImageGatedCase):
