@@ -495,7 +495,8 @@ class CamoufoxFetcher:
         """(documentURI, DOM) once settled. Akamai answers the first
         navigation with a 200 JS interstitial that replaces itself with the
         real page after the load event has already fired. Polls until it is
-        gone, and starts no poll once less than one interval of budget is
+        gone or another document is read, whose own status `status` does not
+        describe, and starts no poll once less than one interval of budget is
         left; any non-200 answer is returned as is. Every read is bounded by
         `deadline`: a first read past it raises FetchError, a poll read past
         it returns the interstitial already read."""
@@ -507,8 +508,10 @@ class CamoufoxFetcher:
                     "rendered page could not be read within the navigation "
                     "budget") from exc
             raise
+        first_uri = urldefrag(document[0]).url
         interval = _SETTLE_POLL_MS / 1000
         while (status == 200 and looks_challenged(status, document[1])
+               and urldefrag(document[0]).url == first_uri
                and deadline - time.monotonic() >= interval):
             page.wait_for_timeout(_SETTLE_POLL_MS)
             try:
