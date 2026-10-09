@@ -5,8 +5,8 @@ repo is public.
 Exceptions are per (file, key) only, never global, so a legitimate public
 value in one fixture cannot blanket-whitelist the same key elsewhere.
 
-`scan_directory` reads every occurrence through 3 views of the same bytes
-(raw, HTML-entity-unescaped, JSON-quote-unescaped + URL-unquoted) because a
+`scan_directory` reads every occurrence through 4 views of the same bytes
+(raw, HTML-entity-unescaped, JSON-quote-unescaped + URL-unquoted, JS-unicode-separators-decoded) because a
 value can hide from the raw-text regexes behind `&quot;` or a `\"` escape
 without ceasing to be the same identifying value once decoded.
 
@@ -49,6 +49,12 @@ ASSET_EXTENSIONS = ("webp", "png", "jpg", "jpeg", "gif", "svg", "ico",
 IDENTIFIER_KEYS = ("_d2id", "deviceId", "device_id", "session-id", "sessionId",
                     "session_id", "x-request-id", "requestId", "correlation_id",
                     "c_uid", "csrfToken")
+
+# Tracker ids that ship as `key=value` in a URL query. A narrower list than
+# IDENTIFIER_KEYS on purpose: `requestId`/`sessionId` also occur as JS
+# assignments (`a.requestId=a.requestId||b.ue_id`) in raw page dumps, where
+# a query-form match would flag code, not an identifier.
+QUERY_IDENTIFIER_KEYS = ("c_uid", "_d2id", "d2id", "in_app_d2id")
 
 LATLON_KEYS = ("latitude", "longitude", "lat", "lng", "lon", "long")
 
@@ -105,11 +111,14 @@ def _apply_exception(filename: str, key: str, value: str,
 
 
 def _views(text: str) -> list[str]:
-    """3 decodings of the same bytes: a value can hide from the raw-text
-    regexes behind an HTML entity (`&quot;`) or a JSON/URL escape (`\\"`,
-    `%22`) without ceasing to be the same identifying value once decoded."""
+    """4 decodings of the same bytes: a value can hide from the raw-text
+    regexes behind an HTML entity (`&quot;`), a JSON/URL escape (`\\"`,
+    `%22`) or a JS unicode escape of a query separator (`\\u0026`, `\\u003d`)
+    without ceasing to be the same identifying value once decoded."""
     json_unescaped = urllib.parse.unquote(text.replace('\\"', '"'))
-    return [text, html.unescape(text), json_unescaped]
+    js_separators = re.sub(r"\\u003d", "=", re.sub(r"\\u0026", "&", text, flags=re.I),
+                           flags=re.I)
+    return [text, html.unescape(text), json_unescaped, js_separators]
 
 
 def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
@@ -191,6 +200,16 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
             if value and not _is_placeholder_value(value) and _nonzero_hex_count(value) > 4:
                 _apply_exception(filename, key_name, value, violations)
 
+    for key_name in QUERY_IDENTIFIER_KEYS:
+        # left boundary keeps `in_app_d2id=` from also reading as `_d2id=`
+        # or `d2id=`; `(?!=)` keeps the JS comparison `p.d2id===i` out.
+        pattern = (rf'(?<![A-Za-z0-9_-]){re.escape(key_name)}=(?!=)'
+                   r'''([^&\s"'<>;#\\]*)''')
+        for m in re.finditer(pattern, text, re.I):
+            value = m.group(1)
+            if value and not _is_placeholder_value(value) and _nonzero_hex_count(value) > 4:
+                _apply_exception(filename, key_name, value, violations)
+
     for key_name in LATLON_KEYS:
         pattern = rf'"{re.escape(key_name)}"\s*:\s*"?(-?\d+\.\d+)"?'
         for m in re.finditer(pattern, text, re.I):
@@ -240,7 +259,7 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
 
 
 def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
-    """Every (key, value) pair that looks identifying in ANY of the 3
+    """Every (key, value) pair that looks identifying in ANY of the 4
     decodings of `text` (see `_views`), after applying the (filename, key)
     exception table. `filename` is the bare name the exception table is
     keyed on, not a path."""
@@ -358,6 +377,16 @@ class FixturePrivacyTest(unittest.TestCase):
             ("c_uid", '{"c_uid":"a1b2c3d4e5f6"}'),
             ("csrfToken", '{"csrfToken":"a1b2c3d4e5f6"}'),
             ("mixed-case SessionId", '{"SESSION_ID":"a1b2c3d4e5f6"}'),
+            ("c_uid query form", 'href="/x?id=MLB1196&c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("_d2id query form", 'href="/x?utm=1&_d2id=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("d2id query form", 'href="/x?1=1&d2id=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab#in_app=true"'),
+            ("in_app_d2id query form", 'href="/x?in_app_d2id=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("URL-encoded c_uid query", 'href="/x?c_uid%3Da1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("html-entity-escaped c_uid query", 'href="/x?id=1&amp;c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("uppercase C_UID query", 'href="/x?C_UID=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("JS-escaped separator in an href", 'href="/x?id=1\\u0026c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("JS-escaped separator in a JSON url", '"url":"https:\\/\\/x?id=1\\u0026c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("JS-escaped equals sign", 'href="/x?c_uid\\u003da1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
         ]
         for label, snippet in witnesses:
             with self.subTest(motif=label):
@@ -376,6 +405,16 @@ class FixturePrivacyTest(unittest.TestCase):
                     "3-decimal latitude": "latitude",
                     "2nd x-forwarded-for header carries the real IP": "x-forwarded-for",
                     "mixed-case SessionId": "session_id",
+                    "c_uid query form": "c_uid",
+                    "_d2id query form": "_d2id",
+                    "d2id query form": "d2id",
+                    "in_app_d2id query form": "in_app_d2id",
+                    "URL-encoded c_uid query": "c_uid",
+                    "html-entity-escaped c_uid query": "c_uid",
+                    "uppercase C_UID query": "c_uid",
+                    "JS-escaped separator in an href": "c_uid",
+                    "JS-escaped separator in a JSON url": "c_uid",
+                    "JS-escaped equals sign": "c_uid",
                 }.get(label, label)
                 self.assertIn(
                     expected_key, keys,
@@ -405,6 +444,16 @@ class FixturePrivacyTest(unittest.TestCase):
             ("support email", '{"contact":"suporte@loja.com.br"}'),
             ("asset filename, not an email", '"logo_large_plus@2x.webp"'),
             ("version string, not an ipv4", '{"engine":{"version":"150.0.0.0"}}'),
+            ("neutralised UUID c_uid query", 'href="/x?id=MLB1196&amp;c_uid=00000000-0000-4000-8000-000000000009"'),
+            ("neutralised UUID d2id query", 'href="/x?1=1&d2id=00000000-0000-4000-8000-000000000013#in_app=true"'),
+            ("neutralised UUID in_app_d2id query", 'href="/x?in_app_d2id=00000000-0000-4000-8000-000000000013"'),
+            ("neutralised UUID _d2id query", 'href="/x?utm=1&_d2id=00000000-0000-4000-8000-000000000001"'),
+            ("REDACTED c_uid query", 'href="/x?c_uid=REDACTED"'),
+            ("zeroed _d2id query", 'href="/x?_d2id=00000000"'),
+            ("empty c_uid query value", 'href="/x?c_uid=&id=1"'),
+            ("JS assignment of requestId, not a query", 'a.requestId=a.requestId||b.ue_id,function(){return n}'),
+            ("JS strict comparison on d2id", 'if(p.d2id===cachedId)return;const x=1'),
+            ("neutralised UUID behind a JS-escaped separator", 'href="/x?id=1\\u0026c_uid=00000000-0000-4000-8000-000000000009"'),
         ]
         for label, snippet in witnesses:
             with self.subTest(case=label):
@@ -442,6 +491,45 @@ class FixturePrivacyTest(unittest.TestCase):
                 "a different CEP sharing the same 01311 prefix must still be "
                 "flagged -- the exception matches the exact value, not a "
                 "prefix")
+
+    def test_in_app_d2id_query_is_reported_once_under_its_own_key(self) -> None:
+        value = "a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"
+        self.assertEqual(
+            find_violations(f"/x?in_app_d2id={value}", "witness.html"),
+            [("in_app_d2id", value)],
+            "in_app_d2id= must be one finding under its own key, not also "
+            "read as _d2id= or d2id=")
+
+    def test_query_exception_matches_file_key_and_exact_value(self) -> None:
+        value = "a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"
+        snippet = f"/x?c_uid={value}"
+        with mock.patch.dict(EXCEPTIONS, {
+                ("exempted_site_dump.html", "c_uid"): value}):
+            self.assertEqual(
+                find_violations(snippet, "exempted_site_dump.html"), [],
+                "the (file, key, value) exemption applies in its own file")
+            self.assertEqual(
+                find_violations(snippet, "some_other_site_dump.html"),
+                [("c_uid", value)],
+                "the same query value in another file must still be flagged")
+            other = "ffffffff-e5f6-4a7b-8c9d-0123456789ab"
+            self.assertEqual(
+                find_violations(f"/x?c_uid={other}", "exempted_site_dump.html"),
+                [("c_uid", other)],
+                "a different value for the exempted key must still be flagged")
+
+    def test_query_identifier_in_a_fixture_file_fails_the_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dump = pathlib.Path(tmp_dir) / "dump.html"
+            dump.write_text(
+                '<a href="/x?c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab">',
+                encoding="utf-8")
+            report = scan_directory(pathlib.Path(tmp_dir))
+        self.assertEqual(
+            report,
+            {"dump.html": [("c_uid", "a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab")]},
+            "a raw dump carrying a query-form tracker id must fail the "
+            "production scan path, not only the unit-level scanner")
 
     def test_no_identifying_value_in_the_current_fixtures(self) -> None:
         report = scan_directory(FIXTURES_DIR)
