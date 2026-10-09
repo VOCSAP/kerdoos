@@ -7,8 +7,8 @@ so a leak here ships even if the kerdoos-side copy is clean.
 Exceptions are per (file, key) only, never global, so a legitimate public
 value in one fixture cannot blanket-whitelist the same key elsewhere.
 
-`scan_directory` reads every occurrence through 4 views of the same bytes
-(raw, HTML-entity-unescaped, JSON-quote-unescaped + URL-unquoted, JS-unicode-separators-decoded) because a
+`scan_directory` reads every occurrence through 5 views of the same bytes
+(raw, HTML-entity-unescaped, JSON-quote-unescaped + URL-unquoted, JS-unicode-separators-decoded, fully-unquoted) because a
 value can hide from the raw-text regexes behind `&quot;` or a `\"` escape
 without ceasing to be the same identifying value once decoded.
 
@@ -50,13 +50,40 @@ ASSET_EXTENSIONS = ("webp", "png", "jpg", "jpeg", "gif", "svg", "ico",
 # value in a committed fixture.
 IDENTIFIER_KEYS = ("_d2id", "deviceId", "device_id", "session-id", "sessionId",
                     "session_id", "x-request-id", "requestId", "correlation_id",
-                    "c_uid", "csrfToken")
+                    "c_uid", "csrfToken", "pd_rd_r", "pf_rd_r", "pd_rd_wg")
 
 # Tracker ids that ship as `key=value` in a URL query. A narrower list than
 # IDENTIFIER_KEYS on purpose: `requestId`/`sessionId` also occur as JS
 # assignments (`a.requestId=a.requestId||b.ue_id`) in raw page dumps, where
 # a query-form match would flag code, not an identifier.
-QUERY_IDENTIFIER_KEYS = ("c_uid", "_d2id", "d2id", "in_app_d2id")
+QUERY_IDENTIFIER_KEYS = ("c_uid", "_d2id", "d2id", "in_app_d2id",
+                         "pd_rd_r", "pf_rd_r", "pd_rd_wg")
+
+# Keys that are also JS variable names: in query form they only count when
+# the value is a bare UUID/hex string, which no JS expression is.
+QUERY_HEX_IDENTIFIER_KEYS = ("requestId", "sessionId")
+HEX_ID_VALUE = re.compile(r"[0-9A-Fa-f-]{16,}")
+
+# Nested-URL depth read by the fully-unquoted view; a fixed bound so a
+# pathological `%25` chain cannot spin.
+MAX_UNQUOTE_PASSES = 4
+
+# Amazon ids are short mixed-case strings (`pd_rd_wg=ve0lC`): counting
+# non-zero characters lets a real value that holds a zero through, so these
+# keys are checked against the known scrubbed shapes instead, and anything
+# else is reported.
+STRICT_ID_KEYS = ("pd_rd_r", "pf_rd_r", "pd_rd_wg", "ue_id", "ue_sid")
+SCRUBBED_ID = re.compile(r"0+|00000000-0000-4000-8000-0*\d{1,4}")
+
+# `data-session-id="..."` style attributes (the `data-` prefix is optional)
+# and `<input id="session-id" value="...">`.
+ATTRIBUTE_IDENTIFIER_KEYS = ("session-id",)
+
+# Quoted JS assignments: `ue_sid = '...'`.
+ASSIGNMENT_IDENTIFIER_KEYS = ("ue_sid", "ue_id")
+
+# Widget class tokens: `class="... pd_rd_wg-XXXXX"`.
+CLASS_IDENTIFIER_KEYS = ("pd_rd_r", "pf_rd_r", "pd_rd_wg")
 
 LATLON_KEYS = ("latitude", "longitude", "lat", "lng", "lon", "long")
 
@@ -105,6 +132,17 @@ def _is_placeholder_value(value: str) -> bool:
     return bool(re.fullmatch(r"[0x_-]+", lowered))
 
 
+def _is_unscrubbed_id(key: str, value: str) -> bool:
+    if not value or _is_placeholder_value(value):
+        return False
+    if key in STRICT_ID_KEYS:
+        return not SCRUBBED_ID.fullmatch(value)
+    # a scrubbed id keeps at most the fixed UUID version/variant nibbles plus
+    # an index. Hex digits only (not every alphanumeric): ML's scrubbed
+    # `_d2id` cookie carries a `-n` suffix that must stay clean.
+    return _nonzero_hex_count(value) > 4
+
+
 def _apply_exception(filename: str, key: str, value: str,
                       violations: list[tuple[str, str]]) -> None:
     if EXCEPTIONS.get((filename, key)) == value:
@@ -113,14 +151,22 @@ def _apply_exception(filename: str, key: str, value: str,
 
 
 def _views(text: str) -> list[str]:
-    """4 decodings of the same bytes: a value can hide from the raw-text
+    """5 decodings of the same bytes: a value can hide from the raw-text
     regexes behind an HTML entity (`&quot;`), a JSON/URL escape (`\\"`,
-    `%22`) or a JS unicode escape of a query separator (`\\u0026`, `\\u003d`)
-    without ceasing to be the same identifying value once decoded."""
+    `%22`), a JS unicode escape of a query separator (`\\u0026`, `\\u003d`)
+    or a URL nested in another URL's parameter (`%2526`, `%253D`) without
+    ceasing to be the same identifying value once decoded."""
     json_unescaped = urllib.parse.unquote(text.replace('\\"', '"'))
     js_separators = re.sub(r"\\u003d", "=", re.sub(r"\\u0026", "&", text, flags=re.I),
                            flags=re.I)
-    return [text, html.unescape(text), json_unescaped, js_separators]
+    fully_unquoted = text.replace('\\"', '"')
+    for _ in range(MAX_UNQUOTE_PASSES):
+        once_more = urllib.parse.unquote(fully_unquoted)
+        if once_more == fully_unquoted:
+            break
+        fully_unquoted = once_more
+    return [text, html.unescape(text), json_unescaped, js_separators,
+            fully_unquoted]
 
 
 def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
@@ -196,21 +242,58 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
         for m in re.finditer(pattern, text, re.I):
             value = m.group(1)
             # these ids are shipped in this corpus as UUID-shaped values
-            # with only the fixed version/variant hex nibbles left non-zero
+            # with only the fixed version/variant nibbles left non-zero
             # once scrubbed (same convention as rua.trans); a real id has
-            # far more non-zero hex digits than that.
-            if value and not _is_placeholder_value(value) and _nonzero_hex_count(value) > 4:
+            # far more non-zero characters than that.
+            if _is_unscrubbed_id(key_name, value):
                 _apply_exception(filename, key_name, value, violations)
 
-    for key_name in QUERY_IDENTIFIER_KEYS:
+    for key_name in QUERY_IDENTIFIER_KEYS + QUERY_HEX_IDENTIFIER_KEYS:
         # left boundary keeps `in_app_d2id=` from also reading as `_d2id=`
-        # or `d2id=`; `(?!=)` keeps the JS comparison `p.d2id===i` out.
-        pattern = (rf'(?<![A-Za-z0-9_-]){re.escape(key_name)}=(?!=)'
+        # or `d2id=`, and `p.d2id=x` (a property assignment) out; `(?!=)`
+        # keeps the JS comparison `p.d2id===i` out.
+        pattern = (rf'(?<![A-Za-z0-9_.-]){re.escape(key_name)}=(?!=)'
                    r'''([^&\s"'<>;#\\]*)''')
         for m in re.finditer(pattern, text, re.I):
             value = m.group(1)
-            if value and not _is_placeholder_value(value) and _nonzero_hex_count(value) > 4:
+            if (key_name in QUERY_HEX_IDENTIFIER_KEYS
+                    and not HEX_ID_VALUE.fullmatch(value)):
+                continue
+            if _is_unscrubbed_id(key_name, value):
                 _apply_exception(filename, key_name, value, violations)
+
+    for key_name in ATTRIBUTE_IDENTIFIER_KEYS:
+        pattern = (rf'(?<![A-Za-z0-9_.-])(?:data-)?{re.escape(key_name)}'
+                   r'''\s*=\s*(["'])([^"'\n]*)\1''')
+        for m in re.finditer(pattern, text, re.I):
+            if _is_unscrubbed_id(key_name, m.group(2)):
+                _apply_exception(filename, key_name, m.group(2), violations)
+        # the id sits on the tag's `id`/`name`, the value in `value=`, in
+        # either order
+        for tag in re.finditer(r'<input\b[^>]*>', text, re.I):
+            if not re.search(
+                    rf'''\b(?:id|name)\s*=\s*["']{re.escape(key_name)}["']''',
+                    tag.group(0), re.I):
+                continue
+            for m in re.finditer(r'''\bvalue\s*=\s*(["'])([^"'\n]*)\1''',
+                                 tag.group(0), re.I):
+                if _is_unscrubbed_id(key_name, m.group(2)):
+                    _apply_exception(filename, key_name, m.group(2),
+                                     violations)
+
+    for key_name in ASSIGNMENT_IDENTIFIER_KEYS:
+        pattern = (rf'(?<![A-Za-z0-9_.-]){re.escape(key_name)}'
+                   r'''\s*=\s*(["'])([^"'\n]*)\1''')
+        for m in re.finditer(pattern, text, re.I):
+            if _is_unscrubbed_id(key_name, m.group(2)):
+                _apply_exception(filename, key_name, m.group(2), violations)
+
+    for key_name in CLASS_IDENTIFIER_KEYS:
+        pattern = (rf'(?<![A-Za-z0-9_.-]){re.escape(key_name)}-'
+                   r'([A-Za-z0-9-]+)')
+        for m in re.finditer(pattern, text, re.I):
+            if _is_unscrubbed_id(key_name, m.group(1)):
+                _apply_exception(filename, key_name, m.group(1), violations)
 
     for key_name in LATLON_KEYS:
         pattern = rf'"{re.escape(key_name)}"\s*:\s*"?(-?\d+\.\d+)"?'
@@ -261,7 +344,7 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
 
 
 def find_violations(text: str, filename: str) -> list[tuple[str, str]]:
-    """Every (key, value) pair that looks identifying in ANY of the 4
+    """Every (key, value) pair that looks identifying in ANY of the 5
     decodings of `text` (see `_views`), after applying the (filename, key)
     exception table. `filename` is the bare name the exception table is
     keyed on, not a path."""
@@ -389,6 +472,25 @@ class FixturePrivacyTest(unittest.TestCase):
             ("JS-escaped separator in an href", 'href="/x?id=1\\u0026c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
             ("JS-escaped separator in a JSON url", '"url":"https:\\/\\/x?id=1\\u0026c_uid=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
             ("JS-escaped equals sign", 'href="/x?c_uid\\u003da1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("pd_rd_r query form", 'href="/dp/B0F4ZY4HXQ?pd_rd_r=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab&amp;pd_rd_i=B0F4ZY4HXQ"'),
+            ("pf_rd_r query form", 'href="/dp/B0F4ZY4HXQ?pf_rd_r=7PK4BN8S3Q2JW0V6X1ZD&amp;pd_rd_i=B0F4ZY4HXQ"'),
+            ("pd_rd_wg query form, non-hex alphabet", 'href="/dp/B0F4ZY4HXQ?pd_rd_wg=veWlC&amp;pd_rd_r=00000000-0000-4000-8000-000000000023"'),
+            ("pf_rd_r JSON form", '{"pf_rd_r":"7PK4BN8S3Q2JW0V6X1ZD"}'),
+            ("html-entity-escaped pd_rd_wg JSON form", '&quot;pd_rd_wg&quot;:&quot;veWlC&quot;'),
+            ("data-session-id attribute", '<div data-session-id="139-1234567-1234567" data-logged-in="false">'),
+            ("session-id attribute, single quotes", "<div session-id='139-1234567-1234567'>"),
+            ("double-encoded c_uid query", 'href="/x?go=https%3A%2F%2Fy%3Fid%3D1%2526c_uid%253Da1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("requestId query with a UUID value", 'href="/x?id=1&requestId=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
+            ("sessionId query with a hex value", 'href="/x?sessionId=a1b2c3d4e5f60718293a"'),
+            ("pd_rd_wg query form holding a zero", 'href="/dp/B0F4ZY4HXQ?pd_rd_wg=ve0lC"'),
+            ("session-id hidden input, value last", '<input type="hidden" id="session-id" name="session-id" value="139-1234567-1234567">'),
+            ("session-id hidden input, value first", '<input value="139-1234567-1234567" type="hidden" id="session-id" name="session-id">'),
+            ("ue_sid quoted assignment", "var ue_sid = '139-1234567-1234567',"),
+            ("ue_id quoted assignment", "var ue_id = '7PK4BN8S3Q2JW0V6X1ZD',"),
+            ("ue_id quoted assignment, few hex digits", "var ue_id = 'ZXQWTYLM0KJHRPSVGUIO',"),
+            ("pd_rd_wg class token", '<div class="celwidget pd_rd_w-xf3rv pd_rd_wg-ve0lC">'),
+            ("pd_rd_r class token", '<div class="celwidget pd_rd_r-a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab pd_rd_wg-00000">'),
+            ("pf_rd_r class token", '<div class="celwidget pf_rd_p-e33c387e pf_rd_r-7PK4BN8S3Q2JW0V6X1ZD">'),
         ]
         for label, snippet in witnesses:
             with self.subTest(motif=label):
@@ -417,6 +519,25 @@ class FixturePrivacyTest(unittest.TestCase):
                     "JS-escaped separator in an href": "c_uid",
                     "JS-escaped separator in a JSON url": "c_uid",
                     "JS-escaped equals sign": "c_uid",
+                    "pd_rd_r query form": "pd_rd_r",
+                    "pf_rd_r query form": "pf_rd_r",
+                    "pd_rd_wg query form, non-hex alphabet": "pd_rd_wg",
+                    "pf_rd_r JSON form": "pf_rd_r",
+                    "html-entity-escaped pd_rd_wg JSON form": "pd_rd_wg",
+                    "data-session-id attribute": "session-id",
+                    "session-id attribute, single quotes": "session-id",
+                    "double-encoded c_uid query": "c_uid",
+                    "requestId query with a UUID value": "requestId",
+                    "sessionId query with a hex value": "sessionId",
+                    "pd_rd_wg query form holding a zero": "pd_rd_wg",
+                    "session-id hidden input, value last": "session-id",
+                    "session-id hidden input, value first": "session-id",
+                    "ue_sid quoted assignment": "ue_sid",
+                    "ue_id quoted assignment": "ue_id",
+                    "ue_id quoted assignment, few hex digits": "ue_id",
+                    "pd_rd_wg class token": "pd_rd_wg",
+                    "pd_rd_r class token": "pd_rd_r",
+                    "pf_rd_r class token": "pf_rd_r",
                 }.get(label, label)
                 self.assertIn(
                     expected_key, keys,
@@ -456,6 +577,26 @@ class FixturePrivacyTest(unittest.TestCase):
             ("JS assignment of requestId, not a query", 'a.requestId=a.requestId||b.ue_id,function(){return n}'),
             ("JS strict comparison on d2id", 'if(p.d2id===cachedId)return;const x=1'),
             ("neutralised UUID behind a JS-escaped separator", 'href="/x?id=1\\u0026c_uid=00000000-0000-4000-8000-000000000009"'),
+            ("zeroed pd_rd_r query", 'href="/dp/B0F4ZY4HXQ?pd_rd_r=00000000-0000-4000-8000-000000000023&amp;pd_rd_i=B0F4ZY4HXQ"'),
+            ("zeroed pf_rd_r and pd_rd_wg queries", 'href="/dp/B0F4ZY4HXQ?pf_rd_r=00000000000000000000&amp;pd_rd_wg=00000&amp;pd_rd_r=00000000-0000-4000-8000-000000000023"'),
+            ("zeroed pd_rd_wg JSON form", '&quot;pd_rd_wg&quot;:&quot;00000&quot;,&quot;pf_rd_r&quot;:&quot;00000000000000000000&quot;'),
+            ("scrubbed _d2id cookie with the ML -n suffix", '{"cookies":{"_d2id":"00000000-0000-4000-8000-000000000013-n"}}'),
+            ("zeroed data-session-id",'<div data-session-id="000-0000000-0000000" data-logged-in="false">'),
+            ("double-encoded neutralised c_uid", 'href="/x?go=https%3A%2F%2Fy%3Fid%3D1%2526c_uid%253D00000000-0000-4000-8000-000000000009"'),
+            ("JS variable assignment of sessionId", 'var sessionId=cachedSession123abc;'),
+            ("JS variable assignment of requestId", 'var requestId=a.requestId||b.ue_id,'),
+            ("dot before a query key, property assignment", 'p.d2id=cachedDeviceId;'),
+            ("zeroed session-id hidden input, value last", '<input type="hidden" id="session-id" name="session-id" value="000-0000000-0000000">'),
+            ("zeroed session-id hidden input, value first", '<input value="000-0000000-0000000" type="hidden" id="session-id" name="session-id">'),
+            ("hidden input of another field", '<input type="hidden" id="csrf" name="csrf" value="139-1234567-1234567">'),
+            ("zeroed ue_sid quoted assignment", "    ue_sid = '000-0000000-0000000',"),
+            ("zeroed ue_id quoted assignment", "    var ue_id = '00000000000000000000',"),
+            ("ue_id property chain, not a quoted assignment", 'if(l){d.ue_id=a.id=a.rid=l;if("device"===c)a.oid=I(l)}'),
+            ("ue_sid property read", 'u={sessionId:d.ue_sid||"",obfuscatedMarketplaceId:d.ue_mid||""}'),
+            ("zeroed Amazon class tokens", '<div class="celwidget pd_rd_w-xf3rv pd_rd_r-00000000000000000000 pd_rd_wg-00000 a-size-small">'),
+            ("zeroed pf_rd_r class token", '<div class="celwidget pf_rd_p-e33c387e-3b13-4ac6 pf_rd_r-00000000000000000000" cel_widget_id="f1db08f0">'),
+            ("neutralised UUID pd_rd_r class token", '<div class="pd_rd_r-00000000-0000-4000-8000-000000000023">'),
+            ("neutralised UUID pd_rd_r with a 4-digit index", 'href="/dp/B0F4ZY4HXQ?pd_rd_r=00000000-0000-4000-8000-000000001234"'),
         ]
         for label, snippet in witnesses:
             with self.subTest(case=label):
