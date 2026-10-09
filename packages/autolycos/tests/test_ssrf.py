@@ -618,6 +618,23 @@ class EgressProxyTest(unittest.TestCase):
         client.close()
         self.assertIn(b"400", resp)
 
+    def test_stop_ends_the_serve_thread_promptly(self) -> None:
+        # stop() runs inside every fetch's total deadline, so a serve thread
+        # still parked in accept() costs the fetch its whole join timeout.
+        import time
+
+        from autolycos.egress_proxy import PinningProxy
+
+        proxy = PinningProxy(domain_allowed=_allow_any_domain)
+        proxy.start()
+        t0 = time.monotonic()
+        proxy.stop()
+        elapsed = time.monotonic() - t0
+
+        self.assertFalse(proxy._thread.is_alive(),
+                         "the serve thread is still blocked in accept()")
+        self.assertLess(elapsed, 1.0)
+
     def test_non_loopback_client_helper(self) -> None:
         # The accept loop rejects any non-loopback peer; the bind already blocks
         # remote clients, this asserts the explicit guard's predicate.
