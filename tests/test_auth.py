@@ -16,6 +16,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -309,6 +310,83 @@ class LoginRateLimitTest(_AuthTestBase):
             conn.close()
         self.assertEqual(row[0], 1)
         self.assertEqual(row[1], 1)
+
+    def _data_version(self):  # noqa: ANN202
+        """PRAGMA data_version of a separate connection changes whenever
+        another connection commits a change to config.db."""
+        observer = sqlite3.connect(self.db_path, isolation_level=None)
+        self.addCleanup(observer.close)
+        return lambda: observer.execute("PRAGMA data_version").fetchone()[0]
+
+    def _attempt_row(self, key: str) -> tuple | None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute(
+                "SELECT failure_count, window_start FROM login_attempts "
+                "WHERE identifier_key = ?", (key,)).fetchone()
+        finally:
+            conn.close()
+
+    def test_blocked_identifier_is_refused_without_any_write(self) -> None:
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=2,
+            login_rate_limit_window_seconds=60)
+        store.reserve_login_attempt("alice", now=1000.0)
+        store.reserve_login_attempt("alice", now=1000.0)  # count = max
+        version = self._data_version()
+        before = version()
+        self.assertEqual(
+            store.reserve_login_attempt("alice", now=1010.0), 50.0)
+        self.assertEqual(
+            store.reserve_login_attempt("alice", now=1030.0), 30.0)
+        self.assertEqual(version(), before)
+        self.assertEqual(self._attempt_row("alice"), (2, 1000.0))
+
+    def test_expired_blocked_row_goes_back_through_the_write_path(
+            self) -> None:
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=1,
+            login_rate_limit_window_seconds=60)
+        store.reserve_login_attempt("alice", now=1000.0)  # count = max
+        self.assertIsNotNone(store.reserve_login_attempt("alice", now=1001.0))
+        version = self._data_version()
+        before = version()
+        self.assertIsNone(store.reserve_login_attempt("alice", now=1060.0))
+        self.assertNotEqual(version(), before)
+        self.assertEqual(self._attempt_row("alice"), (1, 1060.0))
+
+    def test_attempt_one_below_the_limit_is_reserved_then_blocks(
+            self) -> None:
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=2,
+            login_rate_limit_window_seconds=60)
+        store.reserve_login_attempt("alice", now=1000.0)  # count = max - 1
+        version = self._data_version()
+        before = version()
+        self.assertIsNone(store.reserve_login_attempt("alice", now=1001.0))
+        self.assertNotEqual(version(), before)
+        self.assertEqual(self._attempt_row("alice"), (2, 1000.0))
+        self.assertEqual(
+            store.reserve_login_attempt("alice", now=1002.0), 58.0)
+
+    def test_concurrent_attempts_one_below_the_limit_admit_exactly_one(
+            self) -> None:
+        max_attempts = 3
+        store = SqliteAuthStore(
+            self.db_path, login_rate_limit_max_attempts=max_attempts,
+            login_rate_limit_window_seconds=60)
+        for _ in range(max_attempts - 1):
+            store.reserve_login_attempt("alice", now=1000.0)
+        threads = 16
+        barrier = threading.Barrier(threads)
+
+        def _attempt() -> float | None:
+            barrier.wait()
+            return store.reserve_login_attempt("alice", now=1001.0)
+
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            results = list(executor.map(lambda _: _attempt(), range(threads)))
+        self.assertEqual(sum(r is None for r in results), 1)
 
 
 class AntiEnumerationTest(_AuthTestBase):
