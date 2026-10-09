@@ -769,6 +769,14 @@ class InterstitialSettleTest(_WiringBase):
         self.assertTrue(result.challenged)
         self.assertEqual(result.html, short_error)
 
+    def test_fragment_change_of_the_interstitial_keeps_polling(self) -> None:
+        browser = _Browser([(_URL, _INTERSTITIAL),
+                            (_URL + "#a", _INTERSTITIAL),
+                            (_URL + "#a", _PAGE)])
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
+        self.assertEqual(result.html, _PAGE)
+        self.assertEqual(len(browser.contexts[0].page.waits), 2)
+
     def test_read_during_the_replacing_navigation_is_retried(self) -> None:
         browser = _Browser(
             [_INTERSTITIAL, RuntimeError("page is navigating"), _PAGE])

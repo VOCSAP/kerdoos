@@ -495,11 +495,11 @@ class CamoufoxFetcher:
         """(documentURI, DOM) once settled. Akamai answers the first
         navigation with a 200 JS interstitial that replaces itself with the
         real page after the load event has already fired. Polls until it is
-        gone or another document is read, whose own status `status` does not
-        describe, and starts no poll once less than one interval of budget is
-        left; any non-200 answer is returned as is. Every read is bounded by
-        `deadline`: a first read past it raises FetchError, a poll read past
-        it returns the interstitial already read."""
+        gone or until a different document is read (`status` only describes
+        the first one), and starts no poll once less than one interval of
+        budget is left; any non-200 answer is returned as is. Every read is
+        bounded by `deadline`: a first read past it raises FetchError, a poll
+        read past it returns the interstitial already read."""
         try:
             document = cls._read_document(page, deadline)
         except Exception as exc:  # noqa: BLE001 -- narrowed just below
