@@ -176,8 +176,7 @@ def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
     is patchright's own Node driver process (cmdline contains
     "patchright"), and all of their descendants (zygote/renderer/gpu/
     utility children, which do not carry the marker in their own argv).
-    Only ever called from _kill_launch_processes, which already confirmed
-    psutil is importable -- no ImportError guard needed here.
+    Only called once psutil is known importable (no ImportError guard here).
     """
     import psutil
 
@@ -249,7 +248,15 @@ def _kill_launch_processes(marker: str) -> bool:
             proc.kill()
         except Exception:  # noqa: BLE001 -- psutil.Error, already exited, etc.
             pass
-    _gone, alive = psutil.wait_procs(tree, timeout=_KILL_WAIT_SECONDS)
+    try:
+        _gone, alive = psutil.wait_procs(tree, timeout=_KILL_WAIT_SECONDS)
+    except (psutil.Error, OSError) as exc:
+        # Same pid-reuse EINVAL as in _kill_and_wait: unconfirmed, so the
+        # caller counts the fetch (fail-closed).
+        logger.warning(
+            "browser tier: could not confirm the death of the process tree "
+            "tagged %s: %r", marker, exc)
+        return False
     if alive:
         logger.warning(
             "browser tier: %d process(es) tagged %s survived SIGKILL + "
@@ -291,6 +298,10 @@ def _kill_and_wait(procs: list) -> bool:  # type: ignore[type-arg]
             "browser tier: could not confirm the death of %s: %r",
             [proc.pid for proc in procs], exc)
         return False
+    if alive:
+        logger.warning(
+            "browser tier: %d process(es) survived SIGKILL + %.1fs wait: %s",
+            len(alive), _KILL_WAIT_SECONDS, [(p.pid, p.name()) for p in alive])
     return not alive
 
 

@@ -1431,6 +1431,9 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 20.0,
                         "the grace for the fetch thread is not bounded")
         self.assertTrue(page.worker.is_alive())
+        self.assertTrue(
+            driver.killed,
+            "the driver of a fetch thread stuck past the grace was not killed")
         self.assertEqual(
             self._count(), 1,
             "a fetch thread still alive after the crash cleanup is invisible "
@@ -1455,6 +1458,27 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
             self._fetch(_FakeBrowser(page), (chromium, driver),
                         wait_procs=_wait_procs, fetch_timeout_seconds=20.0)
         self.assertTrue(chromium.killed)
+
+    def test_deadline_kill_whose_wait_raises_fails_closed(self) -> None:
+        """Same pid-reuse EINVAL on the deadline branch: still a FetchError,
+        and the fetch counts as abandoned since its death is unconfirmed."""
+        import errno
+
+        chromium, driver = self._tree(chromium_unblocks=False)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        blocked = _BlockedUntilReleasedBrowser(release)
+
+        def _wait_procs(procs, timeout):  # noqa: ANN001
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+        with self.assertRaisesRegex(FetchError, "total timeout"):
+            self._fetch(blocked, (chromium, driver), wait_procs=_wait_procs,
+                        fetch_timeout_seconds=0.3)
+        self.assertEqual(self._count(), 1)
+        release.set()
+        for worker in blocked.workers:
+            worker.join(timeout=_WORKER_EXIT_TIMEOUT)
 
     def test_deadline_kill_of_a_frozen_fetch_still_takes_the_driver(
             self) -> None:
