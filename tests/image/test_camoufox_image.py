@@ -29,6 +29,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.request import urlopen
 
 import pytest
@@ -217,7 +218,6 @@ class CamoufoxPageRequestedDisallowedHostTest(_ImageGatedCase):
                 "() => fetch('https://evil.example.org/', {mode: 'no-cors'})"
                 ".then(() => 'RESOLVED').catch(e => 'THREW:' + e.message)")
 
-        import unittest.mock as mock
         with mock.patch.object(socket, "getaddrinfo", side_effect=_spy):
             proxy = _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=8,
                                fetch_timeout_seconds=20)
@@ -1158,15 +1158,28 @@ class CamoufoxDisabledBrowserApisTest(_ImageGatedCase):
         "webTransport: typeof WebTransport, "
         "serviceWorker: typeof navigator.serviceWorker})")
 
+    def _goto_secure(self, page) -> Exception | None:  # noqa: ANN001
+        try:
+            page.goto(self._SECURE_URL, wait_until="load", timeout=15_000)
+        except Exception as exc:  # noqa: BLE001 -- reported by the caller
+            return exc
+        return None
+
+    def _fail_without_egress(self, exc: Exception) -> None:
+        self.fail(f"F8 needs HTTPS egress to example.com: {exc}")
+
     def test_rtc_webtransport_serviceworker_are_undefined(self) -> None:
         result: dict = {}
 
         def _probe(page) -> None:  # noqa: ANN001
-            page.goto(self._SECURE_URL, wait_until="load", timeout=15_000)
-            result["types"] = page.evaluate(self._API_TYPES_JS)
+            result["goto_error"] = self._goto_secure(page)
+            if result["goto_error"] is None:
+                result["types"] = page.evaluate(self._API_TYPES_JS)
 
         _run_probe(_NEUTRAL_POLICY, _probe, nav_timeout_seconds=8,
                    fetch_timeout_seconds=30)
+        if result["goto_error"] is not None:
+            self._fail_without_egress(result["goto_error"])
         self.assertEqual(result["types"], {
             "secure": True,
             "rtc": "undefined",
@@ -1189,7 +1202,11 @@ class CamoufoxDisabledBrowserApisTest(_ImageGatedCase):
             exclude_addons=[upstream[n]
                             for n in camoufox._EXCLUDED_DEFAULT_ADDONS
                             if n in upstream],
+            # Direct and online, whatever the environment's system proxy
+            # or link state says.
             firefox_user_prefs={**camoufox.merged_firefox_prefs(),
+                                "network.proxy.type": 0,
+                                "network.manage-offline-status": False,
                                 "media.peerconnection.enabled": True,
                                 "network.webtransport.enabled": True,
                                 "dom.serviceWorkers.enabled": True},
@@ -1199,10 +1216,13 @@ class CamoufoxDisabledBrowserApisTest(_ImageGatedCase):
             context = browser.new_context(service_workers="block")
             try:
                 page = context.new_page()
-                page.goto(self._SECURE_URL, wait_until="load", timeout=15_000)
-                types = page.evaluate(self._API_TYPES_JS)
+                goto_error = self._goto_secure(page)
+                types = (None if goto_error is not None
+                         else page.evaluate(self._API_TYPES_JS))
             finally:
                 context.close()
+        if goto_error is not None:
+            self._fail_without_egress(goto_error)
         self.assertEqual(types["secure"], True, types)
         self.assertNotIn("undefined", (types["rtc"], types["webTransport"],
                                        types["serviceWorker"]), types)
@@ -1710,6 +1730,17 @@ class CamoufoxBinaryProvenanceTest(_ImageGatedCase):
                 elif hashlib.sha256(target.read_bytes()).digest() != \
                         hashlib.sha256(data).digest():
                     mismatches[info.filename] = "content differs"
+                if info.filename in mismatches:
+                    continue
+                # A file the browser runs or loads must not be replaceable
+                # by a non-root process. Symlink modes are always 0777.
+                st = os.lstat(target)
+                if st.st_uid != 0:
+                    mismatches[info.filename] = f"owned by uid {st.st_uid}"
+                elif not stat.S_ISLNK(st.st_mode) and \
+                        st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    mismatches[info.filename] = (
+                        f"group/other writable ({stat.filemode(st.st_mode)})")
         member_names = {info.filename for info in members}
         # Positive control: the comparison really walked the members that
         # carry the behaviour, not an empty or partial listing.
