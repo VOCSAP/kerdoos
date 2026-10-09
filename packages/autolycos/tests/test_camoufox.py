@@ -97,7 +97,8 @@ class _Handle:
 
 class _Page:
     """`contents` is served one read at a time, its last item repeating; an
-    exception item is raised instead of returned. wait_for_function() does
+    exception item is raised instead of returned, a (documentURI, html) item
+    overrides `document_uri` for that read. wait_for_function() does
     NOT run the script it receives: it re-implements the cap (-1 over it)
     and the driver-side timeout a _Busy item runs into, so these tests prove
     the adapter's handling of those answers, never the script's own
@@ -153,6 +154,9 @@ class _Page:
         for response in later:
             self._emit(response)
         item = self._next()
+        document_uri = self.document_uri
+        if isinstance(item, tuple):
+            document_uri, item = item
         if isinstance(item, _Busy):
             if timeout and timeout / 1000 < item.seconds:
                 time.sleep(timeout / 1000)
@@ -161,7 +165,7 @@ class _Page:
             item = _PAGE
         if len(item) > arg:
             return _Handle(-1)
-        return _Handle(f"{self.document_uri}\n{item}")
+        return _Handle(f"{document_uri}\n{item}")
 
 
 class _Context:
@@ -747,6 +751,29 @@ class InterstitialSettleTest(_WiringBase):
         browser = _Browser([_INTERSTITIAL, _INTERSTITIAL, _PAGE])
         _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
         self.assertFalse(result.challenged)
+        self.assertEqual(result.html, _PAGE)
+        self.assertEqual(len(browser.contexts[0].page.waits), 2)
+
+    def test_interstitial_replaced_by_another_document_stops_polling(
+            self) -> None:
+        not_found = "https://www.magazineluiza.com.br/404/"
+        short_error = "<html>not found</html>"
+        self.assertTrue(looks_challenged(404, short_error))
+        browser = _Browser(
+            [(_URL, _INTERSTITIAL), (not_found, short_error)], 200,
+            url=not_found, later_responses=[_Response(404, url=not_found)])
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser),
+                                nav_timeout_seconds=3.0)
+        self.assertEqual(len(browser.contexts[0].page.waits), 1)
+        self.assertEqual(result.status, 404)
+        self.assertTrue(result.challenged)
+        self.assertEqual(result.html, short_error)
+
+    def test_fragment_change_of_the_interstitial_keeps_polling(self) -> None:
+        browser = _Browser([(_URL, _INTERSTITIAL),
+                            (_URL + "#a", _INTERSTITIAL),
+                            (_URL + "#a", _PAGE)])
+        _, result = self._fetch(_FakeCamoufox(lambda kwargs: browser))
         self.assertEqual(result.html, _PAGE)
         self.assertEqual(len(browser.contexts[0].page.waits), 2)
 
