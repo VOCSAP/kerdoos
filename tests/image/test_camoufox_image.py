@@ -559,12 +559,12 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             "        threading.Thread(target=_sever, daemon=True).start()\n"
             "        return super()._splice(a, b)\n"
             "cfx.PinningProxy = _KillingProxy\n"
-            # strace -f measurably slows Firefox's own syscalls; timeouts
-            # here are wider than a plain (untraced) fetch needs so a
-            # strace-slowed but otherwise NORMAL page load never races the
-            # outer abandonment ceiling instead of the deliberate kill.
+            # strace -f slows Firefox: once the proxy is dead, goto may end on
+            # its own nav timeout, which overshoots its value by several
+            # seconds under load -- keep nav_timeout well under
+            # fetch_timeout_seconds.
             "fetcher = cfx.CamoufoxFetcher(DomainPolicy(frozenset({'example.com'})),\n"
-            "                              nav_timeout_seconds=25, fetch_timeout_seconds=40)\n"
+            "                              nav_timeout_seconds=15, fetch_timeout_seconds=40)\n"
             "try:\n"
             "    fetcher.fetch('https://example.com/')\n"
             "    print('RESULT:ok')\n"

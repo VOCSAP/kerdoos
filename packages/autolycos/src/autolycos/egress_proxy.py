@@ -147,6 +147,12 @@ class PinningProxy:
     def stop(self) -> None:
         self._stopping.set()
         if self._srv is not None:
+            # On Linux, close() alone does not wake a thread blocked in
+            # accept() on that socket; shutdown() does (accept fails EINVAL).
+            try:
+                self._srv.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 self._srv.close()
             except OSError:
