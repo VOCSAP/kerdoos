@@ -397,13 +397,15 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         # pin flag; the proxy does the pinning at the network layer).
         proxy_server = chromium.launch_kwargs["proxy"]["server"]
         self.assertTrue(proxy_server.startswith("http://127.0.0.1:"))
-        self.assertEqual(len(chromium.launch_kwargs["args"]), 2)
+        self.assertEqual(len(chromium.launch_kwargs["args"]), 3)
         self.assertTrue(
             chromium.launch_kwargs["args"][0].startswith(
                 browser._LAUNCH_ID_ARG_PREFIX))
         self.assertEqual(
             chromium.launch_kwargs["args"][1],
             browser._WEBRTC_IP_HANDLING_POLICY)
+        self.assertEqual(
+            chromium.launch_kwargs["args"][2], browser._BLOCK_POPUPS_ARG)
         for a in chromium.launch_kwargs["args"]:
             self.assertNotIn("--host-resolver-rules", a)
         # Phase 2b: JS stealth was applied to the rendered page.
@@ -512,6 +514,52 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         page = _FakePage("blocked", 503)
         result, _, _ = self._run(page)
         self.assertTrue(result.challenged)
+
+
+class _PopupOpeningPage(_FakePage):
+    """Its navigation calls window.open `popups` times. Chromium honours the
+    block switch by refusing the popup outright, so a refused popup never
+    gets a renderer."""
+
+    def __init__(self, chromium: _FakeChromium, popups: int) -> None:
+        super().__init__("<html>" + "x" * 5000, 200)
+        self._chromium = chromium
+        self._popups = popups
+        self.opened_popups = 0
+        self.refused_popups = 0
+
+    def goto(self, url, wait_until, timeout):  # noqa: ANN001
+        launch_args = self._chromium.launch_kwargs["args"]
+        for _ in range(self._popups):
+            if browser._BLOCK_POPUPS_ARG in launch_args:
+                self.refused_popups += 1
+            else:
+                self.opened_popups += 1
+        return super().goto(url, wait_until, timeout)
+
+
+class PopupBlockingTest(unittest.TestCase):
+    def test_page_opening_popups_gets_them_refused_and_gate_released(
+            self) -> None:
+        chromium = _FakeChromium(None)
+        page = _PopupOpeningPage(chromium, popups=8)
+        chromium._browser = _FakeBrowser(page)
+        fake_sync_playwright = lambda: _FakePW(chromium)  # noqa: E731
+        gate = BrowserGate(max_concurrent=1)
+        with mock.patch.object(safety.socket, "getaddrinfo",
+                               return_value=_addrinfo("104.18.0.1")):
+            with mock.patch.object(browser, "_load_playwright",
+                                   return_value=fake_sync_playwright), \
+                 mock.patch.object(browser, "_load_stealth",
+                                   return_value=_FakeStealth):
+                result = browser.BrowserFetcher(_POLICY, gate=gate).fetch(
+                    "https://mercadolivre.com.br/p/MLB1")
+        self.assertEqual(result.status, 200)
+        self.assertEqual(page.opened_popups, 0)
+        self.assertEqual(page.refused_popups, 8)
+        self.assertTrue(gate._semaphore.acquire(timeout=1.0),
+                        "gate slot was not released")
+        gate._semaphore.release()
 
 
 class SubResourceGateTest(unittest.TestCase):

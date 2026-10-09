@@ -393,5 +393,44 @@ class BrowserRendererCrashImageTest(_BrowserImageTestCase):
         self.assertEqual(result.status, 200)
 
 
+class BrowserPopupImageTest(_BrowserImageTestCase):
+    def test_page_opening_eight_popups_gets_them_refused_and_releases_gate(
+            self) -> None:
+        def _route(route) -> None:
+            if route.request.url == "https://example.com/popups":
+                route.fulfill(
+                    status=200, content_type="text/html",
+                    body=("<html><head><title>pending</title></head><body>"
+                          "<script>let refused = 0;"
+                          "for (let i = 0; i < 8; i++) {"
+                          " if (window.open('https://example.com/popup' + i)"
+                          " === null) refused++; }"
+                          "document.title = 'refused:' + refused;"
+                          "</script></body></html>"))
+            else:
+                route.fulfill(
+                    status=200, content_type="text/html",
+                    body="<html><body>popup</body></html>")
+
+        import psutil
+
+        gate = BrowserGate(max_concurrent=1)
+        before = {p.pid for p in psutil.Process().children(recursive=True)}
+        result = self._fetch(
+            "popups", _route, fetch_timeout_seconds=20.0, gate=gate)
+        self.assertEqual(result.status, 200)
+        self.assertIn("<title>refused:8</title>", result.html)
+
+        self.assertTrue(gate._semaphore.acquire(timeout=1.0),
+                        "gate slot was not released")
+        gate._semaphore.release()
+
+        time.sleep(1.0)
+        leftover = [
+            process for process in psutil.Process().children(recursive=True)
+            if process.pid not in before and process.is_running()]
+        self.assertEqual(leftover, [], f"lingering process(es): {leftover}")
+
+
 if __name__ == "__main__":
     unittest.main()
