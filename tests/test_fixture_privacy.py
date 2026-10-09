@@ -66,10 +66,22 @@ HEX_ID_VALUE = re.compile(r"[0-9A-Fa-f-]{16,}")
 # pathological `%25` chain cannot spin.
 MAX_UNQUOTE_PASSES = 4
 
-ALNUM_ID_KEYS = ("pd_rd_r", "pf_rd_r", "pd_rd_wg")
+# Amazon ids are short mixed-case strings (`pd_rd_wg=ve0lC`): counting
+# non-zero characters lets a real value that holds a zero through, so these
+# keys are checked against the known scrubbed shapes instead, and anything
+# else is reported.
+STRICT_ID_KEYS = ("pd_rd_r", "pf_rd_r", "pd_rd_wg", "ue_id", "ue_sid")
+SCRUBBED_ID = re.compile(r"0+|00000000-0000-4000-8000-0*\d{1,4}")
 
-# `data-session-id="..."` style attributes (the `data-` prefix is optional).
+# `data-session-id="..."` style attributes (the `data-` prefix is optional)
+# and `<input id="session-id" value="...">`.
 ATTRIBUTE_IDENTIFIER_KEYS = ("session-id",)
+
+# Quoted JS assignments: `ue_sid = '...'`.
+ASSIGNMENT_IDENTIFIER_KEYS = ("ue_sid", "ue_id")
+
+# Widget class tokens: `class="... pd_rd_wg-XXXXX"`.
+CLASS_IDENTIFIER_KEYS = ("pd_rd_r", "pf_rd_r", "pd_rd_wg")
 
 LATLON_KEYS = ("latitude", "longitude", "lat", "lng", "lon", "long")
 
@@ -105,10 +117,6 @@ def _nonzero_hex_count(value: str) -> int:
     return sum(1 for c in value.lower() if c in "123456789abcdef")
 
 
-def _nonzero_alnum_count(value: str) -> int:
-    return sum(1 for c in value if c.isalnum() and c != "0")
-
-
 def _is_zeroed(value: str) -> bool:
     return bool(re.fullmatch(r"0+", value))
 
@@ -123,15 +131,14 @@ def _is_placeholder_value(value: str) -> bool:
 
 
 def _is_unscrubbed_id(key: str, value: str) -> bool:
+    if not value or _is_placeholder_value(value):
+        return False
+    if key in STRICT_ID_KEYS:
+        return not SCRUBBED_ID.fullmatch(value)
     # a scrubbed id keeps at most the fixed UUID version/variant nibbles plus
-    # an index. Amazon's request ids are mixed-case alphanumeric
-    # (`pd_rd_wg=veWlC`), so only they count every alphanumeric; the others
-    # count hex digits, which keeps ML's `<scrubbed uuid>-n` cookie suffix
-    # clean.
-    count = (_nonzero_alnum_count if key in ALNUM_ID_KEYS
-             else _nonzero_hex_count)
-    return (bool(value) and not _is_placeholder_value(value)
-            and count(value) > 4)
+    # an index. Hex digits only (not every alphanumeric): ML's scrubbed
+    # `_d2id` cookie carries a `-n` suffix that must stay clean.
+    return _nonzero_hex_count(value) > 4
 
 
 def _apply_exception(filename: str, key: str, value: str,
@@ -255,10 +262,36 @@ def _scan_view(text: str, filename: str) -> list[tuple[str, str]]:
 
     for key_name in ATTRIBUTE_IDENTIFIER_KEYS:
         pattern = (rf'(?<![A-Za-z0-9_.-])(?:data-)?{re.escape(key_name)}'
-                   r'''\s*=\s*(["'])(.*?)\1''')
+                   r'''\s*=\s*(["'])([^"'\n]*)\1''')
         for m in re.finditer(pattern, text, re.I):
             if _is_unscrubbed_id(key_name, m.group(2)):
                 _apply_exception(filename, key_name, m.group(2), violations)
+        # the id sits on the tag's `id`/`name`, the value in `value=`, in
+        # either order
+        for tag in re.finditer(r'<input\b[^>]*>', text, re.I):
+            if not re.search(
+                    rf'''\b(?:id|name)\s*=\s*["']{re.escape(key_name)}["']''',
+                    tag.group(0), re.I):
+                continue
+            for m in re.finditer(r'''\bvalue\s*=\s*(["'])([^"'\n]*)\1''',
+                                 tag.group(0), re.I):
+                if _is_unscrubbed_id(key_name, m.group(2)):
+                    _apply_exception(filename, key_name, m.group(2),
+                                     violations)
+
+    for key_name in ASSIGNMENT_IDENTIFIER_KEYS:
+        pattern = (rf'(?<![A-Za-z0-9_.-]){re.escape(key_name)}'
+                   r'''\s*=\s*(["'])([^"'\n]*)\1''')
+        for m in re.finditer(pattern, text, re.I):
+            if _is_unscrubbed_id(key_name, m.group(2)):
+                _apply_exception(filename, key_name, m.group(2), violations)
+
+    for key_name in CLASS_IDENTIFIER_KEYS:
+        pattern = (rf'(?<![A-Za-z0-9_.-]){re.escape(key_name)}-'
+                   r'([A-Za-z0-9-]+)')
+        for m in re.finditer(pattern, text, re.I):
+            if _is_unscrubbed_id(key_name, m.group(1)):
+                _apply_exception(filename, key_name, m.group(1), violations)
 
     for key_name in LATLON_KEYS:
         pattern = rf'"{re.escape(key_name)}"\s*:\s*"?(-?\d+\.\d+)"?'
@@ -447,6 +480,15 @@ class FixturePrivacyTest(unittest.TestCase):
             ("double-encoded c_uid query", 'href="/x?go=https%3A%2F%2Fy%3Fid%3D1%2526c_uid%253Da1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
             ("requestId query with a UUID value", 'href="/x?id=1&requestId=a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab"'),
             ("sessionId query with a hex value", 'href="/x?sessionId=a1b2c3d4e5f60718293a"'),
+            ("pd_rd_wg query form holding a zero", 'href="/dp/B0F4ZY4HXQ?pd_rd_wg=ve0lC"'),
+            ("session-id hidden input, value last", '<input type="hidden" id="session-id" name="session-id" value="139-1234567-1234567">'),
+            ("session-id hidden input, value first", '<input value="139-1234567-1234567" type="hidden" id="session-id" name="session-id">'),
+            ("ue_sid quoted assignment", "var ue_sid = '139-1234567-1234567',"),
+            ("ue_id quoted assignment", "var ue_id = '7PK4BN8S3Q2JW0V6X1ZD',"),
+            ("ue_id quoted assignment, few hex digits", "var ue_id = 'ZXQWTYLM0KJHRPSVGUIO',"),
+            ("pd_rd_wg class token", '<div class="celwidget pd_rd_w-xf3rv pd_rd_wg-ve0lC">'),
+            ("pd_rd_r class token", '<div class="celwidget pd_rd_r-a1b2c3d4-e5f6-4a7b-8c9d-0123456789ab pd_rd_wg-00000">'),
+            ("pf_rd_r class token", '<div class="celwidget pf_rd_p-e33c387e pf_rd_r-7PK4BN8S3Q2JW0V6X1ZD">'),
         ]
         for label, snippet in witnesses:
             with self.subTest(motif=label):
@@ -485,6 +527,15 @@ class FixturePrivacyTest(unittest.TestCase):
                     "double-encoded c_uid query": "c_uid",
                     "requestId query with a UUID value": "requestId",
                     "sessionId query with a hex value": "sessionId",
+                    "pd_rd_wg query form holding a zero": "pd_rd_wg",
+                    "session-id hidden input, value last": "session-id",
+                    "session-id hidden input, value first": "session-id",
+                    "ue_sid quoted assignment": "ue_sid",
+                    "ue_id quoted assignment": "ue_id",
+                    "ue_id quoted assignment, few hex digits": "ue_id",
+                    "pd_rd_wg class token": "pd_rd_wg",
+                    "pd_rd_r class token": "pd_rd_r",
+                    "pf_rd_r class token": "pf_rd_r",
                 }.get(label, label)
                 self.assertIn(
                     expected_key, keys,
@@ -533,6 +584,17 @@ class FixturePrivacyTest(unittest.TestCase):
             ("JS variable assignment of sessionId", 'var sessionId=cachedSession123abc;'),
             ("JS variable assignment of requestId", 'var requestId=a.requestId||b.ue_id,'),
             ("dot before a query key, property assignment", 'p.d2id=cachedDeviceId;'),
+            ("zeroed session-id hidden input, value last", '<input type="hidden" id="session-id" name="session-id" value="000-0000000-0000000">'),
+            ("zeroed session-id hidden input, value first", '<input value="000-0000000-0000000" type="hidden" id="session-id" name="session-id">'),
+            ("hidden input of another field", '<input type="hidden" id="csrf" name="csrf" value="139-1234567-1234567">'),
+            ("zeroed ue_sid quoted assignment", "    ue_sid = '000-0000000-0000000',"),
+            ("zeroed ue_id quoted assignment", "    var ue_id = '00000000000000000000',"),
+            ("ue_id property chain, not a quoted assignment", 'if(l){d.ue_id=a.id=a.rid=l;if("device"===c)a.oid=I(l)}'),
+            ("ue_sid property read", 'u={sessionId:d.ue_sid||"",obfuscatedMarketplaceId:d.ue_mid||""}'),
+            ("zeroed Amazon class tokens", '<div class="celwidget pd_rd_w-xf3rv pd_rd_r-00000000000000000000 pd_rd_wg-00000 a-size-small">'),
+            ("zeroed pf_rd_r class token", '<div class="celwidget pf_rd_p-e33c387e-3b13-4ac6 pf_rd_r-00000000000000000000" cel_widget_id="f1db08f0">'),
+            ("neutralised UUID pd_rd_r class token", '<div class="pd_rd_r-00000000-0000-4000-8000-000000000023">'),
+            ("neutralised UUID pd_rd_r with a 4-digit index", 'href="/dp/B0F4ZY4HXQ?pd_rd_r=00000000-0000-4000-8000-000000001234"'),
         ]
         for label, snippet in witnesses:
             with self.subTest(case=label):
