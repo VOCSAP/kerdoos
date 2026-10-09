@@ -84,10 +84,12 @@ docs/adr/            architecture decision records (authoritative)
     sh -c "cd /tmp && python3 -m pytest tests/image/test_camoufox_image.py -k StraceNetworkAudit"
   ```
   A few proofs need real outbound network to github.com (binary provenance
-  check), separate from the browser's own SSRF-pinned proxy:
+  check), separate from the browser's own SSRF-pinned proxy. The Dockerfile
+  is mounted too: the provenance proof reads the `CAMOUFOX_SHA256` pin from it:
   ```bash
   docker run --rm -e KERDOOS_REQUIRE_IMAGE_TESTS=1 -e KERDOOS_IMAGE_ONLINE=1 \
-    -v "$(pwd)/tests:/tmp/tests:ro" kerdoos:autonomous \
+    -v "$(pwd)/tests:/tmp/tests:ro" -v "$(pwd)/Dockerfile:/tmp/Dockerfile:ro" \
+    kerdoos:autonomous \
     sh -c "cd /tmp && python3 -m pytest tests/image/test_camoufox_image.py -k BinaryProvenance"
   ```
   Each `KERDOOS_IMAGE_*` marker is the caller's promise that the matching
