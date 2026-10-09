@@ -766,6 +766,14 @@ class _HangingThenUnblockedBrowser:
         pass
 
 
+def _shorten_kill_wait(case: unittest.TestCase) -> None:
+    """A fetch thread that never exits costs the full _KILL_WAIT_SECONDS
+    grace; these fakes need a fraction of it."""
+    patcher = mock.patch.object(browser, "_KILL_WAIT_SECONDS", 0.5)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 class BrowserFetchDeferredCleanupTest(unittest.TestCase):
     """Roadmap d8b7b8fd, lesson measured on sibling card 6521bbce: a
     deferred cleanup pass (the abandoned thread's OWN kill, running long
@@ -773,6 +781,9 @@ class BrowserFetchDeferredCleanupTest(unittest.TestCase):
     must stay scoped to its OWN marker and never touch a DIFFERENT,
     concurrent-or-later fetch's live process, even with max_concurrent=1.
     """
+
+    def setUp(self) -> None:
+        _shorten_kill_wait(self)
 
     def test_late_cleanup_from_a_previous_fetch_spares_the_next_fetch(
             self) -> None:
@@ -867,6 +878,7 @@ class BrowserFetchFreezeWiringTest(unittest.TestCase):
         with browser._abandoned_fetch_threads_lock:
             self._saved_abandoned_count = browser._abandoned_fetch_thread_count
             browser._abandoned_fetch_thread_count = 0
+        _shorten_kill_wait(self)
 
     def tearDown(self) -> None:
         with browser._abandoned_fetch_threads_lock:
@@ -1171,6 +1183,7 @@ class BrowserAbandonedCeilingReleaseTest(unittest.TestCase):
         with browser._abandoned_fetch_threads_lock:
             self._saved_abandoned_count = browser._abandoned_fetch_thread_count
             browser._abandoned_fetch_thread_count = 0
+        _shorten_kill_wait(self)
 
     def tearDown(self) -> None:
         with browser._abandoned_fetch_threads_lock:
@@ -1390,6 +1403,7 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
             browser._abandoned_fetch_thread_count = 0
         self.unblock = threading.Event()
         self.addCleanup(self.unblock.set)
+        _shorten_kill_wait(self)
 
     def tearDown(self) -> None:
         with browser._abandoned_fetch_threads_lock:
@@ -1407,10 +1421,10 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
         fake_sync_playwright = lambda: _FakePW(_FakeChromium(browser_obj))  # noqa: E731
         chromium, driver = tree
 
-        def _launch_tree(marker: str) -> list:
+        def _launch_tree(marker: str) -> tuple[list, list]:
             # The driver is only reachable as the parent of a Chromium that
             # still carries the marker: once Chromium is dead, nothing is.
-            return [] if chromium.killed else [chromium, driver]
+            return ([], []) if chromium.killed else ([chromium], [driver])
 
         import psutil
         with mock.patch.object(safety.socket, "getaddrinfo",
@@ -1419,7 +1433,7 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
                                return_value=fake_sync_playwright), \
              mock.patch.object(browser, "_load_stealth",
                                return_value=_FakeStealth), \
-             mock.patch.object(browser, "_launch_process_tree",
+             mock.patch.object(browser, "_launch_tree_parts",
                                side_effect=_launch_tree), \
              mock.patch.object(psutil, "wait_procs",
                                side_effect=wait_procs or (
@@ -1446,7 +1460,9 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
     def test_crash_returns_only_once_the_fetch_thread_has_exited(self) -> None:
         chromium, driver = self._tree(chromium_unblocks=True)
         page = _CrashDuringReadPage(self.unblock)
-        with self.assertRaisesRegex(FetchError, "renderer crashed"):
+        # The grace must outlast the slow close, unlike the class default.
+        with mock.patch.object(browser, "_KILL_WAIT_SECONDS", 3.0), \
+             self.assertRaisesRegex(FetchError, "renderer crashed"):
             self._fetch(_SlowCloseBrowser(page, close_seconds=0.5),
                         (chromium, driver), fetch_timeout_seconds=20.0)
         self.assertIsNotNone(page.worker)
@@ -1567,24 +1583,100 @@ class BrowserCrashBranchCleanupTest(unittest.TestCase):
         for worker in blocked.workers:
             worker.join(timeout=_WORKER_EXIT_TIMEOUT)
 
-    def test_driver_is_told_apart_by_run_driver_not_by_its_install_path(
+
+
+# A driver stand-in (exact "run-driver" argument, install path without
+# "patchright") whose child carries the launch marker, and whose grandchild
+# is a renderer stand-in that rewrote its own argv to "run-driver". The
+# marker reaches the child through the environment so that the driver's own
+# argv never carries it.
+_DRIVER_SRC = (
+    "import os, subprocess, sys, time\n"
+    "c = subprocess.Popen([sys.executable, '-c', os.environ['KERDOOS_CHILD_SRC'],"
+    " os.environ['KERDOOS_MARKER']])\n"
+    "print(c.pid, flush=True)\n"
+    "time.sleep(60)\n")
+_MARKED_CHILD_SRC = (
+    "import subprocess, sys, time\n"
+    "r = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',"
+    " 'run-driver'])\n"
+    "print(r.pid, flush=True)\n"
+    "time.sleep(60)\n")
+
+
+def _spawn_driver_tree(marker: str) -> tuple[subprocess.Popen, int, int]:
+    """(driver, marked child pid, run-driver grandchild pid)."""
+    env = dict(os.environ, KERDOOS_CHILD_SRC=_MARKED_CHILD_SRC,
+               KERDOOS_MARKER=marker)
+    driver = subprocess.Popen(
+        [sys.executable, "-c", _DRIVER_SRC, "run-driver"],
+        stdout=subprocess.PIPE, text=True, env=env)
+    child = int(driver.stdout.readline())
+    grandchild = int(driver.stdout.readline())
+    return driver, child, grandchild
+
+
+def _is_gone(pid: int) -> bool:
+    import psutil
+
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+class LaunchTreeDriverIdentificationTest(unittest.TestCase):
+    """Through the real _launch_process_tree: the driver is the parent of
+    the marked process carrying "run-driver", whatever its install path; a
+    descendant carrying "run-driver" is still part of Chromium's tree."""
+
+    def setUp(self) -> None:
+        self.marker = f"{browser._LAUNCH_ID_ARG_PREFIX}{uuid.uuid4().hex}"
+        self.driver, self.child, self.grandchild = _spawn_driver_tree(self.marker)
+
+        def _reap() -> None:
+            import psutil
+
+            for pid in (self.grandchild, self.child):
+                with contextlib.suppress(psutil.Error):
+                    psutil.Process(pid).kill()
+            if self.driver.poll() is None:
+                self.driver.kill()
+            self.driver.wait(timeout=5)
+
+        self.addCleanup(_reap)
+
+    def test_cleanup_kills_chromium_and_its_run_driver_descendant_spares_driver(
             self) -> None:
-        """Chromium's own profile path carries "playwright"; the driver's
-        path need not carry "patchright". Only the driver's "run-driver"
-        argument identifies it."""
-        chromium = _FakeProc(
-            101, ["chrome", "--user-data-dir=/tmp/playwright_chromiumdev_profile-x",
-                  f"{browser._LAUNCH_ID_ARG_PREFIX}x"],
-            on_kill=self.unblock.set)
-        driver = _FakeProc(
-            100, ["/venv/lib/driver/node", "/venv/lib/driver/package/cli.js",
-                  "run-driver"])
-        page = _CrashDuringReadPage(self.unblock)
-        with self.assertRaisesRegex(FetchError, "renderer crashed"):
-            self._fetch(_FakeBrowser(page), (chromium, driver),
-                        fetch_timeout_seconds=20.0)
-        self.assertTrue(chromium.killed, "Chromium was taken for the driver")
-        self.assertFalse(driver.killed, "the driver was taken for Chromium")
+        finished = threading.Thread(target=lambda: None)
+        finished.start()
+        finished.join()
+        count = mock.Mock()
+        browser.BrowserFetcher._release_stuck_fetch(
+            self.marker, finished, 1.0, count, "a test")
+        self.assertTrue(_is_gone(self.child), "the marked process survived")
+        self.assertTrue(
+            _is_gone(self.grandchild),
+            "a descendant carrying run-driver was spared as if it were the driver")
+        self.assertIsNone(self.driver.poll(),
+                          "the driver was killed under a thread that had exited")
+        count.assert_not_called()
+
+    def test_escalation_reaches_a_driver_without_patchright_in_its_path(
+            self) -> None:
+        stuck = threading.Event()
+        self.addCleanup(stuck.set)
+        alive = threading.Thread(target=stuck.wait, args=(30,), daemon=True)
+        alive.start()
+        count = mock.Mock()
+        with mock.patch.object(browser, "_KILL_WAIT_SECONDS", 0.5):
+            browser.BrowserFetcher._release_stuck_fetch(
+                self.marker, alive, 0.2, count, "a test")
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.driver.wait(timeout=5)
+        self.assertIsNotNone(self.driver.poll(),
+                             "the escalation never found the driver")
+        count.assert_called_once()
 
 
 class StaticRouterBrowserLaunchTimeoutTest(unittest.TestCase):

@@ -170,12 +170,14 @@ def _process_matches_launch(proc, marker: str) -> bool:  # type: ignore[no-untyp
     return any(marker in arg for arg in cmdline)
 
 
-def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
-    """The OS process tree belonging to the fetch tagged with `marker`: the
-    Chromium process whose cmdline carries it, its parent when that parent
-    is patchright's own Node driver process (cmdline contains
-    "patchright"), and all of their descendants (zygote/renderer/gpu/
-    utility children, which do not carry the marker in their own argv).
+def _launch_tree_parts(marker: str) -> tuple[list, list]:  # type: ignore[type-arg]
+    """(Chromium side, driver) of the fetch tagged with `marker`. Chromium
+    side: the process whose cmdline carries the marker and every descendant
+    (zygote/renderer/gpu/utility children, which do not carry it). Driver:
+    only the PARENT of a marked process, and only if it carries patchright's
+    exact `run-driver` argument -- never a descendant, whose argv a
+    compromised renderer controls, and never by install path, which need
+    not say "patchright" while Chromium's profile path says "playwright".
     Only called once psutil is known importable (no ImportError guard here).
     """
     import psutil
@@ -183,32 +185,35 @@ def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
     try:
         candidates = psutil.Process(os.getpid()).children(recursive=True)
     except psutil.Error:
-        return []
+        return [], []
 
     roots = [p for p in candidates if _process_matches_launch(p, marker)]
-    for proc in list(roots):
+    drivers: dict[int, object] = {}
+    for proc in roots:
         try:
             parent = proc.parent()
+            if parent is not None and "run-driver" in parent.cmdline():
+                drivers[parent.pid] = parent
         except psutil.Error:
             continue
-        if parent is None:
-            continue
-        try:
-            parent_cmdline = " ".join(parent.cmdline())
-        except psutil.Error:
-            continue
-        if "patchright" in parent_cmdline:
-            roots.append(parent)
 
-    tree: dict[int, object] = {}
-    for root in roots:
-        tree[root.pid] = root
+    chromium: dict[int, object] = {}
+    for root in roots + list(drivers.values()):
+        if root.pid not in drivers:
+            chromium[root.pid] = root
         try:
             for descendant in root.children(recursive=True):
-                tree[descendant.pid] = descendant
+                if descendant.pid not in drivers:
+                    chromium[descendant.pid] = descendant
         except psutil.Error:
             continue
-    return list(tree.values())
+    return list(chromium.values()), list(drivers.values())
+
+
+def _launch_process_tree(marker: str) -> list:  # type: ignore[no-untyped-def]
+    """Every process of the fetch tagged with `marker`, driver included."""
+    chromium, driver = _launch_tree_parts(marker)
+    return chromium + driver
 
 
 def _kill_launch_processes(marker: str) -> bool:
@@ -263,20 +268,6 @@ def _kill_launch_processes(marker: str) -> bool:
             "%.1fs wait: %s", len(alive), marker, _KILL_WAIT_SECONDS,
             [(p.pid, p.name()) for p in alive])
     return not alive
-
-
-def _split_driver(procs: list) -> tuple[list, list]:  # type: ignore[type-arg]
-    """(Chromium's own processes, patchright's Node driver) of a tree. The
-    driver is told apart by its `run-driver` argument: an install path need
-    not say "patchright", and Chromium's profile path says "playwright"."""
-    chromium, driver = [], []
-    for proc in procs:
-        try:
-            is_driver = "run-driver" in proc.cmdline()
-        except Exception:  # noqa: BLE001 -- psutil.Error / race with process exit
-            is_driver = False
-        (driver if is_driver else chromium).append(proc)
-    return chromium, driver
 
 
 def _kill_and_wait(procs: list) -> bool:  # type: ignore[type-arg]
@@ -429,7 +420,7 @@ class BrowserFetcher:
             if not _kill_launch_processes(marker):
                 count_abandoned()
             return
-        chromium, driver = _split_driver(_launch_process_tree(marker))
+        chromium, driver = _launch_tree_parts(marker)
         _kill_and_wait(chromium)
         run_thread.join(timeout=grace)
         if run_thread.is_alive():
@@ -643,8 +634,8 @@ class BrowserFetcher:
                     raise FetchError("rendered document read exceeded its budget")
             if run_thread.is_alive() and _claim():
                 # The fetch budget is spent here, so the grace cannot come
-                # out of it: worst case fetch_timeout + _KILL_WAIT_SECONDS,
-                # as when this branch waited on the kill of the whole tree.
+                # out of it: up to fetch_timeout + 3 * _KILL_WAIT_SECONDS
+                # (Chromium wait, grace, driver wait).
                 self._release_stuck_fetch(
                     marker, run_thread, _KILL_WAIT_SECONDS, _count_abandoned,
                     "the fetch deadline")

@@ -1115,28 +1115,84 @@ class LivenessTest(_FrozenFetchBase):
             self._fetch_frozen(fake, BrowserGate(max_concurrent=1))
 
 
-class _FrozenUntilFirefoxDies:
-    """new_context() spawns a marked Firefox stand-in and a driver stand-in,
-    then blocks until the Firefox one is dead, as a real pending call does
-    until the driver sees its browser go. Records whether the driver was
-    still alive at that moment."""
+# A driver stand-in (exact "run-driver" argument) whose child is a marked
+# Firefox stand-in (with the real -profile path shape, which carries
+# "playwright"), whose own child rewrote its argv to "run-driver". The
+# marker reaches the child through the environment so that the driver's
+# own argv never carries it.
+_DRIVER_SRC = (
+    "import os, subprocess, sys, time\n"
+    "c = subprocess.Popen([sys.executable, '-c', os.environ['KERDOOS_CHILD_SRC'],"
+    " os.environ['KERDOOS_MARKER'], '-profile',"
+    " '/tmp/playwright_firefoxdev_profile-x'])\n"
+    "print(c.pid, flush=True)\n"
+    "time.sleep(60)\n")
+_MARKED_CHILD_SRC = (
+    "import subprocess, sys, time\n"
+    "r = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',"
+    " 'run-driver'])\n"
+    "print(r.pid, flush=True)\n"
+    "time.sleep(60)\n")
 
-    def __init__(self, marker: str, spawned: list, record: dict) -> None:
+
+def _spawn_driver_tree(marker: str) -> tuple[subprocess.Popen, int, int]:
+    """(driver, marked Firefox pid, run-driver grandchild pid)."""
+    env = dict(os.environ, KERDOOS_CHILD_SRC=_MARKED_CHILD_SRC,
+               KERDOOS_MARKER=marker)
+    driver = subprocess.Popen(
+        [sys.executable, "-c", _DRIVER_SRC, "run-driver"],
+        stdout=subprocess.PIPE, text=True, env=env)
+    return driver, int(driver.stdout.readline()), int(driver.stdout.readline())
+
+
+def _is_gone(pid: int) -> bool:
+    import psutil
+
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+class _FrozenUntilFirefoxDies:
+    """new_context() spawns the driver tree, then blocks until the marked
+    Firefox is dead, as a real pending call does until the driver sees its
+    browser go. Records what was still alive at that moment."""
+
+    def __init__(self, marker: str, trees: list, record: dict) -> None:
         self._marker = marker
-        self._spawned = spawned
+        self._trees = trees
         self._record = record
 
     def new_context(self, **kwargs):  # noqa: ANN003, ANN201
-        firefox = _sleeper(self._marker, "-profile",
-                           "/tmp/playwright_firefoxdev_profile-x")
-        driver = _sleeper("/venv/playwright/driver/node", "cli.js", "run-driver")
-        self._spawned.extend([firefox, driver])
+        import psutil
+
+        driver, firefox, content = _spawn_driver_tree(self._marker)
+        self._trees.append((driver, firefox, content))
+        # The process that actually parents the marked Firefox: on Windows a
+        # venv's python.exe is a launcher whose child is the interpreter.
+        driver_pid = psutil.Process(firefox).ppid()
         self._record["worker"] = threading.current_thread()
         deadline = time.monotonic() + 30
-        while firefox.poll() is None and time.monotonic() < deadline:
+        while not _is_gone(firefox) and time.monotonic() < deadline:
             time.sleep(0.02)
-        self._record["firefox_dead"] = firefox.poll() is not None
-        self._record["driver_alive_when_firefox_died"] = driver.poll() is None
+        self._record["firefox_dead"] = _is_gone(firefox)
+        self._record["content_dead_with_firefox"] = _is_gone(content)
+        self._record["driver_alive_when_firefox_died"] = not _is_gone(driver_pid)
+        raise RuntimeError("browser connection closed")
+
+
+class _StuckDriverTree:
+    """new_context() spawns the driver tree, then blocks until `release`."""
+
+    def __init__(self, marker: str, trees: list, release: threading.Event) -> None:
+        self._marker = marker
+        self._trees = trees
+        self._release = release
+
+    def new_context(self, **kwargs):  # noqa: ANN003, ANN201
+        self._trees.append(_spawn_driver_tree(self._marker))
+        self._release.wait(timeout=30)
         raise RuntimeError("browser connection closed")
 
 
@@ -1147,22 +1203,94 @@ class DeadlineSparesTheDriverTest(_FrozenFetchBase):
     outlives the grace. Firefox's own -profile path carries "playwright",
     so the driver is told apart by "run-driver" only."""
 
+    def setUp(self) -> None:
+        super().setUp()
+        self.trees: list = []
+
+        def _reap_trees() -> None:
+            import psutil
+
+            for driver, *pids in self.trees:
+                for pid in pids:
+                    try:
+                        psutil.Process(pid).kill()
+                    except psutil.Error:
+                        pass
+                if driver.poll() is None:
+                    driver.kill()
+                driver.wait(timeout=5)
+
+        self.addCleanup(_reap_trees)
+
     def test_deadline_kills_firefox_and_spares_the_driver_while_the_thread_lives(
             self) -> None:
         record: dict = {}
         fake = _FakeCamoufox(lambda kwargs: _FrozenUntilFirefoxDies(
-            _marker(kwargs), self.spawned, record))
+            _marker(kwargs), self.trees, record))
+        # Shared gate: no PID-novelty sweep, which on Windows would reach the
+        # venv launcher above the stand-in driver (and its job object would
+        # take the driver down); the image tests cover the single-flight case.
         with self.assertRaises(FetchError):
-            self._fetch(fake, gate=BrowserGate(max_concurrent=1),
+            self._fetch(fake, gate=BrowserGate(max_concurrent=2),
                         fetch_timeout_seconds=0.5, late_sweep_seconds=5.0)
         self.assertTrue(record.get("firefox_dead"),
                         "Firefox was not killed at the deadline")
+        self.assertTrue(
+            record.get("content_dead_with_firefox"),
+            "a Firefox descendant carrying run-driver was spared as if it "
+            "were the driver")
         self.assertTrue(
             record.get("driver_alive_when_firefox_died"),
             "the driver was killed together with Firefox, under a live "
             "fetch thread")
         self.assertFalse(record["worker"].is_alive(),
                          "fetch returned while its own fetch thread was alive")
+
+    def test_escalation_reaches_the_driver_without_a_novelty_snapshot(
+            self) -> None:
+        """Shared gate: no PID-novelty attribution, so once Firefox is dead
+        its parent driver can only be reached if captured beforehand."""
+        fake = _FakeCamoufox(lambda kwargs: _StuckDriverTree(
+            _marker(kwargs), self.trees, self.release))
+        with self.assertRaises(FetchError):
+            self._fetch(fake, gate=BrowserGate(max_concurrent=2),
+                        fetch_timeout_seconds=0.5, late_sweep_seconds=0.2)
+        driver = self.trees[0][0]
+        try:
+            driver.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        self.assertIsNotNone(driver.poll(),
+                             "the escalation never reached the driver")
+
+    def test_deadline_cleanup_survives_a_wait_that_raises(self) -> None:
+        """psutil's pidfd wait raises EINVAL once a dead process's pid has
+        been reused by another process's thread (measured on the image):
+        the first pass must not skip the second, and the caller still gets
+        its FetchError."""
+        import errno
+
+        import psutil
+
+        passes: list[int] = []
+        real_kill = cfx._kill_processes
+        test_thread = threading.current_thread()
+
+        def _traced_kill(procs):  # noqa: ANN001, ANN202
+            if threading.current_thread() is test_thread:
+                passes.append(len(procs))
+            return real_kill(procs)
+
+        def _wait_procs(procs, timeout):  # noqa: ANN001
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+        fake = self._frozen(lambda marker: (marker,))
+        with mock.patch.object(cfx, "_kill_processes", side_effect=_traced_kill), \
+             mock.patch.object(psutil, "wait_procs", side_effect=_wait_procs):
+            with self.assertRaises(FetchError):
+                self._fetch(fake, gate=BrowserGate(max_concurrent=1),
+                            fetch_timeout_seconds=0.5, late_sweep_seconds=0.2)
+        self.assertEqual(len(passes), 2, f"kill passes run: {passes}")
 
     def test_thread_stuck_past_the_grace_gets_its_driver_killed(self) -> None:
         def _enter(kwargs):  # noqa: ANN001, ANN202
