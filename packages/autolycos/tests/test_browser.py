@@ -423,6 +423,14 @@ class BrowserFetcherWiringTest(unittest.TestCase):
         with self.assertRaisesRegex(FetchError, "chrome-error://chromewebdata"):
             self._run(page)
 
+    def test_rejects_document_uri_on_another_path_of_the_same_host(
+            self) -> None:
+        page = _FakePage(
+            "<html>" + "x" * 5000, 200,
+            document_uri="https://mercadolivre.com.br/p/MLB2")
+        with self.assertRaisesRegex(FetchError, "does not match page URL"):
+            self._run(page)
+
     def test_proxy_config_subtracts_the_implicit_loopback_bypass(self) -> None:
         # Without this, Chromium sends localhost / 127.0.0.1/8 / [::1] /
         # 169.254/16 / [FE80::]/10 DIRECTLY, emitting no CONNECT, so neither

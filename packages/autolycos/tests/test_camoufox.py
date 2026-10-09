@@ -869,6 +869,28 @@ class FinalDocumentTest(_WiringBase):
             cfx.CamoufoxFetcher._check_final_document(
                 "http://www.magazineluiza.com.br/p/bab5438g3h/", _URL)
 
+    def test_page_url_with_userinfo_is_a_fetch_error(self) -> None:
+        with self.assertRaisesRegex(FetchError, "userinfo"):
+            cfx.CamoufoxFetcher._check_final_document(
+                "https://user@www.magazineluiza.com.br/p/bab5438g3h/", _URL)
+
+    def test_document_uri_with_userinfo_is_a_fetch_error(self) -> None:
+        with self.assertRaisesRegex(FetchError, "userinfo"):
+            cfx.CamoufoxFetcher._check_final_document(
+                _URL, _URL,
+                "https://user:pw@www.magazineluiza.com.br/p/bab5438g3h/")
+
+    def test_document_of_another_path_than_page_url_is_a_fetch_error(
+            self) -> None:
+        browser = _Browser(
+            document_uri="https://www.magazineluiza.com.br/p/other/")
+        with self.assertRaisesRegex(FetchError, "does not match page URL"):
+            self._fetch(_FakeCamoufox(lambda kwargs: browser))
+
+    def test_fragment_only_document_uri_difference_is_accepted(self) -> None:
+        cfx.CamoufoxFetcher._check_final_document(
+            _URL + "#page", _URL, _URL + "#document")
+
     def test_status_is_the_last_main_frame_navigation_response(self) -> None:
         browser = _Browser(document_uri=_URL + "#reviews", later_responses=[
             _Response(404), _Response(500, main_frame=False),

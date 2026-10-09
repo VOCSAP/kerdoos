@@ -526,7 +526,8 @@ class CamoufoxFetcher:
         host or to another port, would otherwise be returned as the
         requested site's answer. The port may only change to the default of
         the final scheme, so http may still upgrade to https; https never
-        falls back to http."""
+        falls back to http. Userinfo is refused, and documentURI may differ
+        from page.url only by its fragment."""
         requested = urlsplit(requested_url)
         requested_host = (requested.hostname or "").rstrip(".")
         requested_port = _effective_port(requested)
@@ -534,6 +535,8 @@ class CamoufoxFetcher:
             if url is None:
                 continue
             final = urlsplit(url)
+            if final.username is not None or final.password is not None:
+                raise FetchError("final document contains userinfo")
             final_host = (final.hostname or "").rstrip(".")
             if final.scheme not in _DEFAULT_PORT or final_host != requested_host:
                 raise FetchError(
@@ -548,6 +551,9 @@ class CamoufoxFetcher:
                 raise FetchError(
                     f"final document is on port {final_port}, not the "
                     f"requested port {requested_port}")
+        if (document_uri is not None
+                and urldefrag(final_url).url != urldefrag(document_uri).url):
+            raise FetchError("final document URI does not match page URL")
 
     def _render(self, browser, url: str) -> FetchResult:  # type: ignore[no-untyped-def]
         context = browser.new_context(service_workers="block")
