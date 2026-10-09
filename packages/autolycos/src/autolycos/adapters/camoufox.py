@@ -82,6 +82,10 @@ FROZEN_FIREFOX_PREFS: Mapping[str, bool | int | str] = MappingProxyType({
     "network.proxy.allow_hijacking_localhost": True,
     "network.proxy.no_proxies_on": "",
     "network.proxy.failover_direct": False,
+    # A channel flagged bypassProxy skips proxy resolution entirely (Remote
+    # Settings retries that way after a proxied failure); failover_direct
+    # does not govern that path.
+    "network.proxy.allow_bypass": False,
     "network.trr.mode": 5,
     "network.dns.disablePrefetch": True,
     "network.dns.disablePrefetchFromHTTPS": True,

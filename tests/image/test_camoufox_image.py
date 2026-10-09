@@ -421,6 +421,9 @@ class SplitSpawnAttributionTest(unittest.TestCase):
 # independent regex alternatives that can (and did) break independently.
 _STRACE_CONTROL_IP = "203.0.113.77"
 _STRACE_CONTROL_IPV6 = "2001:db8::77"
+# TEST-NET-2, distinct from every address above: the destination of a
+# deliberately unproxied Firefox navigation.
+_DIRECT_CONTROL_IP = "198.51.100.7"
 _STRACE_POSITIVE_CONTROL = (
     "import socket as _ctrl_socket\n"
     "_ctrl = _ctrl_socket.socket(_ctrl_socket.AF_INET, _ctrl_socket.SOCK_STREAM)\n"
@@ -538,7 +541,13 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
                 log_text.replace(_STRACE_CONTROL_IP, "")),
             "a DNS-shaped port-53 reference was observed")
 
-    def test_proxy_killed_mid_fetch_never_falls_back_to_direct(self) -> None:
+    def test_proxy_killed_mid_fetch_aborts_with_no_firefox_egress(self) -> None:
+        """The proxy dies on an already established CONNECT tunnel: the
+        navigation aborts and Firefox's own process tree makes no
+        non-loopback connection. It does not exercise
+        network.proxy.failover_direct: Firefox only fails over to DIRECT for
+        a be-conservative channel whose proxy connection itself failed
+        (nsHttpChannel::ProxyFailover), which a page navigation never is."""
         script = _STRACE_POSITIVE_CONTROL + (
             "import threading, time\n"
             "from autolycos.adapters import camoufox as cfx\n"
@@ -593,8 +602,8 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
         # python, not inside Firefox) and legitimately dials example.com's
         # real resolved IP for every accepted CONNECT -- MEASURED that
         # this shows up attributed to the python PID itself, which is the
-        # intended mechanism, not a leak. "Never falls back to direct"
-        # is a claim about FIREFOX'S OWN process tree, so egress is
+        # intended mechanism, not a leak. "No Firefox egress" is a claim
+        # about FIREFOX'S OWN process tree, so egress is
         # attributed by execve path, not scanned across the whole trace.
         all_ips = _non_loopback_egress_ips(log_text)
         self.assertIn(
@@ -630,6 +639,77 @@ class CamoufoxStraceNetworkAuditTest(_ImageGatedCase):
             firefox_egress, set(),
             f"the Firefox process itself made a non-loopback connection "
             f"after the proxy died: {firefox_egress}")
+
+    def test_proxy_refusing_from_the_start_leaves_no_firefox_egress(
+            self) -> None:
+        """The very first connection to the proxy is refused, the one
+        condition (NS_ERROR_PROXY_CONNECTION_REFUSED) under which Firefox
+        consults its proxy failover at all: Firefox's own process tree must
+        still make no non-loopback connection. A second, deliberately
+        unproxied launch navigating to a TEST-NET-2 literal is the positive
+        control that the attribution would see such a connection."""
+        script = _STRACE_POSITIVE_CONTROL + (
+            "from autolycos.adapters import camoufox as cfx\n"
+            "from autolycos.egress_proxy import PinningProxy\n"
+            "from autolycos.safety import DomainPolicy\n"
+            "from autolycos.errors import FetchError\n"
+            "class _RefusingProxy(PinningProxy):\n"
+            "    def start(self):\n"
+            "        url = super().start()\n"
+            "        self.stop()\n"
+            "        return url\n"
+            "cfx.PinningProxy = _RefusingProxy\n"
+            "fetcher = cfx.CamoufoxFetcher(DomainPolicy(frozenset({'example.com'})),\n"
+            "                              nav_timeout_seconds=15, fetch_timeout_seconds=40)\n"
+            "try:\n"
+            "    fetcher.fetch('https://example.com/')\n"
+            "    print('RESULT:ok')\n"
+            "except FetchError as exc:\n"
+            "    print('RESULT:FetchError:' + str(exc))\n"
+            "except Exception as exc:\n"
+            "    print('RESULT:other:' + type(exc).__name__ + ':' + str(exc))\n"
+            "camoufox_cls, default_addons = cfx._load_camoufox()\n"
+            "upstream = {a.name: a for a in default_addons}\n"
+            "kwargs = dict(\n"
+            "    headless=True, executable_path=cfx.CAMOUFOX_EXECUTABLE_PATH,\n"
+            "    ff_version=cfx._ready_firefox_major(\n"
+            "        cfx.CAMOUFOX_EXECUTABLE_PATH, cfx.CAMOUFOX_BROWSER_VERSION),\n"
+            "    i_know_what_im_doing=True, geoip=False,\n"
+            "    exclude_addons=[upstream[n] for n in cfx._EXCLUDED_DEFAULT_ADDONS\n"
+            "                    if n in upstream],\n"
+            "    firefox_user_prefs=cfx.merged_firefox_prefs(),\n"
+            "    timeout=cfx.CAMOUFOX_LAUNCH_TIMEOUT_SECONDS * 1000)\n"
+            "with camoufox_cls(**kwargs) as browser:\n"
+            "    page = browser.new_context().new_page()\n"
+            "    try:\n"
+            f"        page.goto('http://{_DIRECT_CONTROL_IP}/', timeout=4000)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "print('CONTROL:done')\n"
+        )
+        stdout, log_text = _run_traced(script, timeout=90.0)
+        self.assertIn("CONTROL:done", stdout, stdout)
+        all_ips = _non_loopback_egress_ips(log_text)
+        self.assertIn(
+            _STRACE_CONTROL_IP, all_ips,
+            "positive control failed -- the instrument never saw the "
+            "deliberate IPv4 connect() to the control address")
+        firefox_pids = _firefox_process_tree_ids(log_text)
+        firefox_egress = _non_loopback_egress_ips(log_text, firefox_pids)
+        self.assertIn(
+            _DIRECT_CONTROL_IP, firefox_egress,
+            "the unproxied control launch's direct connection was not "
+            "attributed to Firefox, so a zero for the refused fetch proves "
+            f"nothing: {firefox_egress}")
+        self.assertEqual(
+            firefox_egress - {_DIRECT_CONTROL_IP}, set(),
+            "Firefox made a non-loopback connection while its proxy was "
+            f"refusing connections: {firefox_egress}")
+        self.assertIn("RESULT:FetchError", stdout, stdout)
+        self.assertIn(
+            "NS_ERROR_PROXY_CONNECTION_REFUSED", stdout,
+            f"the proxy was not refused at connect time, so the failover "
+            f"condition was never reached: {stdout}")
 
 
 class CamoufoxAntiRebindingTest(_ImageGatedCase):
