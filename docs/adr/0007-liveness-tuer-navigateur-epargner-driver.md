@@ -2,8 +2,9 @@
 
 - **Statut** : ACCEPTED (2026-10-09, decision operateur), carte roadmap `0778a9bc`.
   PROPOSED le meme jour sous la forme « un sous-processus worker par fetch »
-  (commit `8def026`), rejetee apres mesures.
-- **Amende** : ADR 0002 Decision 1 (contrat du plafond d'abandon de d8b7b8fd,
+  (commit « ADR 0007 PROPOSED, un sous-processus worker par fetch pour les tiers
+  navigateur »), rejetee apres mesures.
+- **Amende** : ADR 0002 Decision 2 (contrat du plafond d'abandon de d8b7b8fd,
   renverse, voir D3) ; ADR 0004 Decision 5 (plafond camoufox, inchange en sens,
   confirme).
 - **Livree par** : cartes `963a777e` (branche crash du tier browser, `main`
@@ -23,7 +24,8 @@ borne par un `join(timeout=fetch_timeout_seconds)` externe, parce que l'API sync
 Playwright n'est utilisable que depuis le thread qui a ouvert `sync_playwright()`
 (MESURE, d8b7b8fd).
 
-Fait mesure (Kleos #21229, #21230, image `a06a916`) : si le driver Node de
+Fait mesure (Kleos #21229, dont la conclusion camoufox est infirmee par T-c
+(#21246) ; #21230 ; image `a06a916`) : si le driver Node de
 Playwright est tue pendant que ce thread est dans un appel sync, le thread ne sort
 jamais. Il boucle dans `_sync_base.py:91-92` (`while not task.done():
 self._dispatcher_fiber.switch()`), brule environ un coeur, tient le GIL et son
@@ -91,7 +93,8 @@ d8b7b8fd ne comptait qu'un kill non confirme (le thread, sans ressource OS, ne
 comptait pas). Desormais **un thread vivant apres la grace compte**, jusqu'a sa
 sortie ou, s'il ne sort jamais, jusqu'au redemarrage du processus : le risque
 compte est le thread lui-meme (coeur, GIL, proxy), pas un processus. Le refus au
-plafond reste une `FetchError` journalisee en ERROR, qui nomme cette permanence.
+plafond reste une `FetchError` journalisee en ERROR, qui nomme cette permanence
+(tier browser).
 Camoufox comptait deja tout abandon jusqu'a la sortie du thread : inchange.
 
 ### D4 -- Tenue de porte, pire cas
