@@ -50,7 +50,7 @@ _WEBRTC_IP_HANDLING_POLICY_NAMES = (
     "--force-webrtc-ip-handling-policy",
 )
 # Refuses window.open and every other popup before it gets a renderer:
-# about eight popups SEGV chrome-headless-shell.
+# a burst of popups can SEGV chrome-headless-shell.
 _BLOCK_POPUPS_ARG = "--block-new-web-contents"
 
 _CAPPED_HTML_JS = (
